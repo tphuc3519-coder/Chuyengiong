@@ -10,7 +10,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | Phase | Nội dung | Trạng thái |
 |---|---|---|
 | 0 | Scaffold + deploy pipeline | 🟡 code xong, chờ verify deploy thật |
-| 1 | Seed-VC + chunking | ⬜ chưa bắt đầu |
+| 1 | Seed-VC + chunking | 🟡 code xong, chờ chạy thật trên GPU |
 | 2 | Storage + job state | ⬜ |
 | 3 | Nối pipeline hoàn chỉnh | ⬜ |
 | 4 | Frontend | ⬜ |
@@ -21,9 +21,11 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 
 ```
 modal_app/
-├── app.py      # Modal App, Volumes, Dict, images — nguồn duy nhất cho phần stateful
-└── api.py      # FastAPI ASGI app; Phase 0 chỉ có /health
-tests/          # chạy bằng pytest, không cần Modal credentials
+├── app.py          # Modal App, Volumes, Dict, images — nguồn duy nhất cho phần stateful
+├── api.py          # FastAPI ASGI app; Phase 0 chỉ có /health
+├── audio_utils.py  # chunk theo silence, crossfade, validate — numpy thuần, test được
+└── conversion.py   # Seed-VC trên GPU: VoiceConverter (@app.cls)
+tests/          # chạy bằng pytest, không cần Modal credentials và không cần GPU
 .github/workflows/
 ├── ci.yml            # ruff + pytest trên mọi push/PR
 └── deploy-modal.yml  # modal deploy khi main đổi
@@ -68,8 +70,51 @@ curl https://<workspace>--voice-convert-api.modal.run/health
 > dưới dạng một ASGI app duy nhất tên `api`, nên `/submit`, `/status`, `/download`
 > ở Phase 3 dùng chung một URL gốc thay vì mỗi cái một domain.
 
-## Trước khi code Phase 1
+## Phase 1 — Seed-VC
 
-Seed-VC đổi API giữa các version. Đọc `README.md` + `requirements.txt` của
-[`Plachtaa/seed-vc`](https://github.com/Plachtaa/seed-vc) và pin về một commit SHA
-cụ thể trước khi viết `conversion.py` — xem mục cảnh báo trong plan.
+`modal_app/conversion.py` port từ [`Plachtaa/seed-vc`](https://github.com/Plachtaa/seed-vc),
+**pin ở commit `51383ef`** (không dùng `main`). Phần load model dùng lại nguyên
+`inference.load_models` của repo gốc; phần chuyển đổi từng chunk là port của thân
+`inference.main`, tách ra để reference chỉ encode một lần.
+
+Chạy thử standalone (cần Modal credentials + GPU):
+
+```bash
+modal run -m modal_app.conversion --source song.mp3 --reference voice.wav \
+  --mode singing --semitone-shift 0
+```
+
+### Checkpoint theo mode
+
+| Mode | Checkpoint | SR | Content encoder |
+|---|---|---|---|
+| `singing` | seed-uvit-whisper-base (F0 conditioned) | 44100 | Whisper-small |
+| `speech` | seed-uvit-whisper-small-wavenet | 22050 | Whisper-small |
+
+Cả hai đều dùng Whisper-small nên phủ ~99 ngôn ngữ — **không** đổi sang checkpoint
+`xlsr tiny` chỉ vì nó nhanh hơn.
+
+### Ba chỗ khác plan, cố ý
+
+1. **`mode` là class parameter, không phải tham số của `convert()`.** Hai mode dùng
+   checkpoint, sample rate và vocoder khác nhau; `VoiceConverter(mode="singing")` để
+   `@modal.enter()` load đúng một bộ model và giữ container ấm riêng cho từng mode.
+   Phase 3 gọi `VoiceConverter(mode="singing").convert.remote(...)`.
+2. **Reference cắt ở 20s, không phải 30s.** Seed-VC nhét cả source lẫn reference vào
+   *một* context window 30s (`max_context_window` trong `inference.py`), nên reference
+   30s sẽ không còn chỗ cho source. 20s để lại 10s source mỗi forward pass.
+3. **Không cài nguyên `requirements.txt` của seed-vc.** Bỏ 3 dòng torch nightly
+   (`--index-url`), bỏ gradio/FreeSimpleGUI/sounddevice (GUI) và
+   jiwer/modelscope/funasr/resemblyzer (eval + training). Danh sách còn lại giữ
+   nguyên pin của upstream — xem `SEED_VC_REQUIREMENTS`.
+
+### Còn phải verify bằng tai và bằng GPU
+
+Test trong `tests/` chỉ phủ phần logic thuần (chunk, crossfade, validate). Các mục
+acceptance còn lại của Phase 1 trong plan cần file audio thật:
+
+- [ ] file 8 phút chạy xong không OOM
+- [ ] điểm nối chunk không click/pop, không hụt âm lượng
+- [ ] tone nhất quán từ đầu đến cuối bài
+- [ ] 4 ngôn ngữ khác họ chữ viết + cross-lingual (giọng Việt · bài Anh)
+- [ ] lần gọi thứ hai nhanh hơn rõ rệt (container ấm), weights không tải lại
