@@ -15,7 +15,8 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 3 | Nối pipeline hoàn chỉnh | 🟡 code xong, chờ chạy end-to-end thật |
 | 4 | Frontend | 🟡 code xong, chờ test trên iOS Safari thật |
 | 5 | Pitch auto-detect | 🟡 code xong, acceptance §7 pass bằng tone tổng hợp |
-| 6 | Consent gate & an toàn | 🟡 code xong, còn watermark là việc trước khi mở public |
+| 6 | Consent gate & an toàn | 🟡 code xong, chờ verify watermark trên hạ tầng thật |
+| 7 | Audio watermark (§8 "cân nhắc thêm") | 🟡 code xong, chờ chạy checkpoint thật |
 
 ## Cấu trúc
 
@@ -544,9 +545,141 @@ trang nói thẳng là chưa công bố — không in link chết. Vì thế `/t
 
 ### Còn lại trước khi mở public
 
-- [ ] audio watermark — plan §8 gọi là "cân nhắc thêm", không bắt buộc ở MVP.
-      AudioSeal (MIT) là lựa chọn plan nêu; chỗ nhét là `mixing.py`, ngay trước
-      bước encode mp3, cùng chỗ đang gắn metadata.
+- [x] audio watermark — làm ở Phase 7 bên dưới, `modal_app/watermark.py`
 - [ ] điền `CONTACT_EMAIL` trên Vercel và rà lại ngày "cập nhật" của trang terms
 - [ ] nếu thêm preset: 4–6 clip tự thu hoặc có licence rõ ràng
       (`web/public/presets/README.md`)
+
+---
+
+## Phase 7 — Audio watermark
+
+Plan §8 xếp mục này vào "cân nhắc thêm": không bắt buộc ở MVP, nhưng **nên thêm
+trước khi mở public**. Đây là mục đó. [AudioSeal](https://github.com/facebookresearch/audioseal)
+của Meta (MIT), checkpoint `audioseal_wm_16bits`, nhúng một message 16 bit không
+nghe thấy được và sống sót qua encode mp3.
+
+Nó bù đúng chỗ hai tính năng an toàn kia hụt:
+
+| | Chứng minh được gì | Hụt ở đâu |
+|---|---|---|
+| metadata `AI-generated` | file này do AI sinh | mất sạch sau lần re-encode đầu tiên |
+| audit trail | *ta* đã chạy job nào, lúc nào | không nói gì về một file người khác cầm tới |
+| **watermark** | **file này ra từ deployment này** | cần model để đọc |
+
+Ba cái cộng lại mới trả lời được câu hỏi thật sự của một khiếu nại: "file này có
+phải các anh làm không". Tra bằng:
+
+```bash
+modal run -m modal_app.watermark --path suspect.mp3
+```
+
+```json
+{"watermarked": true, "ours": true, "probability": 0.9861, "matching_bits": 16,
+ "message": 51113, "expected_message": 51113, "seconds": 184.2}
+```
+
+### Model chỉ chạy 16kHz — và không tự resample nữa
+
+Đây là rủi ro kiểu "risk #1" của plan §10, lần này ở AudioSeal thay vì Seed-VC.
+Bản 0.2 **bỏ** resample nội bộ; đọc thẳng trong `models.py` của repo:
+
+> Starting from AudioSeal 0.2+, audio is not resampled internally to 16kHz or
+> some predefined sample rates. The user is responsible for providing the
+> correct sample rate to the model.
+
+Đưa thẳng bài 44.1kHz vào sẽ không lỗi — nó chỉ tạo ra watermark sai và bản dò
+không tìm lại được. Nên `watermark.py` làm đúng việc bản <0.2 từng làm, nhưng
+làm ở chỗ nhìn thấy được:
+
+```
+mix 44.1kHz stereo ──► view 16kHz mono ──► AudioSeal ──► wm 16kHz mono
+        │                                                     │
+        │                                              resample lên 44.1k
+        ▼                                                     ▼
+   cộng vào cả hai kênh ◄─────────────────────────────────────┘
+```
+
+Nhạc **không** bị downsample. Nó chỉ được cộng thêm một tín hiệu giới hạn dưới
+8kHz. Bản dò cũng downmix về 16kHz mono nên tìm lại đúng cái đã cộng vào.
+
+`resample()` đi qua ffmpeg (wav round trip) chứ không nội suy tuyến tính, và
+**chuẩn hoá tín hiệu lên full scale trước khi round trip rồi trả lại thang sau**
+— watermark nằm khoảng −45 dBFS, round trip 16 bit ở đúng thang của nó sẽ ném nó
+xuống sát sàn lượng tử. Phép nhân/chia này tuyến tính tuyệt đối nên không mất gì.
+
+### Ba chỗ khác plan, cố ý
+
+1. **Chạy trong container CPU riêng, không phải trong `mixing.py`.** Plan nói
+   "chỗ nhét là `mixing.py`" và về *thứ tự* thì đúng thế — nhưng AudioSeal cần
+   torch, còn `mixing.py` cố tình không có dependency nào ngoài ffmpeg (đó là lý
+   do container separation dùng lại được `sum_stems`). Nên `mix()`/`to_mp3()`
+   nhận một **callable** `watermark`, gọi sau `loudnorm` và trước encode mp3.
+   Model nằm sau callable đó, ở `Watermarker` — CPU 4 core, không GPU.
+
+   Đổi lại: CI test được toàn bộ đường đi bằng một callable giả, không cần torch.
+
+2. **Sau `loudnorm`, không phải trước.** `loudnorm` có gain và limiter; watermark
+   cộng vào trước đó sẽ bị cả hai chỉnh lại thang. Vì thế encode mp3 tách thành
+   một pass ffmpeg riêng — kể cả khi không watermark, để tắt `WATERMARK` không
+   đẩy job sang một đường code khác với đường được test.
+
+3. **Chunk 30s, ghép bằng fade tuyến tính.** Cùng lý do Phase 1 phải chunk: một
+   forward pass cho bài 8 phút ngốn hàng GB trong stack SEANet. Khác Phase 1 ở
+   chỗ fade: `audio_utils` dùng equal-power vì hai mép mối nối là cùng đoạn audio
+   qua diffusion hai lần nên lệch pha; ở đây hai mép là watermark của **cùng**
+   đoạn audio nên tương quan — equal-power sẽ *nhô* lên ở mối nối, tuyến tính
+   mới giữ phẳng. Có test cho đúng tính chất đó.
+
+### Message là id của deployment, không phải mã job
+
+16 bit không chứa nổi một job id 128 bit. `WATERMARK_MESSAGE` chỉ tách "ra từ
+deployment này" khỏi "ra từ chỗ khác" và khỏi dương tính giả — audit trail mới là
+thứ map file về job. Giá trị chọn có bit trộn (không phải `0x0000`/`0xFFFF`), vì
+file không watermark hay decode ra đúng hai mẫu đó.
+
+### Bật/tắt, và tại sao hỏng là hỏng to
+
+`WATERMARK` (env, `app.CONFIG_KEYS`) — **mặc định bật**, đặt `0`/`false`/`no`/`off`
+để tắt. Không có trạng thái thứ ba: watermark bật mà lỗi thì **job fail**. Ship
+một file *không* watermark trong khi log ghi là có thì tệ hơn hẳn không ship gì.
+
+Cờ được chốt **lúc tạo job** (`clean_params`) chứ không lúc mix, nên `params` và
+dòng audit `done` nói đúng cái đã làm với file đó, không phải cái config đang nói
+một tuần sau. Nó không phải tuỳ chọn của client — client gửi lên cũng bị bỏ qua.
+
+Watermark bài dài mất khoảng một phút CPU nằm gọn trong bước `mixing`, nên
+`pipeline._watermark` đẩy progress lên 85 khi đi qua — plan §6 đòi thanh tiến
+trình không đứng im quá 20 giây, và đây là chỗ duy nhất ranh giới của bước không
+tự cho ra một mốc.
+
+### Sửa kèm: mix đang bị bóp về mono
+
+Test stereo của watermark lôi ra một lỗi có sẵn **từ Phase 3**: `amix` thương
+lượng một channel layout chung cho mọi input và chọn cái *hẹp nhất*. Vocal từ
+Seed-VC luôn mono (`encode_wav` ép thế), nên mọi bài hát ship ra đều bị fold
+instrumental stereo xuống mono — mất hẳn stereo image của nhạc nền.
+
+Sửa bằng `pan=stereo|c0=c0|c1=c0` trên vocal trước khi `amix`. Dùng `pan` chứ
+không phải upmix `aformat` vì ffmpeg khi mono→stereo áp mức centre mix −3 dB
+(đo được: hệ số 0.707), tức là sẽ lặng lẽ dìm vocal xuống trong lúc sửa layout.
+
+Lưu ý khi nghe lại: cân bằng vocal/nhạc **đổi** so với bản cũ. Trước đây
+instrumental bị downmix về mono (−3 dB công suất) rồi mới cộng vocal; giờ nó giữ
+nguyên mức. Đây là cân bằng đúng, và slider `vocal_gain_db` vẫn ở đó.
+
+### Còn phải verify bằng hạ tầng thật
+
+CI chạy toàn bộ phần quanh model — cờ bật/tắt, message, cửa sổ, mối nối, resample,
+layout kênh, và hợp đồng giữa `mixing` và callable — bằng ffmpeg thật và một
+callable giả. Bản thân model thì chưa: `huggingface.co` không tới được từ máy
+build, nên checkpoint chưa từng được nạp. API đã đọc từ source của
+`audioseal` 0.2.0 (`models.py`, `loader.py`, model card) chứ không đoán theo README.
+
+- [ ] `modal run -m modal_app.watermark --path <file đã convert>` → `ours: true`
+- [ ] nghe kỹ: watermark phải **không nghe thấy** trên bài thật, nhất là đoạn
+      nhạc dạo và đoạn im lặng
+- [ ] file convert xong, tải về, re-encode lại một lần nữa → vẫn `watermarked: true`
+- [ ] file **không** phải của ta → `ours: false` (kiểm tra dương tính giả)
+- [ ] đo thời gian thật của bước này trên bài 3 phút và 8 phút
+- [ ] checkpoint chỉ tải một lần: container thứ hai không tải lại (Volume chạy đúng)

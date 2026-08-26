@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import time
 
-from . import audit, jobs, storage
+from . import audit, jobs, storage, watermark
 from .app import DATA_DIR, api_image, app, data_vol
 from .audio_utils import clamp_diffusion_steps, clamp_semitone_shift
 from .mixing import clamp_gain_db
@@ -50,6 +50,11 @@ PIPELINE_TIMEOUT = 1800
 # enough to render and free of stack traces.
 MAX_ERROR_CHARS = 400
 
+# Between `mixing` (75) and `done` (100). Not a status of its own: watermarking
+# is part of producing the output file, and adding a sixth state would mean a
+# new label in the UI for a step the user has no decision to make about.
+WATERMARK_PROGRESS = 85
+
 
 def clean_params(mode: str, raw: dict | None = None) -> dict:
     """Validate and clamp everything `/submit` accepts. Pure, so tests cover it.
@@ -71,6 +76,10 @@ def clean_params(mode: str, raw: dict | None = None) -> dict:
         "diffusion_steps": clamp_diffusion_steps(raw.get("diffusion_steps") or 0, conversion_mode),
         "vocal_gain_db": clamp_gain_db(raw.get("vocal_gain_db") or 0),
         "source_ext": safe_ext(raw.get("source_ext")),
+        # Not a client setting: `WATERMARK` is deployment config, resolved once
+        # when the job is created so the record says what was actually done to
+        # this file rather than what the config happens to say later.
+        "watermark": watermark.enabled(),
     }
     if mode == "song":
         params["separation_model"] = check_model(
@@ -104,8 +113,29 @@ def _finished(
         shift=params.get("semitone_shift"),
         steps=params.get("diffusion_steps"),
         model=params.get("separation_model"),
+        watermark=params.get("watermark"),
         reason=type(exc).__name__ if exc is not None else None,
     )
+
+
+def _watermark(job_id: str, params: dict):
+    """The callable `mixing` applies between the mix and the encode, or None.
+
+    It bumps progress on the way past. Watermarking a long song is a minute of
+    CPU inside the `mixing` step, and plan §6 asks for a bar that never sits
+    still for 20 seconds; this is the only moment where the step's own
+    boundaries do not provide one.
+    """
+    if not params.get("watermark"):
+        return None
+
+    from .watermark import Watermarker
+
+    def apply(audio_wav: bytes) -> bytes:
+        jobs.update(job_id, progress=WATERMARK_PROGRESS)
+        return Watermarker().embed.remote(audio_wav)
+
+    return apply
 
 
 def _resolve_shift(job_id: str, params: dict, source: bytes, reference: bytes, mode: str) -> int:
@@ -178,7 +208,12 @@ def run_song_pipeline(job_id: str, params: dict) -> str:
         storage.put(
             job_id,
             OUTPUT,
-            mix(converted, stems[INSTRUMENTAL_STEM], vocal_gain_db=params["vocal_gain_db"]),
+            mix(
+                converted,
+                stems[INSTRUMENTAL_STEM],
+                vocal_gain_db=params["vocal_gain_db"],
+                watermark=_watermark(job_id, params),
+            ),
         )
         data_vol.commit()
 
@@ -215,7 +250,7 @@ def run_speech_pipeline(job_id: str, params: dict) -> str:
         storage.put(job_id, CONVERTED, converted)
         # The mp3 encode is cheap and needs no separate state; the bar sits at
         # `converting` until the file is on the Volume.
-        storage.put(job_id, OUTPUT, to_mp3(converted))
+        storage.put(job_id, OUTPUT, to_mp3(converted, watermark=_watermark(job_id, params)))
         data_vol.commit()
 
         jobs.update(job_id, jobs.DONE)

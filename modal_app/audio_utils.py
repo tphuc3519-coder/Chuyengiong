@@ -88,6 +88,48 @@ def decode_wav(data: bytes) -> tuple[np.ndarray, int]:
     return audio, sample_rate
 
 
+def encode_wav_channels(audio: np.ndarray, sample_rate: int) -> bytes:
+    """Interleaved float32 `(frames, channels)` in [-1, 1] -> 16-bit PCM wav.
+
+    The multi-channel counterpart of `encode_wav`, and the only reason it
+    exists is watermarking: the final mix is stereo, and a step that has to
+    read it, add something and write it back must not quietly fold it to mono
+    on the way through.
+    """
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.ndim == 1:
+        audio = audio[:, None]
+    if audio.ndim != 2 or audio.shape[1] < 1:
+        raise AudioError(f"expected (frames, channels), got shape {audio.shape}")
+    samples = np.round(np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2")
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as out:
+        out.setnchannels(audio.shape[1])
+        out.setsampwidth(2)
+        out.setframerate(sample_rate)
+        out.writeframes(samples.tobytes())
+    return buf.getvalue()
+
+
+def decode_wav_channels(data: bytes) -> tuple[np.ndarray, int]:
+    """16-bit PCM wav -> (float32 `(frames, channels)`, sample_rate).
+
+    `decode_wav` downmixes; this one keeps every channel, so a decode/encode
+    round trip through it is lossless and leaves a stereo mix stereo.
+    """
+    try:
+        with wave.open(io.BytesIO(data), "rb") as src:
+            channels = src.getnchannels()
+            sample_rate = src.getframerate()
+            if src.getsampwidth() != 2:
+                raise AudioError("only 16-bit PCM wav is supported here")
+            raw = src.readframes(src.getnframes())
+    except wave.Error as exc:
+        raise AudioError(f"not a readable wav file: {exc}") from exc
+    audio = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    return audio.reshape(-1, channels), sample_rate
+
+
 def decode_audio(data: bytes, sample_rate: int) -> np.ndarray:
     """Decode any ffmpeg-readable audio to mono float32 at `sample_rate`.
 

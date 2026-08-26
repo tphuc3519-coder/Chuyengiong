@@ -25,14 +25,16 @@ job_dict = modal.Dict.from_name("vc-jobs", create_if_missing=True)
 # Rate limit windows, keyed by a salted hash of the client address (Phase 4).
 rate_dict = modal.Dict.from_name("vc-ratelimit", create_if_missing=True)
 
-# Deployment configuration, both optional and neither of them audio.
+# Deployment configuration, all optional.
 #
 #   ALLOWED_ORIGINS  comma separated origins the browser may call from; empty
 #                    means "*", which is where this starts before a Vercel
 #                    domain exists (`api.allowed_origins`)
 #   RATE_LIMIT_SALT  makes the rate limit's client hash unguessable as well as
 #                    non-reversible (`ratelimit._salt`)
-CONFIG_KEYS = ("ALLOWED_ORIGINS", "RATE_LIMIT_SALT")
+#   WATERMARK        set to 0/false/no/off to ship unwatermarked output; empty
+#                    means on, which is the default (`watermark.enabled`)
+CONFIG_KEYS = ("ALLOWED_ORIGINS", "RATE_LIMIT_SALT", "WATERMARK")
 
 
 def config_secret() -> modal.Secret:

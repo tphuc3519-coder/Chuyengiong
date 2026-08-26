@@ -53,6 +53,7 @@ EVENTS = (SUBMIT, DONE, FAILED, DOWNLOAD, EXPIRE)
 #   model           separation model id
 #   steps           diffusion steps
 #   shift           semitones applied, measured or given
+#   watermark       whether the output carries an AudioSeal watermark
 #   seconds         wall clock of the pipeline run
 #   reason          exception *class* name on failure, never its message
 #   jobs            cleanup: directories removed
@@ -68,6 +69,7 @@ FIELDS = (
     "model",
     "steps",
     "shift",
+    "watermark",
     "seconds",
     "reason",
     "jobs",

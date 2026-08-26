@@ -219,3 +219,42 @@ def test_frame_rms_matches_manual_computation():
     audio = np.array([1.0, 1.0, 0.0, 0.0], dtype=np.float32)
     assert np.allclose(au.frame_rms(audio, 2), [1.0, 0.0])
     assert len(au.frame_rms(np.zeros(1, dtype=np.float32), 4)) == 0
+
+
+# --- multi-channel wav ----------------------------------------------------
+#
+# `encode_wav`/`decode_wav` are mono by design — everything Seed-VC touches is.
+# The watermark step is the exception: it reads the finished stereo mix, adds a
+# signal and writes it back, and must not fold it down on the way through.
+
+
+def test_a_stereo_round_trip_keeps_both_channels():
+    frames = np.stack([np.linspace(-0.5, 0.5, 100), np.linspace(0.5, -0.5, 100)], axis=1)
+    frames = frames.astype(np.float32)
+    out, rate = au.decode_wav_channels(au.encode_wav_channels(frames, 44100))
+    assert rate == 44100
+    assert out.shape == (100, 2)
+    assert np.allclose(out, frames, atol=1e-4)
+    # The two channels stayed different, which a downmix would not have.
+    assert not np.allclose(out[:, 0], out[:, 1])
+
+
+def test_mono_input_is_accepted_as_one_channel():
+    out, _ = au.decode_wav_channels(au.encode_wav_channels(np.zeros(10, dtype=np.float32), 16000))
+    assert out.shape == (10, 1)
+
+
+def test_channel_encoding_clips_rather_than_wrapping():
+    """The watermark is added on top of an already normalised mix, so the sum
+    can graze full scale. Wrapping would turn that into a click."""
+    loud = np.array([[2.0, -2.0]], dtype=np.float32)
+    out, _ = au.decode_wav_channels(au.encode_wav_channels(loud, 16000))
+    assert out[0, 0] == pytest.approx(1.0, abs=1e-3)
+    assert out[0, 1] == pytest.approx(-1.0, abs=1e-3)
+
+
+def test_a_bad_shape_is_refused():
+    with pytest.raises(au.AudioError):
+        au.encode_wav_channels(np.zeros((2, 2, 2), dtype=np.float32), 16000)
+    with pytest.raises(au.AudioError):
+        au.decode_wav_channels(b"not a wav")
