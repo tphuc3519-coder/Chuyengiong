@@ -13,7 +13,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 1 | Seed-VC + chunking | 🟡 code xong, chờ chạy thật trên GPU |
 | 2 | Storage + job state | 🟡 code xong, chờ chạy `modal run -m modal_app.verify` |
 | 3 | Nối pipeline hoàn chỉnh | 🟡 code xong, chờ chạy end-to-end thật |
-| 4 | Frontend | ⬜ |
+| 4 | Frontend | 🟡 code xong, chờ test trên iOS Safari thật |
 | 5 | Pitch auto-detect | ⬜ |
 | 6 | Consent gate | ⬜ |
 
@@ -30,11 +30,13 @@ modal_app/
 ├── pipeline.py     # orchestration: spawn + nối các bước, cập nhật job state
 ├── storage.py      # file trên Volume + cron dọn rác
 ├── jobs.py         # state machine của job, lưu trong modal.Dict
+├── ratelimit.py    # 5 job/giờ mỗi client, khoá là hash của địa chỉ
 ├── deploy.py       # target deploy duy nhất — import mọi module để đăng ký
 └── verify.py       # acceptance Phase 2 chạy trên hạ tầng thật (không cần GPU)
+web/            # Next.js 15 trên Vercel — xem web/README.md
 tests/          # chạy bằng pytest, không cần Modal credentials và không cần GPU
 .github/workflows/
-├── ci.yml            # ruff + pytest trên mọi push/PR
+├── ci.yml            # python: ruff + pytest · web: eslint + prettier + tsc + build
 └── deploy-modal.yml  # modal deploy khi main đổi
 ```
 
@@ -48,6 +50,12 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ruff check . && ruff format --check .
 pytest -q
+```
+
+Frontend chạy riêng, xem [`web/README.md`](web/README.md):
+
+```bash
+cd web && npm install && npm run dev
 ```
 
 ## Deploy
@@ -294,8 +302,87 @@ API qua `TestClient`. Các mục acceptance còn lại của Phase 3 cần deplo
 - [ ] nhạc nền không méo, vocal không chìm cũng không chói
 - [ ] job fail giữa chừng → status `failed` có message, không treo vô hạn
 - [ ] `/submit` trả về trong < 2 giây với file 7 MB
-- [ ] chưa có rate limit theo IP (plan §9) — làm cùng Phase 4
+- [x] rate limit theo IP (plan §9) — làm ở Phase 4, xem `modal_app/ratelimit.py`
 
 Validate độ dài file (reference 5–30s, nguồn ≤ 15 phút) nằm ở container GPU chứ
 không ở `/submit`: chỉ chỗ đó mới decode được audio. Nghĩa là file sai độ dài
 báo lỗi qua `status.error` sau vài giây, không phải ngay lúc submit.
+
+---
+
+## Phase 4 — Frontend
+
+Next.js 15 App Router trong [`web/`](web/), deploy trên Vercel với Root
+Directory là `web`. Một trang duy nhất, đi đúng thứ tự plan §6:
+
+```
+kiểu nội dung → file nguồn → giọng mẫu → tinh chỉnh → đồng thuận
+      → convert → tiến trình → nghe thử → tải về
+```
+
+Không routing, không state global: mọi bước hiện cùng lúc để trên màn hình điện
+thoại không có bước nào nấp sau nút "tiếp theo", và lúc chạy thì thẻ tiến trình
+thay chỗ form chứ không chuyển trang.
+
+### Đường đi của request — chỗ khác plan rõ nhất
+
+```
+trình duyệt ──POST /submit────────────────► Modal      (4–60 MB)
+            ──GET  /api/status/{id}──► Vercel ──► Modal (vài trăm byte)
+            ──GET  /download/{id}─────────────► Modal
+            ──GET  /api/config───────► Vercel
+```
+
+Plan §6 nói hai điều cùng lúc: URL Modal phải nằm trong env var chứ không
+hardcode vào client bundle, **và** file lớn phải bỏ qua Vercel mà POST thẳng lên
+Modal. Muốn POST thẳng thì trình duyệt buộc phải biết URL đó. Lối ra là phục vụ
+URL **lúc chạy** qua `/api/config` thay vì `NEXT_PUBLIC_` (vốn bị nhúng vào
+bundle lúc build) — vẫn là env var, và tiện thêm: một build dùng được cho mọi
+môi trường.
+
+### Bốn chỗ đáng chú ý
+
+1. **Upload dùng `XMLHttpRequest`, không phải `fetch`.** Lý do duy nhất: `fetch`
+   tới giờ vẫn không báo được tiến trình upload, mà file 7 MB trên mạng di động
+   không có phản hồi thì trông như treo.
+2. **Thanh tiến trình có hai pha.** Upload là pha riêng vì nó phụ thuộc đường
+   truyền của người dùng; thanh chỉ bắt đầu khi server đã nhận file thì đứng im
+   cả phút (acceptance: không đứng im quá 20 giây).
+3. **Poll fail ≠ job fail.** Mạng rớt giữa chừng thì đếm và bỏ qua tới 5 lần
+   liên tiếp — job đang chạy trên GPU 3 phút không đáng chết vì một request
+   hỏng. Nhịp poll: 2s, backoff sau 60s, chặn trên 10s, bỏ cuộc ở 15 phút, mọi
+   thứ treo trên một `AbortController` mà lúc unmount sẽ cắt.
+4. **Ghi âm viết theo iOS Safari.** `audio/mp4` chứ không phải webm, không
+   truyền `timeslice` (iOS chỉ trả data lúc `stop()`), độ dài đo bằng đồng hồ
+   (Safari trả `duration = Infinity` cho blob của MediaRecorder), `AudioContext`
+   `resume()` sau cử chỉ người dùng. Không có `MediaRecorder` thì tab tự ẩn.
+
+### Rate limit — plan §9, nợ từ Phase 3
+
+`modal_app/ratelimit.py`: 5 job/giờ cho mỗi client, cửa sổ trượt. Nằm ở backend
+chứ không ở route handler của Vercel, vì upload đi thẳng lên Modal nên frontend
+không nằm trên đường đó.
+
+Hai chi tiết cố ý:
+
+- **Không lưu địa chỉ IP.** Khoá là `sha256(salt:address)` cắt 32 ký tự. Plan §8
+  mục 5 muốn audit trail là job id + timestamp và rõ ràng *không* phải nội dung
+  người dùng; IP gần nội dung hơn là gần job id.
+- **Request bị từ chối không tốn lượt.** `/submit` đọc quota trước (read-only),
+  chỉ trừ lượt ngay trước khi spawn. Ngược lại thì gõ sai một tham số cũng mất
+  một lượt, và client hammer endpoint sẽ tự đẩy lượt kế tiếp ra xa mãi.
+
+`ALLOWED_ORIGINS` (phẩy ngăn cách) trên Modal secret khoá CORS lại khi đã có
+domain Vercel; chưa đặt thì vẫn mở `*`.
+
+### Còn phải verify bằng thiết bị thật
+
+CI chạy eslint + prettier + tsc + `next build`. Các mục acceptance của Phase 4
+cần máy thật và một deployment thật:
+
+- [ ] chạy trọn vẹn trên Safari iOS
+- [ ] ghi âm hoạt động trên iOS Safari
+- [ ] file 7 MB upload thành công
+- [ ] progress bar không đứng im quá 20 giây
+- [ ] chưa có preset giọng nào (`web/public/presets/index.json` rỗng) — cần 4–6
+      clip tự thu hoặc có licence rõ ràng, plan §8 mục 4

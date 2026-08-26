@@ -20,6 +20,8 @@ model_vol = modal.Volume.from_name("vc-models", create_if_missing=True)
 data_vol = modal.Volume.from_name("vc-data", create_if_missing=True)
 # Job state machine records, keyed by job id (Phase 2).
 job_dict = modal.Dict.from_name("vc-jobs", create_if_missing=True)
+# Rate limit windows, keyed by a salted hash of the client address (Phase 4).
+rate_dict = modal.Dict.from_name("vc-ratelimit", create_if_missing=True)
 
 # Base image for GPU/audio work. Torch is pinned; `numpy<2` because the audio
 # stack (librosa/soundfile) still trips over the numpy 2 ABI.

@@ -7,24 +7,28 @@
 
 Deploy through `modal_app.deploy`, not this module — see its docstring.
 
-Three things this layer owns, and nothing else does:
+Four things this layer owns, and nothing else does:
 
 * **Size limits.** Uploads are read in chunks and cut off at the cap, so a
   client cannot make the container buffer an arbitrary file to find out it is
   too big. Duration limits belong further down, where the audio is decoded.
 * **The consent gate.** A checkbox the frontend enforces on its own is not a
   gate. `/submit` refuses without it (plan §8, item 1).
+* **The rate limit.** Same reason: the browser uploads straight here, so a cap
+  enforced in the frontend's route handlers would not be on the upload path at
+  all (plan §9, and see `ratelimit`).
 * **Volume freshness.** The pipeline writes `output.mp3` in a different
   container, so `/download` reloads the Volume before it looks.
 """
 
+import os
 from typing import Annotated
 
 import modal
-from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import jobs, pipeline, storage
+from . import jobs, pipeline, ratelimit, storage
 from .app import APP_NAME, DATA_DIR, api_image, app, data_vol
 from .audio_utils import AudioError
 from .separation import DEFAULT_SEPARATION_MODEL, SeparationError, safe_ext
@@ -36,16 +40,27 @@ MAX_INPUT_BYTES = 60 * 1024 * 1024
 MAX_REFERENCE_BYTES = 20 * 1024 * 1024
 UPLOAD_CHUNK = 1024 * 1024
 
-web = FastAPI(title="voice-convert API", version="0.3.0")
+web = FastAPI(title="voice-convert API", version="0.4.0")
+
+
+def allowed_origins() -> list[str]:
+    """Origins the browser may call from. `*` until a domain is configured.
+
+    Which origins are allowed is deployment config, not code: set
+    ALLOWED_ORIGINS (comma separated) on the Modal secret once the Vercel
+    domain exists. Nothing here is authenticated, so a permissive default costs
+    nothing beyond the rate limit that is already on `/submit`.
+    """
+    configured = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")]
+    return [o for o in configured if o] or ["*"]
+
 
 # The browser uploads straight to Modal: a 3 minute mp3 is 4–7 MB and Vercel's
 # request body limit is 4.5 MB, so the upload path cannot go through the
-# frontend's own API routes (plan §6). Which origins may call is deployment
-# config, not code — set ALLOWED_ORIGINS on the Modal secret when the Vercel
-# domain exists.
+# frontend's own API routes (plan §6).
 web.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins(),
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -70,7 +85,22 @@ async def _read_upload(upload: UploadFile, limit: int, label: str) -> bytes:
     return b"".join(parts)
 
 
-def _start_job(mode: str, params: dict, source: bytes, reference: bytes) -> str:
+def _check_quota(client: str) -> None:
+    """Reject early if this client is already at its hourly cap.
+
+    Read-only on purpose: the slot is not spent until the job actually starts
+    (`_start_job`), so a request that fails validation does not cost one.
+    """
+    if ratelimit.remaining(client) > 0:
+        return
+    raise HTTPException(
+        429,
+        f"rate limit reached: {ratelimit.MAX_JOBS} jobs per hour",
+        headers={"Retry-After": str(int(ratelimit.WINDOW_SEC))},
+    )
+
+
+def _start_job(mode: str, params: dict, source: bytes, reference: bytes, client: str) -> str:
     """Persist the uploads, register the job, hand it to the pipeline.
 
     Files first, record second, spawn last: every state in between is one the
@@ -84,7 +114,15 @@ def _start_job(mode: str, params: dict, source: bytes, reference: bytes) -> str:
 
     jobs.create(job_id, mode, params=params)
     try:
+        # Spend the slot here rather than at the top of the request: between
+        # `_check_quota` and this line a parallel upload could take the last
+        # one, and letting that request through is cheaper than making every
+        # rejected upload cost a slot.
+        ratelimit.check(client)
         pipeline.spawn(mode, job_id, params)
+    except ratelimit.RateLimited as exc:
+        jobs.fail(job_id, "rate limit reached")
+        raise HTTPException(429, str(exc), headers={"Retry-After": str(exc.retry_after)}) from exc
     except Exception as exc:  # queue rejected it — say so now, don't leave it queued
         jobs.fail(job_id, f"could not start: {type(exc).__name__}")
         raise HTTPException(503, "could not start the job, try again") from exc
@@ -93,6 +131,7 @@ def _start_job(mode: str, params: dict, source: bytes, reference: bytes) -> str:
 
 @web.post("/submit")
 async def submit(
+    request: Request,
     source: Annotated[UploadFile, File(alias="input")],
     reference: Annotated[UploadFile, File()],
     mode: Annotated[str, Form()] = "song",
@@ -103,6 +142,12 @@ async def submit(
     consent: Annotated[bool, Form()] = False,
 ) -> dict:
     """Start a conversion. Returns as soon as the job is queued."""
+    client = ratelimit.client_key(
+        ratelimit.address_from_headers(
+            request.headers, request.client.host if request.client else None
+        )
+    )
+    _check_quota(client)
     if not consent:
         raise HTTPException(
             400,
@@ -127,8 +172,14 @@ async def submit(
     source_bytes = await _read_upload(source, MAX_INPUT_BYTES, "input")
     reference_bytes = await _read_upload(reference, MAX_REFERENCE_BYTES, "reference")
 
-    job_id = _start_job(mode, params, source_bytes, reference_bytes)
-    return {"job_id": job_id, "status": jobs.QUEUED, "mode": mode}
+    job_id = _start_job(mode, params, source_bytes, reference_bytes, client)
+    return {
+        "job_id": job_id,
+        "status": jobs.QUEUED,
+        "mode": mode,
+        # So the UI can warn before the user hits the wall rather than after.
+        "jobs_remaining": ratelimit.remaining(client),
+    }
 
 
 @web.get("/status/{job_id}")

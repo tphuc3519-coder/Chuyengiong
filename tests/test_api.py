@@ -15,7 +15,15 @@ import types
 import pytest
 from fastapi.testclient import TestClient
 
-from modal_app import api, jobs, pipeline
+from modal_app import api, jobs, pipeline, ratelimit
+
+
+@pytest.fixture(autouse=True)
+def rate_store(monkeypatch):
+    """A plain dict behind the rate limit, so no test needs Modal."""
+    store: dict = {}
+    monkeypatch.setattr(ratelimit, "rate_dict", store)
+    return store
 
 
 @pytest.fixture
@@ -23,7 +31,7 @@ def started(monkeypatch):
     """Capture what `/submit` would hand to the pipeline."""
     calls = []
 
-    def fake_start(mode, params, source, reference):
+    def fake_start(mode, params, source, reference, client):
         calls.append({"mode": mode, "params": params, "source": source, "reference": reference})
         return "b" * 32
 
@@ -53,7 +61,12 @@ def upload(**form):
 def test_submit_returns_a_job_id_without_waiting(client, started):
     response = client.post("/submit", **upload())
     assert response.status_code == 200
-    assert response.json() == {"job_id": "b" * 32, "status": jobs.QUEUED, "mode": "song"}
+    assert response.json() == {
+        "job_id": "b" * 32,
+        "status": jobs.QUEUED,
+        "mode": "song",
+        "jobs_remaining": ratelimit.MAX_JOBS,
+    }
     assert started[0]["source"] == b"fake-audio"
     assert started[0]["reference"] == b"fake-voice"
 
@@ -192,6 +205,61 @@ def test_an_expired_output_is_a_410_not_a_500(client, monkeypatch, volume):
     monkeypatch.setattr(jobs, "find", lambda job_id, store=None: as_status(jobs.DONE))
     monkeypatch.setattr(api.storage, "get", gone)
     assert client.get(f"/download/{'e' * 32}").status_code == 410
+
+
+# --- rate limit -----------------------------------------------------------
+
+
+def fill_quota(store, address="203.0.113.7"):
+    """Use up one client's hourly allowance and return its request headers."""
+    key = ratelimit.client_key(address)
+    for _ in range(ratelimit.MAX_JOBS):
+        ratelimit.check(key, store=store)
+    return {"x-forwarded-for": address}
+
+
+def test_a_client_over_its_hourly_cap_is_a_429(client, started, rate_store):
+    """Plan §9: 5 jobs an hour. The cap is here because the browser uploads
+    straight to Modal, so the frontend is not on this path at all."""
+    headers = fill_quota(rate_store)
+    response = client.post("/submit", **upload(), headers=headers)
+    assert response.status_code == 429
+    assert response.headers["retry-after"]
+    assert started == []
+
+
+def test_the_cap_is_per_client_not_global(client, started, rate_store):
+    fill_quota(rate_store, "203.0.113.7")
+    response = client.post("/submit", **upload(), headers={"x-forwarded-for": "198.51.100.9"})
+    assert response.status_code == 200
+    assert len(started) == 1
+
+
+def test_a_rejected_submit_does_not_spend_a_slot(client, started, rate_store):
+    """Validation runs after the quota is read but before it is spent, so a
+    client that sends a bad request can fix it and retry."""
+    address = "203.0.113.7"
+    headers = {"x-forwarded-for": address}
+    assert client.post("/submit", **upload(consent="false"), headers=headers).status_code == 400
+    assert ratelimit.remaining(ratelimit.client_key(address), store=rate_store) == (
+        ratelimit.MAX_JOBS
+    )
+
+
+def test_the_slot_is_spent_when_the_job_actually_starts(client, monkeypatch, rate_store):
+    """`_start_job` is the real thing here, with only the infrastructure stubbed."""
+    address = "203.0.113.7"
+    monkeypatch.setattr(api.storage, "put", lambda *a, **k: "")
+    monkeypatch.setattr(api.data_vol, "commit", lambda: None)
+    monkeypatch.setattr(jobs, "create", lambda *a, **k: {})
+    monkeypatch.setattr(pipeline, "spawn", lambda *a, **k: None)
+
+    response = client.post("/submit", **upload(), headers={"x-forwarded-for": address})
+    assert response.status_code == 200
+    assert response.json()["jobs_remaining"] == ratelimit.MAX_JOBS - 1
+    assert ratelimit.remaining(ratelimit.client_key(address), store=rate_store) == (
+        ratelimit.MAX_JOBS - 1
+    )
 
 
 # --- wiring ---------------------------------------------------------------

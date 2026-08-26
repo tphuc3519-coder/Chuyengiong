@@ -197,7 +197,7 @@ def cleanup_expired(
 )
 def cleanup(max_age_hours: float = DEFAULT_MAX_AGE_HOURS) -> int:
     """Scheduled sweep: expired files off the Volume, expired records out of the Dict."""
-    from . import jobs
+    from . import jobs, ratelimit
 
     data_vol.reload()
     removed = cleanup_expired(max_age_hours)
@@ -205,6 +205,12 @@ def cleanup(max_age_hours: float = DEFAULT_MAX_AGE_HOURS) -> int:
     # anything), so expire those by `created_at` as well.
     stale: Iterable[str] = set(removed) | set(jobs.expired_ids(max_age_hours))
     forgotten = jobs.forget(stale)
+    # Rate limit windows are an hour wide and this runs every six, so by now
+    # every key still in there is either active or dead weight.
+    windows = ratelimit.prune()
     data_vol.commit()
-    print(f"[cleanup] removed {len(removed)} job dirs, {forgotten} job records")
+    print(
+        f"[cleanup] removed {len(removed)} job dirs, {forgotten} job records, "
+        f"{windows} rate limit windows"
+    )
     return len(removed)
