@@ -1,0 +1,6 @@
+# Local + CI tooling. Container dependencies are declared in modal_app/app.py,
+# not here — Modal builds those images itself.
+modal>=1.0,<2
+fastapi[standard]>=0.115
+pytest>=8.0
+ruff>=0.6
