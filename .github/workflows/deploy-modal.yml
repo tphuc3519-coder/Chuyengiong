@@ -31,6 +31,10 @@ jobs:
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          # Both optional — `app.config_secret` forwards whatever is set here
+          # into the API container, and empty means "not configured".
+          ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
+          RATE_LIMIT_SALT: ${{ secrets.RATE_LIMIT_SALT }}
         # modal_app.deploy, not modal_app.api: a function is published only if
         # the module defining it was imported, and the cron plus the GPU class
         # live in modules the API never touches.

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Advanced } from "./components/Advanced";
 import { ConsentGate } from "./components/ConsentGate";
@@ -10,6 +10,7 @@ import { Progress } from "./components/Progress";
 import { ReferencePicker } from "./components/ReferencePicker";
 import { Result } from "./components/Result";
 import {
+  JOBS_PER_HOUR,
   MAX_INPUT_BYTES,
   SOURCE_MAX_SEC,
   defaultParams,
@@ -35,15 +36,21 @@ export default function Page() {
   const [reference, setReference] = useState<File | null>(null);
   const [consent, setConsent] = useState(false);
 
+  const [remaining, setRemaining] = useState<number | null>(null);
+
   const { state, start, reset } = useConversion();
   const busy = state.phase === "uploading" || state.phase === "running";
   const ready = Boolean(source && reference && consent) && !busy;
 
+  // `/submit` reports what is left of the hourly allowance, and `reset` wipes
+  // the run state — so keep it here, where it survives into the next attempt.
+  useEffect(() => {
+    if (state.jobsRemaining !== null) setRemaining(state.jobsRemaining);
+  }, [state.jobsRemaining]);
+
   function switchMode(next: Mode) {
     setMode(next);
-    // The pitch range is narrower for speech, and the default quality differs;
-    // carry over what the user picked, clamped, rather than resetting it.
-    setParams((current) => forMode({ ...current }, next));
+    setParams((current) => forMode(current, next, mode));
   }
 
   function convert() {
@@ -148,6 +155,11 @@ export default function Page() {
       )}
 
       <footer className="footnote">
+        {remaining !== null && (
+          <p>
+            Còn {remaining}/{JOBS_PER_HOUR} lượt chuyển trong giờ này.
+          </p>
+        )}
         <p>
           File tải lên và kết quả bị xoá khỏi máy chủ sau 6 giờ. Đừng dùng giọng của người khác khi
           chưa được họ cho phép.

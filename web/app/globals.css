@@ -39,6 +39,16 @@
   box-sizing: border-box;
 }
 
+/*
+ * The UA rule for `[hidden]` loses to any author rule that sets `display`, so
+ * a collapsed panel with `display: flex` on its class stays visible while
+ * reporting `aria-expanded="false"` — worse than not collapsing at all. One
+ * rule here rather than a `[hidden]` variant next to every such class.
+ */
+[hidden] {
+  display: none !important;
+}
+
 html {
   -webkit-text-size-adjust: 100%;
 }

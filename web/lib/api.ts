@@ -118,6 +118,12 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
         request.ontimeout = () => reject(new ApiError(0, "the upload timed out"));
         request.onabort = () => reject(new DOMException("aborted", "AbortError"));
 
+        if (input.signal?.aborted) {
+          // Already cancelled before the send: the listener below would never
+          // fire, and the upload would run to completion unwatched.
+          reject(new DOMException("aborted", "AbortError"));
+          return;
+        }
         input.signal?.addEventListener("abort", () => request.abort(), { once: true });
         request.send(form);
       }),

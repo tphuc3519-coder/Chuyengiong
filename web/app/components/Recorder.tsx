@@ -31,6 +31,8 @@ const MIME_CANDIDATES = [
 ];
 
 const METER_BARS = 32;
+/** ~20 updates a second. At 60fps this is three frames of peak-holding. */
+const METER_INTERVAL_MS = 50;
 
 export function recorderSupported(): boolean {
   return (
@@ -95,12 +97,24 @@ export function Recorder({
     analyser.fftSize = 1024;
     context.createMediaStreamSource(source).connect(analyser);
     const samples = new Uint8Array(analyser.fftSize);
+    let held = 0;
+    let last = 0;
 
-    const draw = () => {
+    // Every frame reads the analyser — dropping reads would miss transients —
+    // but only every METER_INTERVAL_MS does it touch React state, holding the
+    // loudest sample seen in between so a peak is never swallowed.
+    const draw = (now: number) => {
       analyser.getByteTimeDomainData(samples);
       let peak = 0;
       for (const sample of samples) peak = Math.max(peak, Math.abs(sample - 128) / 128);
-      setLevels((previous) => [...previous.slice(1), Math.min(1, peak * 1.6)]);
+      held = Math.max(held, peak);
+
+      if (now - last >= METER_INTERVAL_MS) {
+        last = now;
+        const level = Math.min(1, held * 1.6);
+        held = 0;
+        setLevels((previous) => [...previous.slice(1), level]);
+      }
       frame.current = requestAnimationFrame(draw);
     };
     frame.current = requestAnimationFrame(draw);
@@ -146,8 +160,10 @@ export function Recorder({
         const seconds = (Date.now() - startedAt.current) / 1000;
         setElapsed(seconds);
         // The backend trims anything past this anyway, so stop rather than
-        // upload seconds that get thrown away.
-        if (seconds >= REFERENCE_MAX_SEC) instance.stop();
+        // upload seconds that get thrown away. `stop` guards the state: this
+        // timer keeps firing until `onstop` tears it down, and a second
+        // `stop()` on an inactive recorder throws InvalidStateError.
+        if (seconds >= REFERENCE_MAX_SEC) stop();
       }, 100);
     } catch (caught) {
       teardown();
@@ -161,7 +177,10 @@ export function Recorder({
   }
 
   function stop() {
-    recorder.current?.stop();
+    const instance = recorder.current;
+    // Two callers race here — the auto-stop timer and the button — and
+    // `stop()` on anything but a live recorder throws.
+    if (instance && instance.state !== "inactive") instance.stop();
   }
 
   const remaining = Math.max(0, RECORD_TARGET_SEC - elapsed);

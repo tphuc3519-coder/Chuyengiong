@@ -372,8 +372,25 @@ Hai chi tiết cố ý:
   chỉ trừ lượt ngay trước khi spawn. Ngược lại thì gõ sai một tham số cũng mất
   một lượt, và client hammer endpoint sẽ tự đẩy lượt kế tiếp ra xa mãi.
 
-`ALLOWED_ORIGINS` (phẩy ngăn cách) trên Modal secret khoá CORS lại khi đã có
-domain Vercel; chưa đặt thì vẫn mở `*`.
+### Cấu hình lúc deploy
+
+Hai biến, cả hai đều tuỳ chọn, đi từ máy chạy `modal deploy` vào container qua
+`app.config_secret()`:
+
+| Biến | Đặt ở đâu | Không đặt thì |
+|---|---|---|
+| `ALLOWED_ORIGINS` | GitHub **variable** | CORS mở `*` |
+| `RATE_LIMIT_SALT` | GitHub **secret** | salt là hằng số cố định |
+
+`Secret.from_dict` chứ không phải `Secret.from_name`: secret có tên phải tồn
+tại trước khi tra được, nên một bản clone mới deploy lần đầu sẽ fail vì thứ vốn
+hoàn toàn tuỳ chọn. Rỗng nghĩa là "chưa cấu hình", và cả hai chỗ đọc đều hiểu
+như vậy.
+
+`ALLOWED_ORIGINS` (phẩy ngăn cách) khoá CORS lại khi đã có domain Vercel.
+`RATE_LIMIT_SALT` làm hash của rate limit không đoán được — không có nó thì key
+vẫn không đảo ngược được, nhưng ai cầm được Dict vẫn thử được xem một địa chỉ
+cụ thể đã submit hay chưa.
 
 ### Còn phải verify bằng thiết bị thật
 

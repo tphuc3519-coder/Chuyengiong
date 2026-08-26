@@ -40,8 +40,8 @@ UNKNOWN_CLIENT = "unknown"
 class RateLimited(RuntimeError):
     """Raised by `check`. Carries the seconds until the next slot frees up."""
 
-    def __init__(self, retry_after: float, limit: int = MAX_JOBS) -> None:
-        self.retry_after = max(1, int(retry_after + 0.5))
+    def __init__(self, retry_after: int, limit: int = MAX_JOBS) -> None:
+        self.retry_after = max(1, retry_after)
         self.limit = limit
         super().__init__(
             f"rate limit reached: {limit} jobs per hour. "
@@ -54,11 +54,13 @@ def _store(store: MutableMapping[str, Any] | None) -> MutableMapping[str, Any]:
 
 
 def _salt() -> str:
-    """Hash salt. Set RATE_LIMIT_SALT on the Modal secret to make keys stable.
+    """Hash salt, fixed by default so a key means the same in every container.
 
-    Without it the salt is per-container, which means a scale-up resets a
-    client's window. That fails open, which is the right direction for a cost
-    guard: it never blocks someone who has not actually submitted 5 jobs.
+    The default is a constant rather than a secret, which is enough for what
+    the key is for — grouping one client's requests without keeping the
+    address. Set RATE_LIMIT_SALT on the Modal secret to make the hash
+    unguessable as well, so nobody holding the Dict can test whether a
+    particular address has submitted.
     """
     return os.environ.get("RATE_LIMIT_SALT", "voice-convert")
 
@@ -107,7 +109,9 @@ def check(
     stamp = time.time() if now is None else now
     stamps = _recent(key, store, stamp, window_sec)
     if len(stamps) >= limit:
-        raise RateLimited(retry_after=window_sec - (stamp - min(stamps)), limit=limit)
+        raise RateLimited(
+            retry_after=retry_after(key, store, stamp, limit, window_sec), limit=limit
+        )
     stamps.append(stamp)
     store[key] = stamps
     return limit - len(stamps)
@@ -123,6 +127,26 @@ def remaining(
     """How many jobs `key` may still start. Read-only — nothing is recorded."""
     stamp = time.time() if now is None else now
     return max(0, limit - len(_recent(key, _store(store), stamp, window_sec)))
+
+
+def retry_after(
+    key: str,
+    store: MutableMapping[str, Any] | None = None,
+    now: float | None = None,
+    limit: int = MAX_JOBS,
+    window_sec: float = WINDOW_SEC,
+) -> int:
+    """Seconds until `key` has a slot again; 0 when it already has one.
+
+    The wait is until the *oldest* recorded request leaves the window, which is
+    usually far less than a full window — telling a client to come back in an
+    hour when the next slot opens in five minutes is its own kind of wrong.
+    """
+    stamp = time.time() if now is None else now
+    stamps = _recent(key, _store(store), stamp, window_sec)
+    if len(stamps) < limit:
+        return 0
+    return max(1, int(window_sec - (stamp - min(stamps)) + 0.5))
 
 
 def prune(

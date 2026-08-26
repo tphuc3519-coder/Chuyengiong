@@ -4,6 +4,8 @@ Everything stateful lives here so the rest of the package can import a single
 source of truth. No business logic in this module.
 """
 
+import os
+
 import modal
 
 APP_NAME = "voice-convert"
@@ -22,6 +24,29 @@ data_vol = modal.Volume.from_name("vc-data", create_if_missing=True)
 job_dict = modal.Dict.from_name("vc-jobs", create_if_missing=True)
 # Rate limit windows, keyed by a salted hash of the client address (Phase 4).
 rate_dict = modal.Dict.from_name("vc-ratelimit", create_if_missing=True)
+
+# Deployment configuration, both optional and neither of them audio.
+#
+#   ALLOWED_ORIGINS  comma separated origins the browser may call from; empty
+#                    means "*", which is where this starts before a Vercel
+#                    domain exists (`api.allowed_origins`)
+#   RATE_LIMIT_SALT  makes the rate limit's client hash unguessable as well as
+#                    non-reversible (`ratelimit._salt`)
+CONFIG_KEYS = ("ALLOWED_ORIGINS", "RATE_LIMIT_SALT")
+
+
+def config_secret() -> modal.Secret:
+    """Config from the machine running `modal deploy`, as container env vars.
+
+    `Secret.from_dict` rather than `Secret.from_name`: a named secret has to
+    exist before it can be looked up, so a fresh clone running its first deploy
+    would fail on config that is entirely optional. This reads whatever the
+    deploy environment happens to set — the workflow passes both through — and
+    an unset key arrives as an empty string, which both readers treat as "not
+    configured".
+    """
+    return modal.Secret.from_dict({key: os.environ.get(key, "") for key in CONFIG_KEYS})
+
 
 # Base image for GPU/audio work. Torch is pinned; `numpy<2` because the audio
 # stack (librosa/soundfile) still trips over the numpy 2 ABI.

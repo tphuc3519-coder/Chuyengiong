@@ -29,7 +29,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, Response, Uploa
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import jobs, pipeline, ratelimit, storage
-from .app import APP_NAME, DATA_DIR, api_image, app, data_vol
+from .app import APP_NAME, DATA_DIR, api_image, app, config_secret, data_vol
 from .audio_utils import AudioError
 from .separation import DEFAULT_SEPARATION_MODEL, SeparationError, safe_ext
 
@@ -91,12 +91,14 @@ def _check_quota(client: str) -> None:
     Read-only on purpose: the slot is not spent until the job actually starts
     (`_start_job`), so a request that fails validation does not cost one.
     """
-    if ratelimit.remaining(client) > 0:
+    wait = ratelimit.retry_after(client)
+    if not wait:
         return
     raise HTTPException(
         429,
-        f"rate limit reached: {ratelimit.MAX_JOBS} jobs per hour",
-        headers={"Retry-After": str(int(ratelimit.WINDOW_SEC))},
+        f"rate limit reached: {ratelimit.MAX_JOBS} jobs per hour, "
+        f"try again in {wait // 60 + 1} minute(s)",
+        headers={"Retry-After": str(wait)},
     )
 
 
@@ -222,7 +224,14 @@ async def download(job_id: str) -> Response:
     )
 
 
-@app.function(image=api_image, volumes={DATA_DIR: data_vol}, timeout=600)
+@app.function(
+    image=api_image,
+    volumes={DATA_DIR: data_vol},
+    # CORS is configured while this module is imported, so the values have to
+    # be in the environment before that — which is what a secret does.
+    secrets=[config_secret()],
+    timeout=600,
+)
 @modal.concurrent(max_inputs=50)  # polling is cheap; do not start a container per poll
 @modal.asgi_app()
 def api():

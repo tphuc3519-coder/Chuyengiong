@@ -23,6 +23,9 @@ export const DEFAULT_DIFFUSION_STEPS: Record<Mode, number> = { song: 50, speech:
 
 export const MAX_VOCAL_GAIN_DB = 12;
 
+/** Plan §9, enforced in `modal_app/ratelimit.py`. Shown so the wall is visible. */
+export const JOBS_PER_HOUR = 5;
+
 /** Reference voice window, enforced again in `audio_utils.prepare_reference`. */
 export const REFERENCE_MIN_SEC = 5;
 export const REFERENCE_MAX_SEC = 20;
@@ -47,10 +50,23 @@ export function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-/** Re-clamp after a mode switch: `speech` allows a narrower pitch range. */
-export function forMode(params: Params, mode: Mode): Params {
-  const limit = MAX_SEMITONE_SHIFT[mode];
-  return { ...params, semitoneShift: clamp(params.semitoneShift, -limit, limit) };
+/**
+ * Carry the tuning across a mode switch.
+ *
+ * Pitch is clamped, because `speech` allows a narrower range. Quality is
+ * different: `song` defaults to 50 steps and `speech` to 25, so a value the
+ * user never touched has to follow the mode — otherwise picking "Giọng nói"
+ * silently costs twice the GPU time it should. A value they did move is theirs
+ * and stays.
+ */
+export function forMode(params: Params, next: Mode, previous: Mode): Params {
+  const limit = MAX_SEMITONE_SHIFT[next];
+  const untouched = params.diffusionSteps === DEFAULT_DIFFUSION_STEPS[previous];
+  return {
+    ...params,
+    semitoneShift: clamp(params.semitoneShift, -limit, limit),
+    diffusionSteps: untouched ? DEFAULT_DIFFUSION_STEPS[next] : params.diffusionSteps,
+  };
 }
 
 export function formatBytes(bytes: number): string {

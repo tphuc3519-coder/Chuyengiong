@@ -66,6 +66,21 @@ def test_retry_after_points_at_the_oldest_slot(store):
     assert raised.value.retry_after == int(ratelimit.WINDOW_SEC - 1000.0)
 
 
+def test_retry_after_is_zero_while_slots_are_free(store):
+    key = ratelimit.client_key(ADDRESS)
+    ratelimit.check(key, store=store, now=1000.0)
+    assert ratelimit.retry_after(key, store=store, now=1000.0) == 0
+
+
+def test_retry_after_counts_from_the_oldest_request_not_the_newest(store):
+    """A client one minute into its window waits 59, not the full hour."""
+    key = ratelimit.client_key(ADDRESS)
+    for _ in range(ratelimit.MAX_JOBS):
+        ratelimit.check(key, store=store, now=1000.0)
+    wait = ratelimit.retry_after(key, store=store, now=1000.0 + 600)
+    assert wait == int(ratelimit.WINDOW_SEC) - 600
+
+
 def test_remaining_records_nothing(store):
     key = ratelimit.client_key(ADDRESS)
     assert ratelimit.remaining(key, store=store, now=1000.0) == ratelimit.MAX_JOBS

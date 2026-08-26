@@ -185,7 +185,11 @@ async function watch(
       failures = 0;
     } catch (error) {
       if (aborted(error)) throw error;
-      if (++failures >= MAX_POLL_FAILURES) throw error;
+      // A 4xx is an answer, not a dropped connection: the job is unknown or
+      // its record expired, and four more polls will say the same thing.
+      // Only 5xx and network errors are worth waiting out.
+      const fatal = error instanceof ApiError && error.status >= 400 && error.status < 500;
+      if (fatal || ++failures >= MAX_POLL_FAILURES) throw error;
       continue;
     }
 

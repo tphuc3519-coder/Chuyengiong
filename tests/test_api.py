@@ -224,8 +224,20 @@ def test_a_client_over_its_hourly_cap_is_a_429(client, started, rate_store):
     headers = fill_quota(rate_store)
     response = client.post("/submit", **upload(), headers=headers)
     assert response.status_code == 429
-    assert response.headers["retry-after"]
     assert started == []
+
+
+def test_retry_after_is_the_real_wait_not_a_whole_window(client, started, rate_store):
+    """The oldest request is what frees the next slot, so a client ten minutes
+    in should be told fifty, not sixty."""
+    headers = fill_quota(rate_store)
+    key = ratelimit.client_key(headers["x-forwarded-for"])
+    rate_store[key] = [stamp - 600 for stamp in rate_store[key]]
+
+    response = client.post("/submit", **upload(), headers=headers)
+    assert response.status_code == 429
+    wait = int(response.headers["retry-after"])
+    assert 0 < wait <= ratelimit.WINDOW_SEC - 599
 
 
 def test_the_cap_is_per_client_not_global(client, started, rate_store):
