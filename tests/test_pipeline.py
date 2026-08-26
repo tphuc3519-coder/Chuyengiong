@@ -11,7 +11,7 @@ import json
 import pytest
 
 from modal_app import audio_utils as au
-from modal_app import audit, jobs, pipeline, storage
+from modal_app import audit, jobs, pipeline, storage, watermark
 
 
 def test_defaults_come_from_the_mode():
@@ -205,3 +205,35 @@ def test_a_failure_records_the_exception_class_not_its_message(capsys):
     assert entry["event"] == audit.FAILED
     assert entry["reason"] == "RuntimeError"
     assert "bí mật" not in json.dumps(entry, ensure_ascii=False)
+
+
+# --- watermarking (plan §8, "Cân nhắc thêm") -------------------------------
+
+
+def test_a_job_records_whether_it_was_watermarked(monkeypatch):
+    """Resolved when the job is created, not when the mix runs: the record has
+    to say what was done to this file, not what the config says a week later."""
+    monkeypatch.delenv(watermark.ENV_FLAG, raising=False)
+    assert pipeline.clean_params("song")["watermark"] is True
+    monkeypatch.setenv(watermark.ENV_FLAG, "0")
+    assert pipeline.clean_params("song")["watermark"] is False
+    assert pipeline.clean_params("speech")["watermark"] is False
+
+
+def test_watermarking_is_not_a_client_setting(monkeypatch):
+    """It is deployment config. A caller asking for no watermark is ignored."""
+    monkeypatch.delenv(watermark.ENV_FLAG, raising=False)
+    assert pipeline.clean_params("song", {"watermark": False})["watermark"] is True
+
+
+def test_no_watermark_hook_is_built_when_it_is_switched_off():
+    """`mixing` takes None to mean "encode and ship", so this is the whole
+    off-switch: no import of the model module, no container started."""
+    assert pipeline._watermark("j" * 32, {"watermark": False}) is None
+
+
+def test_the_audit_line_says_whether_the_output_was_watermarked():
+    """A complaint arrives with a file; the log has to say whether that file
+    should carry a watermark at all."""
+    line = audit.event_line(audit.DONE, "b" * 32, mode="song", watermark=True)
+    assert json.loads(line.split(" ", 1)[1])["watermark"] is True

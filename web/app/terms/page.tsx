@@ -67,6 +67,12 @@ export default function TermsPage() {
           Mọi file tải về đều mang metadata ghi rõ đây là nội dung tạo bởi AI. Đừng gỡ dấu này khi
           chia sẻ lại, và nên nói rõ với người nghe rằng giọng là do máy tạo.
         </p>
+        <p>
+          Ngoài metadata, file kết quả còn mang một watermark âm thanh không nghe thấy được. Nó
+          không chứa thông tin gì về bạn — chỉ đủ để chúng tôi xác nhận một file có phải do dịch vụ
+          này tạo ra hay không, khi có khiếu nại. Watermark sống sót qua việc nén lại, còn metadata
+          thì không.
+        </p>
 
         <h2>4. File của bạn ở lại bao lâu</h2>
         <p>
