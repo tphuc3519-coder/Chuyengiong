@@ -39,10 +39,14 @@ base_image = (
     .add_local_python_source("modal_app")
 )
 
-# The web endpoint needs none of the audio stack — keep it small so cold starts
-# on /status polling stay fast.
+# The CPU image: web endpoints, the cleanup cron and the pipeline orchestrator.
+# No torch and no GPU — the heavy work happens in the separation and conversion
+# containers, which this one only calls. It carries ffmpeg (mixing and the final
+# encode) and numpy (`audio_utils` is imported along the way), and nothing else,
+# so a /status poll still starts in a couple of seconds.
 api_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install("fastapi[standard]")
+    .apt_install("ffmpeg")
+    .pip_install("fastapi[standard]", "numpy<2")
     .add_local_python_source("modal_app")
 )

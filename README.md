@@ -12,7 +12,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 0 | Scaffold + deploy pipeline | 🟡 code xong, chờ verify deploy thật |
 | 1 | Seed-VC + chunking | 🟡 code xong, chờ chạy thật trên GPU |
 | 2 | Storage + job state | 🟡 code xong, chờ chạy `modal run -m modal_app.verify` |
-| 3 | Nối pipeline hoàn chỉnh | ⬜ |
+| 3 | Nối pipeline hoàn chỉnh | 🟡 code xong, chờ chạy end-to-end thật |
 | 4 | Frontend | ⬜ |
 | 5 | Pitch auto-detect | ⬜ |
 | 6 | Consent gate | ⬜ |
@@ -22,9 +22,12 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 ```
 modal_app/
 ├── app.py          # Modal App, Volumes, Dict, images — nguồn duy nhất cho phần stateful
-├── api.py          # FastAPI ASGI app; Phase 0 chỉ có /health
+├── api.py          # FastAPI ASGI app: /health, /submit, /status, /download
 ├── audio_utils.py  # chunk theo silence, crossfade, validate — numpy thuần, test được
+├── separation.py   # tách stem trên GPU: Separator (@app.cls) — port từ tachnhac
 ├── conversion.py   # Seed-VC trên GPU: VoiceConverter (@app.cls)
+├── mixing.py       # ffmpeg: mix vocal + nhạc nền, encode mp3
+├── pipeline.py     # orchestration: spawn + nối các bước, cập nhật job state
 ├── storage.py      # file trên Volume + cron dọn rác
 ├── jobs.py         # state machine của job, lưu trong modal.Dict
 ├── deploy.py       # target deploy duy nhất — import mọi module để đăng ký
@@ -184,3 +187,115 @@ Chạy trên CPU, tốn vài giây GPU-free. In ra từng check kèm `ok`/`FAIL`
 - `expired_job_removed` / `fresh_job_kept` — cron xoá đúng job quá hạn, giữ job mới
 - `record_is_queued` / `progress_advances_in_order` / `done_is_terminal`
 - `expiry_finds_the_record` / `record_is_removable`
+
+## Phase 3 — Pipeline hoàn chỉnh
+
+```
+song:    input ──► separate ──► vocal ──► convert ──► mix ──► output.mp3
+                        └────► instrumental ───────────┘
+speech:  input ─────────────────────────► convert ──► encode ──► output.mp3
+```
+
+`pipeline.py` chạy trên image CPU nhỏ, tự nó không xử lý audio: separation và
+conversion nằm ở container GPU riêng, gọi bằng `.remote()` nên hàm điều phối
+không giữ GPU trong lúc chờ. `/submit` dùng `.spawn()` và trả về ngay.
+
+### Separation — port từ [`chamaya00/tachnhac`](https://github.com/chamaya00/tachnhac)
+
+Model, tên checkpoint, base image CUDA và đoạn chuẩn hoá tên file đầu ra bê
+nguyên từ `modal_app.py` của app đó. Chỉ phần I/O đổi: app cũ đọc/ghi thẳng
+Volume của nó và phục vụ stem cho trình duyệt, ở đây nhận bytes trả bytes để
+`pipeline.py` giữ quyền quản lý storage.
+
+| Model | Stem | Ghi chú |
+|---|---|---|
+| `roformer` (mặc định) | Vocals + Instrumental | BS-Roformer, chất lượng vocal tốt nhất |
+| `htdemucs` | Vocals + Drums + Bass + Other | nhanh hơn ~4x; 3 stem còn lại cộng lại thành instrumental |
+
+Hai chi tiết mang theo từ app cũ trông như phụ nhưng không phải:
+
+- image là `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04`, **không** phải
+  `debian_slim` — `onnxruntime-gpu` cần `libcudnn.so.9`, thiếu là nó lặng lẽ tụt
+  về CPU và BS-Roformer chậm hàng chục lần;
+- `clang` + `build-essential` vì demucs kéo theo `diffq`, gói này không có wheel.
+
+Khác app cũ một chỗ: stem ghi ra **WAV chứ không phải MP3**. Stem ở đây là đầu
+vào của Seed-VC và của bản mix cuối, không có lý do nhét một thế hệ lossy vào
+giữa.
+
+```bash
+modal run -m modal_app.separation::separate_files --source song.mp3
+```
+
+### Mixing
+
+`mixing.py` gọi ffmpeg, không dùng thư viện audio Python — đúng như plan. Ba thứ
+quyết định bản mix nghe đúng hay sai:
+
+- `amix=normalize=0` — mặc định `normalize=1` chia biên độ cho số input, mix hai
+  đường bị tụt 6 dB không vì lý do gì;
+- `duration=longest` — vocal sau chuyển đổi không bao giờ dài đúng bằng
+  instrumental, cắt theo đường ngắn hơn là cụt đuôi bài;
+- `loudnorm=I=-14:TP=-1.0` ở cuối, chuẩn streaming.
+
+### API
+
+```
+POST /submit          multipart: input, reference, mode, consent, params  →  {job_id}
+GET  /status/{id}                                    →  {status, progress, error, ...}
+GET  /download/{id}                                  →  audio/mpeg
+```
+
+```bash
+BASE=https://<workspace>--voice-convert-api.modal.run
+
+curl -sS -X POST "$BASE/submit" \
+  -F "input=@song.mp3" -F "reference=@voice.wav" \
+  -F "mode=song" -F "consent=true" -F "semitone_shift=0"
+# {"job_id":"...","status":"queued","mode":"song"}
+
+curl -sS "$BASE/status/$JOB_ID"
+curl -sS -o output.mp3 "$BASE/download/$JOB_ID"
+```
+
+`/download` trả `409` khi job chưa xong (kèm status hiện tại) hoặc đã fail (kèm
+message), `410` khi record còn nhưng file đã bị cron dọn — không bao giờ trả một
+file rỗng.
+
+### Sáu chỗ khác plan, cố ý
+
+1. **Hai hàm pipeline, không phải một.** `run_song_pipeline` và
+   `run_speech_pipeline`. Nhánh `speech` chạy `queued → converting → done` đúng
+   như docstring của `jobs.py`: không separation, không mix, bước encode mp3 nằm
+   trong `converting` vì nó chỉ tốn một giây.
+2. **`Separator` là `@app.cls`, không phải `@app.function`.** Cùng lý do với
+   `VoiceConverter`: load checkpoint một lần trong `@modal.enter()` rồi giữ
+   container ấm 5 phút.
+3. **`api_image` giờ có ffmpeg và numpy.** Nó chạy cả web endpoint, cron cleanup
+   lẫn pipeline. Vẫn không có torch — phần nặng ở container khác.
+4. **Consent gate làm luôn ở đây** (Phase 6 mục 1). Checkbox mà chỉ frontend tự
+   kiểm thì không phải cổng chặn: `/submit` từ chối khi thiếu `consent=true`.
+   Kèm luôn mục 2 — mọi file output đóng dấu `-metadata comment=AI-generated…`,
+   vì `mixing.py` là chỗ duy nhất sinh ra bytes output.
+5. **CORS mở sẵn.** Bài 3 phút là 4–7 MB, vượt giới hạn body 4.5 MB của Vercel,
+   nên client phải POST thẳng lên Modal (plan §6). Giới hạn origin là chuyện cấu
+   hình lúc deploy, chưa hardcode domain nào.
+6. **`semitone_shift` lấy từ request.** Phase 5 mới tự tính từ vocal stem;
+   `pipeline.py` đã để sẵn đúng một chỗ nhận giá trị đó và truyền chung cho cả
+   bài — không bao giờ tính lại theo từng chunk.
+
+### Còn phải verify bằng hạ tầng thật
+
+`tests/` phủ phần chạy được không cần GPU: clamp tham số, đặt tên stem, filter
+graph ffmpeg (chạy ffmpeg thật trong CI), và toàn bộ validate/status code của
+API qua `TestClient`. Các mục acceptance còn lại của Phase 3 cần deploy thật:
+
+- [ ] end-to-end: bài 3 phút + giọng mẫu 15s → ra file cover hoàn chỉnh
+- [ ] nhạc nền không méo, vocal không chìm cũng không chói
+- [ ] job fail giữa chừng → status `failed` có message, không treo vô hạn
+- [ ] `/submit` trả về trong < 2 giây với file 7 MB
+- [ ] chưa có rate limit theo IP (plan §9) — làm cùng Phase 4
+
+Validate độ dài file (reference 5–30s, nguồn ≤ 15 phút) nằm ở container GPU chứ
+không ở `/submit`: chỉ chỗ đó mới decode được audio. Nghĩa là file sai độ dài
+báo lỗi qua `status.error` sau vài giây, không phải ngay lúc submit.

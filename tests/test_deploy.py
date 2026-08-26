@@ -12,8 +12,13 @@ from modal_app.deploy import app
 
 
 def test_deploy_registers_everything_the_pipeline_needs():
-    assert {"api", "cleanup"} <= set(app.registered_functions)
-    assert "VoiceConverter" in app.registered_classes
+    assert {
+        "api",
+        "cleanup",
+        "run_song_pipeline",
+        "run_speech_pipeline",
+    } <= set(app.registered_functions)
+    assert {"VoiceConverter", "Separator"} <= set(app.registered_classes)
 
 
 def test_the_cleanup_cron_sweeps_at_least_as_often_as_the_ttl():
@@ -23,8 +28,24 @@ def test_the_cleanup_cron_sweeps_at_least_as_often_as_the_ttl():
 
 
 def test_importing_the_api_alone_is_not_a_complete_deploy():
-    """Why `deploy.py` exists: `modal deploy -m modal_app.api` publishes one function."""
+    """Why `deploy.py` exists: `modal deploy -m modal_app.api` would leave the
+    GPU conversion class out of the deployment."""
     api = importlib.import_module("modal_app.api")
     assert api.api.info.function_name == "api"
-    # The class lives in a module `api.py` never imports.
+    # `conversion` is imported inside the pipeline function bodies, so it is
+    # never imported by the web container — and never registered by it either.
     assert not hasattr(api, "VoiceConverter")
+
+
+def test_the_web_container_does_not_import_the_gpu_stack():
+    """The API image has no torch and no audio-separator. Importing either at
+    module scope would turn every cold start into an ImportError."""
+    for module in ("modal_app.api", "modal_app.pipeline"):
+        source = importlib.import_module(module).__file__
+        with open(source) as handle:
+            top_level = [
+                line
+                for line in handle
+                if line.startswith(("import ", "from ")) and "conversion" in line
+            ]
+        assert top_level == [], module

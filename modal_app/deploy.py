@@ -11,7 +11,7 @@ does not drag the audio stack into the API image.
     modal deploy -m modal_app.deploy
 """
 
-from . import api, conversion, storage  # noqa: F401  (imported for registration)
+from . import api, conversion, pipeline, separation, storage  # noqa: F401  (registration)
 from .app import app
 
 __all__ = ["app"]
