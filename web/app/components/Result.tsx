@@ -2,13 +2,17 @@
 
 import { useEffect, useState } from "react";
 
+import { formatSemitones } from "@/lib/params";
+
 export function Result({
   blob,
   jobId,
+  semitoneShift,
   onReset,
 }: {
   blob: Blob;
   jobId: string;
+  semitoneShift: number | null;
   onReset: () => void;
 }) {
   const [url, setUrl] = useState<string | null>(null);
@@ -34,6 +38,12 @@ export function Result({
           Làm bài khác
         </button>
       </div>
+      {semitoneShift !== null && (
+        <p className="field-note">
+          Đã dịch cao độ {formatSemitones(semitoneShift)} nửa cung. Nghe chưa vừa thì mở &ldquo;Tinh
+          chỉnh&rdquo; ở lần sau và tự đặt lại.
+        </p>
+      )}
       <p className="field-note">
         File có gắn metadata đánh dấu là nội dung tạo bởi AI, và bị xoá khỏi máy chủ sau 6 giờ.
       </p>

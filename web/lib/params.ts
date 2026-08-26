@@ -37,13 +37,18 @@ export const MAX_REFERENCE_BYTES = 20 * 1024 * 1024;
 export const SOURCE_MAX_SEC = 15 * 60;
 
 export type Params = {
-  semitoneShift: number;
+  /**
+   * null = auto-detect (plan §7). Not the same as 0, which is a deliberate
+   * "leave the pitch where it is" — the backend distinguishes the two and
+   * measures the vocal stem only for null.
+   */
+  semitoneShift: number | null;
   diffusionSteps: number;
   vocalGainDb: number;
 };
 
 export function defaultParams(mode: Mode): Params {
-  return { semitoneShift: 0, diffusionSteps: DEFAULT_DIFFUSION_STEPS[mode], vocalGainDb: 0 };
+  return { semitoneShift: null, diffusionSteps: DEFAULT_DIFFUSION_STEPS[mode], vocalGainDb: 0 };
 }
 
 export function clamp(value: number, min: number, max: number): number {
@@ -64,9 +69,16 @@ export function forMode(params: Params, next: Mode, previous: Mode): Params {
   const untouched = params.diffusionSteps === DEFAULT_DIFFUSION_STEPS[previous];
   return {
     ...params,
-    semitoneShift: clamp(params.semitoneShift, -limit, limit),
+    semitoneShift:
+      params.semitoneShift === null ? null : clamp(params.semitoneShift, -limit, limit),
     diffusionSteps: untouched ? DEFAULT_DIFFUSION_STEPS[next] : params.diffusionSteps,
   };
+}
+
+/** `+3` / `−2` / `0`, with a real minus sign. */
+export function formatSemitones(shift: number): string {
+  if (shift === 0) return "0";
+  return shift > 0 ? `+${shift}` : `−${Math.abs(shift)}`;
 }
 
 export function formatBytes(bytes: number): string {

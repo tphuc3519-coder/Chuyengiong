@@ -36,6 +36,8 @@ export type RunState = {
   elapsedMs: number;
   jobId: string | null;
   jobsRemaining: number | null;
+  /** The shift the backend measured, once it has. Null while auto-detect runs. */
+  semitoneShift: number | null;
   error: string | null;
   blob: Blob | null;
 };
@@ -48,6 +50,7 @@ const IDLE: RunState = {
   elapsedMs: 0,
   jobId: null,
   jobsRemaining: null,
+  semitoneShift: null,
   error: null,
   blob: null,
 };
@@ -140,6 +143,7 @@ export function useConversion() {
             ...current,
             status: update.status,
             progress: update.progress,
+            semitoneShift: update.semitone_shift ?? current.semitoneShift,
           })),
         );
 

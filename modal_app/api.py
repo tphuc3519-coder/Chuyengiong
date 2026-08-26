@@ -137,7 +137,10 @@ async def submit(
     source: Annotated[UploadFile, File(alias="input")],
     reference: Annotated[UploadFile, File()],
     mode: Annotated[str, Form()] = "song",
-    semitone_shift: Annotated[int, Form()] = 0,
+    # Absent means auto-detect (plan §7), which is not the same as 0 — that is
+    # a client explicitly asking for no shift. The pipeline measures the vocal
+    # stem when this is None and reports the result through `/status`.
+    semitone_shift: Annotated[int | None, Form()] = None,
     diffusion_steps: Annotated[int, Form()] = 0,
     vocal_gain_db: Annotated[float, Form()] = 0.0,
     separation_model: Annotated[str, Form()] = DEFAULT_SEPARATION_MODEL,

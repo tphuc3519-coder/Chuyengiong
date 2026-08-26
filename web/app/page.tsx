@@ -37,6 +37,7 @@ export default function Page() {
   const [consent, setConsent] = useState(false);
 
   const [remaining, setRemaining] = useState<number | null>(null);
+  const [detected, setDetected] = useState<number | null>(null);
 
   const { state, start, reset } = useConversion();
   const busy = state.phase === "uploading" || state.phase === "running";
@@ -47,6 +48,13 @@ export default function Page() {
   useEffect(() => {
     if (state.jobsRemaining !== null) setRemaining(state.jobsRemaining);
   }, [state.jobsRemaining]);
+
+  // Likewise for the measured pitch shift: it is what the "Tự động" control
+  // shows as the last applied value, and what the slider opens on if the user
+  // decides to override it (plan §7).
+  useEffect(() => {
+    if (state.semitoneShift !== null) setDetected(state.semitoneShift);
+  }, [state.semitoneShift]);
 
   function switchMode(next: Mode) {
     setMode(next);
@@ -78,7 +86,12 @@ export default function Page() {
       {state.phase === "done" && state.blob && state.jobId ? (
         <section className="card">
           <h2>Xong</h2>
-          <Result blob={state.blob} jobId={state.jobId} onReset={reset} />
+          <Result
+            blob={state.blob}
+            jobId={state.jobId}
+            semitoneShift={state.semitoneShift}
+            onReset={reset}
+          />
         </section>
       ) : busy ? (
         <section className="card">
@@ -88,6 +101,7 @@ export default function Page() {
             progress={state.progress}
             uploaded={state.uploaded}
             elapsedMs={state.elapsedMs}
+            semitoneShift={state.semitoneShift}
           />
           <button type="button" className="button ghost" onClick={reset}>
             Huỷ
@@ -125,7 +139,7 @@ export default function Page() {
 
           <fieldset className="step">
             <legend>4 · Tuỳ chọn</legend>
-            <Advanced mode={mode} params={params} onChange={setParams} />
+            <Advanced mode={mode} params={params} detected={detected} onChange={setParams} />
           </fieldset>
 
           <fieldset className="step">

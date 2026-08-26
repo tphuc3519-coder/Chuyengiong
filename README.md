@@ -14,7 +14,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 2 | Storage + job state | 🟡 code xong, chờ chạy `modal run -m modal_app.verify` |
 | 3 | Nối pipeline hoàn chỉnh | 🟡 code xong, chờ chạy end-to-end thật |
 | 4 | Frontend | 🟡 code xong, chờ test trên iOS Safari thật |
-| 5 | Pitch auto-detect | ⬜ |
+| 5 | Pitch auto-detect | 🟡 code xong, acceptance §7 pass bằng tone tổng hợp |
 | 6 | Consent gate | ⬜ |
 
 ## Cấu trúc
@@ -30,6 +30,7 @@ modal_app/
 ├── pipeline.py     # orchestration: spawn + nối các bước, cập nhật job state
 ├── storage.py      # file trên Volume + cron dọn rác
 ├── jobs.py         # state machine của job, lưu trong modal.Dict
+├── pitch.py        # YIN + gợi ý dịch cao độ — port từ thanh-pitch
 ├── ratelimit.py    # 5 job/giờ mỗi client, khoá là hash của địa chỉ
 ├── deploy.py       # target deploy duy nhất — import mọi module để đăng ký
 └── verify.py       # acceptance Phase 2 chạy trên hạ tầng thật (không cần GPU)
@@ -403,3 +404,68 @@ cần máy thật và một deployment thật:
 - [ ] progress bar không đứng im quá 20 giây
 - [ ] chưa có preset giọng nào (`web/public/presets/index.json` rỗng) — cần 4–6
       clip tự thu hoặc có licence rõ ràng, plan §8 mục 4
+
+---
+
+## Phase 5 — Pitch auto-detect
+
+### Port từ [`chamaya00/thanh-pitch`](https://github.com/chamaya00/thanh-pitch)
+
+`modal_app/pitch.py` là hàm `detectPitch` trong `index.html` của repo đó, giữ
+nguyên thuật toán và **nguyên mọi hằng số đã tune**: ngưỡng tuyệt đối 0.13, gate
+RMS 0.006, gate clarity 0.72, trần fallback 0.55, quy tắc "cực tiểu cục bộ đầu
+tiên dưới ngưỡng", nội suy parabol, và hai dải `RANGES.speak` 60–500 Hz /
+`RANGES.sing` 60–1200 Hz. Không có con số nào ở đây là đoán lại từ đầu.
+
+Hai chỗ đổi, đều vì chạy trên cả file thay vì từng frame analyser:
+
+1. **Chạy theo lô.** Bản trình duyệt duyệt vòng lặp thẳng trên 4096 mẫu mỗi
+   animation frame. Bài 15 phút là ~18000 frame, nên hàm sai khác được tính qua
+   FFT theo block 2000 frame — cùng công thức (`d(τ) = Σx² + Σx²ₜ − 2Σxxₜ`),
+   chỉ là phần tương quan giao cho FFT.
+2. **Bỏ bộ lọc trung vị 3 frame.** Nó tồn tại để kim trên màn hình không nhảy
+   quãng tám. Lấy trung vị trên *mọi* frame hữu thanh của cả file — thứ mà gợi ý
+   dịch cao độ vốn cần — làm việc đó tốt hơn.
+
+Tốc độ: bài 8,5 phút mất ~4s trên CPU container. Không cần GPU, không cần
+librosa (`api_image` vẫn chỉ có ffmpeg + numpy, `/status` vẫn khởi động trong
+vài giây).
+
+### `None` không phải `0`
+
+Đây là chỗ cả tính năng dựa vào. `/submit` **bỏ trống** `semitone_shift` nghĩa
+là "tự đo"; gửi `0` nghĩa là "giữ nguyên cao độ". `clean_params` giữ `None`
+nguyên vẹn thay vì `or 0`, và `pipeline._resolve_shift` là chỗ duy nhất biến nó
+thành số.
+
+Đo **sau separation, trước khi chunk**, trên vocal stem chứ không phải bản mix —
+đo bản mix là đo cả nhạc nền lẫn người hát. Nhánh `speech` không có separation
+nên đo thẳng file nguồn. Một giá trị cho cả bài, không bao giờ tính lại theo
+từng chunk: đó là bug mà plan §10 gọi là phổ biến nhất của loại app này.
+
+### Ba chỗ khác plan, cố ý
+
+1. **Slider không mở sẵn bằng giá trị gợi ý — vì chưa có giá trị nào.** Plan §7
+   nói hiển thị gợi ý làm mặc định trên slider, nhưng cũng nói gợi ý được tính
+   trong `pipeline.py` sau separation. Hai điều đó không xảy ra cùng lúc: lúc
+   người dùng nhìn slider thì chưa tách nhạc. Nên "Tự động" là một *chế độ* bật
+   sẵn, và giá trị đo được hiện ra khi job chạy tới đó; tắt "Tự động" thì slider
+   mở đúng ở con số lần trước đã áp dụng.
+2. **`jobs.public()` lộ đúng một tham số.** `semitone_shift` là thứ duy nhất
+   trong `params` đi ra ngoài, vì với auto-detect thì client không chọn nó —
+   `/status` là đường duy nhất để thấy đã áp dụng bao nhiêu.
+3. **Hai bên đo bằng cùng một dải F0.** Dải chỉ giới hạn khoảng tìm chu kỳ chứ
+   không lọc kết quả, nên tiếng cao hơn trần sẽ bị gập xuống quãng tám dưới
+   (700 Hz đọc bằng dải `speech` ra 350). Đo hai bên bằng hai dải khác nhau sẽ
+   lệch một cách khó thấy.
+
+### Acceptance §7
+
+Cả hai mục pass bằng test tổng hợp (`tests/test_pitch.py`) — tone có tần số biết
+trước là một trong số ít thứ trong pipeline audio có đáp án đúng kiểm được:
+
+- [x] gợi ý cho cặp nam→nữ ra khoảng +10 đến +14 (130 Hz → 245 Hz cho +11)
+- [x] bài có intro nhạc dài không làm lệch kết quả — 45s im lặng + 20s hát ở
+      220 Hz vẫn ra 220,0 Hz
+- [ ] còn phải nghe bằng tai trên giọng thật: tone tổng hợp không có vibrato,
+      không có luyến, và không có tiếng nhạc rò sang vocal stem

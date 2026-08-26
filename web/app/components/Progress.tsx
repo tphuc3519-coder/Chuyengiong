@@ -1,7 +1,7 @@
 "use client";
 
 import { STATUS_LABEL, type Status } from "@/lib/api";
-import { formatSeconds } from "@/lib/params";
+import { formatSeconds, formatSemitones } from "@/lib/params";
 
 /**
  * One bar for the whole run, including the upload.
@@ -15,11 +15,13 @@ export function Progress({
   progress,
   uploaded,
   elapsedMs,
+  semitoneShift,
 }: {
   status: Status | "uploading";
   progress: number;
   uploaded: number;
   elapsedMs: number;
+  semitoneShift: number | null;
 }) {
   const uploading = status === "uploading";
   const percent = uploading ? Math.round(uploaded * 100) : progress;
@@ -49,6 +51,14 @@ export function Progress({
           ? "Giữ tab này mở cho tới khi tải xong."
           : "Bài 3 phút thường mất 2–4 phút. Lần đầu chậm hơn vì máy chủ khởi động."}
       </p>
+      {/* Appears mid-run: the shift is measured after separation, so this is
+          the first moment there is anything to say about it. */}
+      {semitoneShift !== null && (
+        <p className="progress-hint">
+          Cao độ: {formatSemitones(semitoneShift)} nửa cung
+          {semitoneShift === 0 ? " (giữ nguyên)" : ""}
+        </p>
+      )}
     </div>
   );
 }

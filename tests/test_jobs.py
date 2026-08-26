@@ -138,6 +138,7 @@ def test_public_view_hides_params(store):
     record = new(store, params={"reference_path": "/data/x/reference.wav"})
     view = jobs.public(record)
     assert "params" not in view
+    assert "reference_path" not in view
     assert set(view) == {
         "id",
         "status",
@@ -146,7 +147,36 @@ def test_public_view_hides_params(store):
         "error",
         "created_at",
         "updated_at",
+        "semitone_shift",
     }
+
+
+def test_the_public_view_carries_the_shift_that_was_applied(store):
+    """The one parameter that leaks out on purpose: with auto-detect the client
+    did not choose it, so `/status` is the only way it can be seen (plan §7)."""
+    record = new(store, params={"semitone_shift": 11, "diffusion_steps": 50})
+    view = jobs.public(record)
+    assert view["semitone_shift"] == 11
+    assert "diffusion_steps" not in view
+
+
+def test_the_shift_reads_none_until_it_has_been_measured(store):
+    unmeasured = jobs.create("a" * 32, "song", params={"semitone_shift": None}, store=store)
+    assert jobs.public(unmeasured)["semitone_shift"] is None
+    # A record written before Phase 5 existed has no such key at all.
+    assert jobs.public(jobs.create("b" * 32, "song", store=store))["semitone_shift"] is None
+
+
+def test_record_params_merges_rather_than_replaces(store):
+    job = new(store, params={"semitone_shift": None, "diffusion_steps": 50})
+    updated = jobs.record_params(job["id"], {"semitone_shift": 7}, store=store)
+    assert updated["params"] == {"semitone_shift": 7, "diffusion_steps": 50}
+    assert store[job["id"]]["params"]["semitone_shift"] == 7
+
+
+def test_record_params_on_an_unknown_job_raises(store):
+    with pytest.raises(jobs.JobError):
+        jobs.record_params("f" * 32, {"semitone_shift": 1}, store=store)
 
 
 def test_expired_records_are_found_and_forgotten(store):

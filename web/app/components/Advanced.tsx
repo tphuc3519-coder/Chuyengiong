@@ -7,6 +7,8 @@ import {
   DIFFUSION_STEPS_MIN,
   MAX_SEMITONE_SHIFT,
   MAX_VOCAL_GAIN_DB,
+  clamp,
+  formatSemitones,
   type Mode,
   type Params,
 } from "@/lib/params";
@@ -14,21 +16,30 @@ import {
 /**
  * Collapsed by default (plan §6 step 4). Most runs should be Convert-and-wait;
  * the sliders are for the second attempt, once something sounded wrong.
+ *
+ * Pitch is the exception to "a slider with a default": the useful default is
+ * measured off the vocal stem during the run (plan §7), so before the first
+ * run there is no number to show. Auto is therefore a mode rather than a
+ * starting value, and `detected` — what the last run actually applied — is
+ * what the slider opens on when the user turns auto off.
  */
 export function Advanced({
   mode,
   params,
+  detected,
   onChange,
   disabled,
 }: {
   mode: Mode;
   params: Params;
+  detected: number | null;
   onChange: (params: Params) => void;
   disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
   const pitchLimit = MAX_SEMITONE_SHIFT[mode];
+  const auto = params.semitoneShift === null;
 
   return (
     <div className="advanced">
@@ -44,29 +55,60 @@ export function Advanced({
       </button>
 
       <div id={panelId} hidden={!open} className="advanced-panel">
-        <label className="slider">
+        <div className="slider">
           <span className="slider-label">
             Dịch cao độ
             <output>
-              {params.semitoneShift > 0 ? "+" : ""}
-              {params.semitoneShift} nửa cung
+              {auto
+                ? detected === null
+                  ? "tự động"
+                  : `tự động · lần trước ${formatSemitones(detected)}`
+                : `${formatSemitones(params.semitoneShift ?? 0)} nửa cung`}
             </output>
           </span>
-          <input
-            type="range"
-            min={-pitchLimit}
-            max={pitchLimit}
-            step={1}
-            value={params.semitoneShift}
-            disabled={disabled}
-            onChange={(event) => onChange({ ...params, semitoneShift: Number(event.target.value) })}
-          />
+
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={auto}
+              disabled={disabled}
+              onChange={(event) =>
+                onChange({
+                  ...params,
+                  // Turning auto off starts from what the last run measured,
+                  // which is the number the user is reacting to.
+                  semitoneShift: event.target.checked
+                    ? null
+                    : clamp(detected ?? 0, -pitchLimit, pitchLimit),
+                })
+              }
+            />
+            <span>Tự động dò từ giọng mẫu</span>
+          </label>
+
+          {!auto && (
+            <input
+              type="range"
+              min={-pitchLimit}
+              max={pitchLimit}
+              step={1}
+              value={params.semitoneShift ?? 0}
+              disabled={disabled}
+              aria-label="Dịch cao độ, nửa cung"
+              onChange={(event) =>
+                onChange({ ...params, semitoneShift: Number(event.target.value) })
+              }
+            />
+          )}
+
           <span className="slider-hint">
-            {mode === "speech"
-              ? `Giọng nói giới hạn ±${pitchLimit}: dịch xa hơn nghe méo thanh điệu.`
-              : "Nam→nữ thường +12, nữ→nam thường −12. Để 0 nếu không chắc."}
+            {auto
+              ? "Đo F0 trung vị của giọng trong bài và của giọng mẫu rồi lấy chênh lệch. Chỉ tính trên đoạn có tiếng, nên nhạc dạo dài không làm lệch."
+              : mode === "speech"
+                ? `Giọng nói giới hạn ±${pitchLimit}: dịch xa hơn nghe méo thanh điệu.`
+                : "Nam→nữ thường +12, nữ→nam thường −12."}
           </span>
-        </label>
+        </div>
 
         <label className="slider">
           <span className="slider-label">

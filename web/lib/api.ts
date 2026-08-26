@@ -23,6 +23,12 @@ export type JobRecord = {
   progress: number;
   mode: Mode;
   error: string | null;
+  /**
+   * What the conversion actually used. Null until separation is done and the
+   * pitch measurement has run — with auto-detect this is the only place the
+   * chosen value surfaces (plan §7).
+   */
+  semitone_shift: number | null;
 };
 
 export type SubmitResult = { job_id: string; status: Status; mode: Mode; jobs_remaining?: number };
@@ -82,7 +88,11 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
   form.set("input", input.source, input.source.name);
   form.set("reference", input.reference, input.referenceName);
   form.set("mode", input.mode);
-  form.set("semitone_shift", String(input.params.semitoneShift));
+  // Omitted, not sent as 0: an absent field is how the backend is told to
+  // measure the pitch itself, and 0 is a real setting that suppresses it.
+  if (input.params.semitoneShift !== null) {
+    form.set("semitone_shift", String(input.params.semitoneShift));
+  }
   form.set("diffusion_steps", String(input.params.diffusionSteps));
   form.set("vocal_gain_db", String(input.params.vocalGainDb));
   form.set("consent", String(input.consent));

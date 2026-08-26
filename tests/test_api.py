@@ -207,6 +207,23 @@ def test_an_expired_output_is_a_410_not_a_500(client, monkeypatch, volume):
     assert client.get(f"/download/{'e' * 32}").status_code == 410
 
 
+def test_an_omitted_shift_reaches_the_pipeline_as_auto(client, started):
+    """Plan §7: no slider input means measure it off the vocal stem, which the
+    pipeline can only tell from None."""
+    assert client.post("/submit", **upload()).status_code == 200
+    assert started[0]["params"]["semitone_shift"] is None
+
+
+def test_an_explicit_zero_is_kept_as_zero(client, started):
+    assert client.post("/submit", **upload(semitone_shift="0")).status_code == 200
+    assert started[0]["params"]["semitone_shift"] == 0
+
+
+def test_an_explicit_shift_is_passed_through_clamped(client, started):
+    assert client.post("/submit", **upload(mode="speech", semitone_shift="20")).status_code == 200
+    assert started[0]["params"]["semitone_shift"] == 8
+
+
 # --- rate limit -----------------------------------------------------------
 
 
