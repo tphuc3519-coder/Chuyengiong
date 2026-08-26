@@ -4,3 +4,7 @@ modal>=1.0,<2
 fastapi[standard]>=0.115
 pytest>=8.0
 ruff>=0.6
+
+# Used by modal_app/audio_utils.py, which runs both in the container and in
+# the unit tests. Pinned below 2 to match the audio stack in the images.
+numpy>=1.26,<2
