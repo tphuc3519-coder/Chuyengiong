@@ -23,7 +23,9 @@ record so `/status` can show what was applied.
 
 from __future__ import annotations
 
-from . import jobs, storage
+import time
+
+from . import audit, jobs, storage
 from .app import DATA_DIR, api_image, app, data_vol
 from .audio_utils import clamp_diffusion_steps, clamp_semitone_shift
 from .mixing import clamp_gain_db
@@ -81,6 +83,31 @@ def _error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
 
 
+def _finished(
+    job_id: str,
+    mode: str,
+    params: dict,
+    started: float,
+    exc: BaseException | None = None,
+) -> None:
+    """Close the audit trail for one run (plan §8 item 5).
+
+    On failure this logs the exception's *class*, not `_error_text`: that
+    message can quote ffmpeg on a file the user uploaded, and the status
+    endpoint already carries it to the one person entitled to read it.
+    """
+    audit.record(
+        audit.FAILED if exc is not None else audit.DONE,
+        job_id,
+        mode=mode,
+        seconds=time.monotonic() - started,
+        shift=params.get("semitone_shift"),
+        steps=params.get("diffusion_steps"),
+        model=params.get("separation_model"),
+        reason=type(exc).__name__ if exc is not None else None,
+    )
+
+
 def _resolve_shift(job_id: str, params: dict, source: bytes, reference: bytes, mode: str) -> int:
     """The one place a pitch shift is decided, and the only time it is measured.
 
@@ -119,6 +146,7 @@ def run_song_pipeline(job_id: str, params: dict) -> str:
     from .mixing import mix
     from .separation import INSTRUMENTAL_STEM, VOCAL_STEM, Separator
 
+    started = time.monotonic()
     data_vol.reload()
     try:
         jobs.update(job_id, jobs.SEPARATING)
@@ -155,10 +183,12 @@ def run_song_pipeline(job_id: str, params: dict) -> str:
         data_vol.commit()
 
         jobs.update(job_id, jobs.DONE)
+        _finished(job_id, "song", params, started)
         return job_id
     except Exception as exc:
         jobs.fail(job_id, _error_text(exc))
         data_vol.commit()
+        _finished(job_id, "song", params, started, exc)
         raise
 
 
@@ -168,6 +198,7 @@ def run_speech_pipeline(job_id: str, params: dict) -> str:
     from .conversion import VoiceConverter
     from .mixing import to_mp3
 
+    started = time.monotonic()
     data_vol.reload()
     try:
         jobs.update(job_id, jobs.CONVERTING)
@@ -188,10 +219,12 @@ def run_speech_pipeline(job_id: str, params: dict) -> str:
         data_vol.commit()
 
         jobs.update(job_id, jobs.DONE)
+        _finished(job_id, "speech", params, started)
         return job_id
     except Exception as exc:
         jobs.fail(job_id, _error_text(exc))
         data_vol.commit()
+        _finished(job_id, "speech", params, started, exc)
         raise
 
 

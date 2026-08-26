@@ -15,7 +15,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 3 | Nối pipeline hoàn chỉnh | 🟡 code xong, chờ chạy end-to-end thật |
 | 4 | Frontend | 🟡 code xong, chờ test trên iOS Safari thật |
 | 5 | Pitch auto-detect | 🟡 code xong, acceptance §7 pass bằng tone tổng hợp |
-| 6 | Consent gate | ⬜ |
+| 6 | Consent gate & an toàn | 🟡 code xong, còn watermark là việc trước khi mở public |
 
 ## Cấu trúc
 
@@ -31,6 +31,7 @@ modal_app/
 ├── storage.py      # file trên Volume + cron dọn rác
 ├── jobs.py         # state machine của job, lưu trong modal.Dict
 ├── pitch.py        # YIN + gợi ý dịch cao độ — port từ thanh-pitch
+├── audit.py        # nhật ký job: mã job + thời điểm, không bao giờ có audio
 ├── ratelimit.py    # 5 job/giờ mỗi client, khoá là hash của địa chỉ
 ├── deploy.py       # target deploy duy nhất — import mọi module để đăng ký
 └── verify.py       # acceptance Phase 2 chạy trên hạ tầng thật (không cần GPU)
@@ -469,3 +470,83 @@ trước là một trong số ít thứ trong pipeline audio có đáp án đún
       220 Hz vẫn ra 220,0 Hz
 - [ ] còn phải nghe bằng tai trên giọng thật: tone tổng hợp không có vibrato,
       không có luyến, và không có tiếng nhạc rò sang vocal stem
+
+---
+
+## Phase 6 — Consent gate & an toàn
+
+Plan §8 nói thẳng: rủi ro lớn nhất của app loại này là pháp lý chứ không phải
+kỹ thuật. Năm mục bắt buộc, và chỗ mỗi mục thật sự được thi hành:
+
+| Mục plan §8 | Ở đâu | Ghi chú |
+|---|---|---|
+| 1 · checkbox không tick sẵn | `web/app/components/ConsentGate.tsx` + `api.submit` | Làm từ Phase 3 — cổng thật nằm ở `/submit`, không ở trình duyệt |
+| 2 · metadata `AI-generated` | `modal_app/mixing.py` | Làm từ Phase 3 — `mixing` là nơi duy nhất sinh bytes output |
+| 3 · terms of service | `web/app/terms/page.tsx` | Link từ ô đồng thuận và footer |
+| 4 · không giọng người nổi tiếng | `web/public/presets/` + `tests/test_presets.py` | Luật thành test, không phải lời hứa |
+| 5 · audit trail | `modal_app/audit.py` | Mã job + thời điểm; audio không bao giờ vào log |
+
+### Audit trail — `audit.py`
+
+Một dòng JSON cho mỗi sự kiện, ra stdout (Modal gom log), tiền tố `[audit]`:
+
+```
+[audit] {"ts":"2026-08-26T09:14:02Z","event":"submit","job":"a1b2…","mode":"song",
+         "client":"9f3c…","consent":true,"input_bytes":5242880,"reference_bytes":180224}
+[audit] {"ts":"2026-08-26T09:15:37Z","event":"done","job":"a1b2…","mode":"song",
+         "seconds":94.3,"shift":11,"steps":50,"model":"htdemucs","reason":null}
+```
+
+Năm sự kiện: `submit` (`api.submit`, sau khi job đã start), `done`/`failed`
+(`pipeline._finished`), `download` (`api.download`, chỉ khi thật sự trả file), và
+`expire` (cron `storage.cleanup`, không có mã job — nó nói cả lô đã bị xoá).
+Tra một khiếu nại: `grep '[audit]' | cut -d' ' -f2- | jq 'select(.job=="…")'`.
+
+Nửa sau của yêu cầu — *không* log nội dung — được ép bằng cấu trúc chứ không
+bằng trí nhớ:
+
+1. **Allowlist tên trường.** `audit.FIELDS` là danh sách đầy đủ những gì được
+   ghi. Trường lạ bị bỏ và **tên** của nó (tên do code đặt, không phải dữ liệu
+   người dùng) hiện trong `dropped` — người viết thấy ngay, thay vì để tên file
+   nằm trong log ba tháng rồi mới phát hiện.
+2. **Chỉ scalar sống sót.** `bytes` không render được ở đâu cả, nên đưa cả file
+   wav vào `record()` cũng không ra được audio. Chuỗi bị gộp xuống một dòng và
+   cắt ở 64 ký tự — không có giá trị nào tự bịa ra được một dòng log thứ hai.
+3. **`record()` không bao giờ raise.** Mọi chỗ gọi nó đều nằm trên đường request
+   hoặc trong `except` của pipeline; một dòng log hỏng định dạng mà làm chết job
+   thì tệ hơn hẳn việc mất dòng log đó.
+
+Ba thứ cố ý không có: địa chỉ IP (chỉ có hash từ `ratelimit.client_key`), tên
+file người dùng gửi lên, và **message** của exception — `failed` ghi tên *class*
+thôi, vì message có thể trích nguyên câu ffmpeg nói về file của người dùng.
+`/status` vẫn mang message đầy đủ tới đúng một người có quyền đọc nó.
+
+### Presets — luật §8 mục 4 viết thành test
+
+`tests/test_presets.py` chạy trong CI Python và chặn hai chiều: mỗi entry trong
+`web/public/presets/index.json` phải có `license` nói rõ nguồn, và **không được
+có file audio nào nằm trong thư mục mà manifest không nhắc tới**. Chiều thứ hai
+mới là chiều bắt được lỗi thật — một clip thả tay vào thư mục rồi quên khai.
+
+Manifest ship rỗng vẫn pass: không có giọng nào thì UI ẩn hẳn hàng "Giọng có
+sẵn". Đó là trạng thái hợp lệ, tốt hơn là ship một giọng không ai chỉ được nguồn.
+
+### Terms — `web/app/terms/page.tsx`
+
+Ngắn, và chỉ viết những gì code thật sự làm: cam kết ở ô đồng thuận, cấm mạo
+danh, metadata AI trên file tải về, TTL 6 giờ, nhật ký chỉ có mã job, không có
+giọng người nổi tiếng, 5 lượt/giờ, nguồn ≤ 15 phút, giọng mẫu 5–30 giây. Một
+điều khoản không tương ứng với hành vi nào của hệ thống thì chỉ là trang trí.
+
+Địa chỉ khiếu nại đọc từ `CONTACT_EMAIL` lúc chạy (`lib/server.ts`), để trống thì
+trang nói thẳng là chưa công bố — không in link chết. Vì thế `/terms` là route
+động chứ không prerender.
+
+### Còn lại trước khi mở public
+
+- [ ] audio watermark — plan §8 gọi là "cân nhắc thêm", không bắt buộc ở MVP.
+      AudioSeal (MIT) là lựa chọn plan nêu; chỗ nhét là `mixing.py`, ngay trước
+      bước encode mp3, cùng chỗ đang gắn metadata.
+- [ ] điền `CONTACT_EMAIL` trên Vercel và rà lại ngày "cập nhật" của trang terms
+- [ ] nếu thêm preset: 4–6 clip tự thu hoặc có licence rõ ràng
+      (`web/public/presets/README.md`)

@@ -383,6 +383,18 @@ body {
 
 /* --- consent ------------------------------------------------------------- */
 
+/*
+ * The checkbox and the line pointing at the terms are one block: the sentence
+ * being agreed to and where it is written down belong next to each other, and
+ * only the checkbox row is a label (a `<label>` wrapping the link would eat the
+ * tap that opens it).
+ */
+.consent-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
 .consent {
   display: flex;
   gap: 0.7rem;
@@ -538,4 +550,37 @@ body {
 
 .footnote p {
   margin: 0;
+}
+
+/* --- terms page ---------------------------------------------------------- */
+
+/*
+ * The only long-form prose in the app. Narrower measure than the form card and
+ * a clear heading rhythm, because this one is meant to be read rather than
+ * filled in.
+ */
+.legal h2 {
+  margin: 1.6rem 0 0.5rem;
+  font-size: 1.05rem;
+}
+
+.legal h2:first-child {
+  margin-top: 0;
+}
+
+.legal p,
+.legal ul {
+  margin: 0 0 0.7rem;
+}
+
+.legal ul {
+  padding-left: 1.2rem;
+}
+
+.legal li {
+  margin-bottom: 0.3rem;
+}
+
+a {
+  color: var(--accent);
 }

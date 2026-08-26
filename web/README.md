@@ -21,9 +21,11 @@ npm run lint && npm run format:check && npm run typecheck && npm run build
 | Tên             | Bắt buộc | Ý nghĩa                                     |
 | --------------- | -------- | ------------------------------------------- |
 | `MODAL_API_URL` | ✅       | Base URL của Modal API, không có `/` ở cuối |
+| `CONTACT_EMAIL` | —        | Địa chỉ nhận khiếu nại, hiện trên `/terms`  |
 
-Chỉ một biến, và nó **không** có tiền tố `NEXT_PUBLIC_`: xem mục "Đường đi của
-request" bên dưới.
+Không biến nào có tiền tố `NEXT_PUBLIC_`: xem mục "Đường đi của request" bên
+dưới. `CONTACT_EMAIL` để trống thì trang điều khoản nói thẳng là chưa công bố
+kênh liên hệ, chứ không in ra một link chết.
 
 ## Đường đi của request
 
@@ -57,3 +59,14 @@ Trình duyệt không có `MediaRecorder` thì tab "Ghi âm" tự ẩn.
 
 `public/presets/index.json` ship rỗng — không có giọng nào thì hàng "Giọng có
 sẵn" tự ẩn. Cách thêm và hai ràng buộc bắt buộc: `public/presets/README.md`.
+
+## Điều khoản sử dụng
+
+`app/terms/page.tsx` — plan §8 mục 3. Link từ hai chỗ: ô đồng thuận (mở tab
+mới, để form không mất file đang chọn) và footer trang chủ. Render lúc chạy chứ
+không prerender, để đổi `CONTACT_EMAIL` không phải build lại.
+
+Trang này chỉ viết ra những gì code thật sự làm: cổng đồng thuận ở `/submit`,
+TTL 6 giờ, metadata `AI-generated` trên mọi file, giới hạn 5 lượt/giờ, và nhật
+ký chỉ có mã job — không có nội dung audio, tên file hay địa chỉ IP. Đổi một
+trong các con số đó thì sửa cả hai nơi.
