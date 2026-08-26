@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+.venv-check/
+venv/
+.pytest_cache/
+.ruff_cache/
+.env
+.env.local
+
+# Local audio scratch files used while testing conversion.
+*.wav
+*.mp3
+!web/public/presets/*.mp3
+
+# Next.js (Phase 4)
+node_modules/
+.next/
+out/
