@@ -13,6 +13,12 @@ The job's parameters are normalised **once**, in `clean_params`, before the job
 record is written. Every clamp in the plan (semitone range per mode, diffusion
 step range, vocal gain) is applied there rather than at the point of use, so
 what the status endpoint reports and what the GPU receives cannot disagree.
+
+One parameter is not known at that point: `semitone_shift` is None when the
+client asked for auto-detect, and the measurement it needs runs here, on the
+whole vocal stem, after separation and before chunking (plan §7). `_resolve_shift`
+is the single place that happens, and it writes the answer back into the job
+record so `/status` can show what was applied.
 """
 
 from __future__ import annotations
@@ -55,8 +61,11 @@ def clean_params(mode: str, raw: dict | None = None) -> dict:
     jobs.check_mode(mode)
     conversion_mode = jobs.CONVERSION_MODE[mode]
 
+    # None is a value here, not a missing one: it means "work it out from the
+    # audio" (plan §7). `or` would flatten it into 0, which is a real setting.
+    shift = raw.get("semitone_shift")
     params = {
-        "semitone_shift": clamp_semitone_shift(raw.get("semitone_shift") or 0, conversion_mode),
+        "semitone_shift": None if shift is None else clamp_semitone_shift(shift, conversion_mode),
         "diffusion_steps": clamp_diffusion_steps(raw.get("diffusion_steps") or 0, conversion_mode),
         "vocal_gain_db": clamp_gain_db(raw.get("vocal_gain_db") or 0),
         "source_ext": safe_ext(raw.get("source_ext")),
@@ -70,6 +79,29 @@ def clean_params(mode: str, raw: dict | None = None) -> dict:
 
 def _error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
+
+
+def _resolve_shift(job_id: str, params: dict, source: bytes, reference: bytes, mode: str) -> int:
+    """The one place a pitch shift is decided, and the only time it is measured.
+
+    Returns what the client asked for when it asked for something. Otherwise it
+    measures the median F0 of both sides — on the **whole** source, before any
+    chunking — and records the answer so `/status` can report it.
+
+    Everything about this is once-per-job on purpose. A shift computed per
+    chunk drifts across a song, which plan §10 lists as the most common bug in
+    this kind of app, and the reason `convert()` takes the value as an argument
+    instead of detecting it.
+    """
+    if params["semitone_shift"] is not None:
+        return params["semitone_shift"]
+
+    from .pitch import suggest_semitone_shift
+
+    shift = clamp_semitone_shift(suggest_semitone_shift(source, reference, mode), mode)
+    params["semitone_shift"] = shift
+    jobs.record_params(job_id, {"semitone_shift": shift})
+    return shift
 
 
 @app.function(
@@ -98,12 +130,17 @@ def run_song_pipeline(job_id: str, params: dict) -> str:
         data_vol.commit()
 
         jobs.update(job_id, jobs.CONVERTING)
+        reference = storage.get(job_id, REFERENCE)
+        # After separation, before chunking (plan §7). The vocal stem is what
+        # gets measured — silence detection and F0 on a full mix would both be
+        # reading the backing track as well as the singer.
+        shift = _resolve_shift(job_id, params, stems[VOCAL_STEM], reference, "singing")
         converted = VoiceConverter(mode="singing").convert.remote(
             source_wav=stems[VOCAL_STEM],
-            reference_wav=storage.get(job_id, REFERENCE),
+            reference_wav=reference,
             # One shift for the whole track, computed by the caller. Never
             # per chunk, never re-detected here — see the Phase 1 rules.
-            semitone_shift=params["semitone_shift"],
+            semitone_shift=shift,
             diffusion_steps=params["diffusion_steps"],
         )
         storage.put(job_id, CONVERTED, converted)
@@ -134,10 +171,14 @@ def run_speech_pipeline(job_id: str, params: dict) -> str:
     data_vol.reload()
     try:
         jobs.update(job_id, jobs.CONVERTING)
+        source = storage.get(job_id, INPUT)
+        reference = storage.get(job_id, REFERENCE)
+        # No separation on this branch, so the input already is the voice.
+        shift = _resolve_shift(job_id, params, source, reference, "speech")
         converted = VoiceConverter(mode="speech").convert.remote(
-            source_wav=storage.get(job_id, INPUT),
-            reference_wav=storage.get(job_id, REFERENCE),
-            semitone_shift=params["semitone_shift"],
+            source_wav=source,
+            reference_wav=reference,
+            semitone_shift=shift,
             diffusion_steps=params["diffusion_steps"],
         )
         storage.put(job_id, CONVERTED, converted)

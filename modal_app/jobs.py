@@ -170,8 +170,34 @@ def fail(job_id: str, error: str, store: MutableMapping[str, Any] | None = None)
     return update(job_id, status=FAILED, error=error, store=store)
 
 
+def record_params(
+    job_id: str,
+    updates: dict,
+    store: MutableMapping[str, Any] | None = None,
+) -> dict:
+    """Write back parameters the pipeline worked out for itself.
+
+    Phase 5 is the only caller: `semitone_shift` arrives as None when the
+    client asked for auto-detect, and the value measured off the vocal stem has
+    to land somewhere the status endpoint can read it. Anything else about a
+    job is fixed when it is created.
+    """
+    store = _store(store)
+    record = get(job_id, store)
+    record["params"] = {**record.get("params", {}), **updates}
+    store[job_id] = record
+    return record
+
+
 def public(record: dict) -> dict:
-    """What `/status/{id}` returns. `params` stays server-side."""
+    """What `/status/{id}` returns. `params` stays server-side — except one.
+
+    `semitone_shift` is the exception because the pipeline may have chosen it
+    rather than the client (plan §7): a user who asked for auto-detect has no
+    other way to see what was applied, and no way to decide what to override it
+    with next time. It reads None until separation is done and the measurement
+    has run.
+    """
     return {
         "id": record["id"],
         "status": record["status"],
@@ -180,6 +206,7 @@ def public(record: dict) -> dict:
         "error": record["error"],
         "created_at": record["created_at"],
         "updated_at": record["updated_at"],
+        "semitone_shift": record.get("params", {}).get("semitone_shift"),
     }
 
 

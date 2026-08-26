@@ -12,6 +12,7 @@ venv/
 *.wav
 *.mp3
 !web/public/presets/*.mp3
+!web/public/presets/*.wav
 
 # Next.js (Phase 4)
 node_modules/

@@ -1,0 +1,541 @@
+/*
+ * One stylesheet, no framework: the whole app is a single form and a progress
+ * card, and a utility framework would be more bytes than the page it styles.
+ *
+ * Two constraints come from the test device (iOS Safari, plan §6):
+ * inputs stay at 16px so focusing one does not zoom the page, and tap targets
+ * stay at 44px.
+ */
+
+:root {
+  --bg: #f7f7f8;
+  --surface: #ffffff;
+  --line: #e2e2e6;
+  --text: #17171a;
+  --muted: #6a6a73;
+  --accent: #3b5bdb;
+  --accent-text: #ffffff;
+  --danger: #c92a2a;
+  --danger-bg: #fff5f5;
+  --radius: 12px;
+  --tap: 44px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111113;
+    --surface: #1b1b1f;
+    --line: #2e2e34;
+    --text: #ececf0;
+    --muted: #9a9aa4;
+    --accent: #748ffc;
+    --accent-text: #10121a;
+    --danger: #ff8787;
+    --danger-bg: #2a1416;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/*
+ * The UA rule for `[hidden]` loses to any author rule that sets `display`, so
+ * a collapsed panel with `display: flex` on its class stays visible while
+ * reporting `aria-expanded="false"` — worse than not collapsing at all. One
+ * rule here rather than a `[hidden]` variant next to every such class.
+ */
+[hidden] {
+  display: none !important;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font:
+    16px/1.55 system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+}
+
+.page {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 2rem 1rem 3rem;
+}
+
+.masthead h1 {
+  margin: 0 0 0.35rem;
+  font-size: 1.7rem;
+  letter-spacing: -0.01em;
+}
+
+.masthead p {
+  margin: 0 0 1.5rem;
+  color: var(--muted);
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.card > h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.step {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.step > legend {
+  padding: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* --- mode ---------------------------------------------------------------- */
+
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.segment {
+  min-height: var(--tap);
+  padding: 0.7rem;
+  text-align: left;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font: inherit;
+}
+
+.segment.is-active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.segment-label {
+  font-weight: 600;
+}
+
+.segment-hint,
+.drop-hint,
+.slider-hint,
+.preset-note,
+.field-note,
+.progress-hint {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+/* --- file drop ----------------------------------------------------------- */
+
+.drop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 6rem;
+  padding: 1rem;
+  border: 1.5px dashed var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.15s ease;
+}
+
+.drop.is-over,
+.drop:focus-within {
+  border-color: var(--accent);
+}
+
+.drop.has-file {
+  border-style: solid;
+}
+
+.drop-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.drop-filename {
+  overflow-wrap: anywhere;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* --- reference ----------------------------------------------------------- */
+
+.reference {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  background: var(--bg);
+  border-radius: var(--radius);
+}
+
+.tab {
+  flex: 1;
+  min-height: 2.25rem;
+  border: 0;
+  border-radius: calc(var(--radius) - 4px);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.tab.is-active {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.recorder {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.meter {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 3.5rem;
+  padding: 0 0.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.meter-bar {
+  flex: 1;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  opacity: 0.75;
+  transform: scaleY(0.06);
+  transition: transform 0.08s linear;
+}
+
+.recorder-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.recorder-status {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.presets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.preset {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 0.6rem 0.8rem;
+  text-align: left;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+}
+
+.preset.is-active {
+  border-color: var(--accent);
+}
+
+/* --- advanced ------------------------------------------------------------ */
+
+.disclosure {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: var(--tap);
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chevron {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+}
+
+.chevron.is-open {
+  transform: rotate(45deg);
+}
+
+.advanced-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  padding-top: 0.5rem;
+}
+
+.slider {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.slider-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-weight: 600;
+}
+
+.slider-label output {
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* The auto/override toggle inside a slider block. `.consent` is the other
+   checkbox in the app and is deliberately heavier — that one is a gate. */
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 2rem;
+  cursor: pointer;
+}
+
+.checkbox input {
+  width: 1.1rem;
+  height: 1.1rem;
+  margin: 0;
+  accent-color: var(--accent);
+  flex: none;
+}
+
+.slider input[type="range"] {
+  width: 100%;
+  height: var(--tap);
+  accent-color: var(--accent);
+}
+
+/* --- consent ------------------------------------------------------------- */
+
+.consent {
+  display: flex;
+  gap: 0.7rem;
+  align-items: flex-start;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.consent input {
+  width: 1.25rem;
+  height: 1.25rem;
+  margin: 0.15rem 0 0;
+  accent-color: var(--accent);
+  flex: none;
+}
+
+/* --- buttons ------------------------------------------------------------- */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--tap);
+  padding: 0 1.2rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.button.ghost {
+  background: transparent;
+}
+
+.button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.link-button {
+  margin-top: 0.4rem;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.85rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* --- progress & result --------------------------------------------------- */
+
+.progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.progress-head {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 600;
+}
+
+.progress-time {
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.progress-track {
+  height: 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.4s ease;
+}
+
+.progress-fill.is-upload {
+  opacity: 0.6;
+}
+
+.progress-hint {
+  margin: 0;
+}
+
+.result {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.player {
+  width: 100%;
+}
+
+.result-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+/* --- messages ------------------------------------------------------------ */
+
+.banner.error,
+.field-error {
+  margin: 0;
+  padding: 0.7rem 0.85rem;
+  border-radius: var(--radius);
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: 0.9rem;
+}
+
+.field-error {
+  margin-top: 0.5rem;
+}
+
+.field-note {
+  margin: 0;
+}
+
+.footnote {
+  margin-top: 1.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.footnote p {
+  margin: 0;
+}

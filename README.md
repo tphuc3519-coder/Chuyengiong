@@ -13,8 +13,8 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 1 | Seed-VC + chunking | 🟡 code xong, chờ chạy thật trên GPU |
 | 2 | Storage + job state | 🟡 code xong, chờ chạy `modal run -m modal_app.verify` |
 | 3 | Nối pipeline hoàn chỉnh | 🟡 code xong, chờ chạy end-to-end thật |
-| 4 | Frontend | ⬜ |
-| 5 | Pitch auto-detect | ⬜ |
+| 4 | Frontend | 🟡 code xong, chờ test trên iOS Safari thật |
+| 5 | Pitch auto-detect | 🟡 code xong, acceptance §7 pass bằng tone tổng hợp |
 | 6 | Consent gate | ⬜ |
 
 ## Cấu trúc
@@ -30,11 +30,14 @@ modal_app/
 ├── pipeline.py     # orchestration: spawn + nối các bước, cập nhật job state
 ├── storage.py      # file trên Volume + cron dọn rác
 ├── jobs.py         # state machine của job, lưu trong modal.Dict
+├── pitch.py        # YIN + gợi ý dịch cao độ — port từ thanh-pitch
+├── ratelimit.py    # 5 job/giờ mỗi client, khoá là hash của địa chỉ
 ├── deploy.py       # target deploy duy nhất — import mọi module để đăng ký
 └── verify.py       # acceptance Phase 2 chạy trên hạ tầng thật (không cần GPU)
+web/            # Next.js 15 trên Vercel — xem web/README.md
 tests/          # chạy bằng pytest, không cần Modal credentials và không cần GPU
 .github/workflows/
-├── ci.yml            # ruff + pytest trên mọi push/PR
+├── ci.yml            # python: ruff + pytest · web: eslint + prettier + tsc + build
 └── deploy-modal.yml  # modal deploy khi main đổi
 ```
 
@@ -48,6 +51,12 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ruff check . && ruff format --check .
 pytest -q
+```
+
+Frontend chạy riêng, xem [`web/README.md`](web/README.md):
+
+```bash
+cd web && npm install && npm run dev
 ```
 
 ## Deploy
@@ -294,8 +303,169 @@ API qua `TestClient`. Các mục acceptance còn lại của Phase 3 cần deplo
 - [ ] nhạc nền không méo, vocal không chìm cũng không chói
 - [ ] job fail giữa chừng → status `failed` có message, không treo vô hạn
 - [ ] `/submit` trả về trong < 2 giây với file 7 MB
-- [ ] chưa có rate limit theo IP (plan §9) — làm cùng Phase 4
+- [x] rate limit theo IP (plan §9) — làm ở Phase 4, xem `modal_app/ratelimit.py`
 
 Validate độ dài file (reference 5–30s, nguồn ≤ 15 phút) nằm ở container GPU chứ
 không ở `/submit`: chỉ chỗ đó mới decode được audio. Nghĩa là file sai độ dài
 báo lỗi qua `status.error` sau vài giây, không phải ngay lúc submit.
+
+---
+
+## Phase 4 — Frontend
+
+Next.js 15 App Router trong [`web/`](web/), deploy trên Vercel với Root
+Directory là `web`. Một trang duy nhất, đi đúng thứ tự plan §6:
+
+```
+kiểu nội dung → file nguồn → giọng mẫu → tinh chỉnh → đồng thuận
+      → convert → tiến trình → nghe thử → tải về
+```
+
+Không routing, không state global: mọi bước hiện cùng lúc để trên màn hình điện
+thoại không có bước nào nấp sau nút "tiếp theo", và lúc chạy thì thẻ tiến trình
+thay chỗ form chứ không chuyển trang.
+
+### Đường đi của request — chỗ khác plan rõ nhất
+
+```
+trình duyệt ──POST /submit────────────────► Modal      (4–60 MB)
+            ──GET  /api/status/{id}──► Vercel ──► Modal (vài trăm byte)
+            ──GET  /download/{id}─────────────► Modal
+            ──GET  /api/config───────► Vercel
+```
+
+Plan §6 nói hai điều cùng lúc: URL Modal phải nằm trong env var chứ không
+hardcode vào client bundle, **và** file lớn phải bỏ qua Vercel mà POST thẳng lên
+Modal. Muốn POST thẳng thì trình duyệt buộc phải biết URL đó. Lối ra là phục vụ
+URL **lúc chạy** qua `/api/config` thay vì `NEXT_PUBLIC_` (vốn bị nhúng vào
+bundle lúc build) — vẫn là env var, và tiện thêm: một build dùng được cho mọi
+môi trường.
+
+### Bốn chỗ đáng chú ý
+
+1. **Upload dùng `XMLHttpRequest`, không phải `fetch`.** Lý do duy nhất: `fetch`
+   tới giờ vẫn không báo được tiến trình upload, mà file 7 MB trên mạng di động
+   không có phản hồi thì trông như treo.
+2. **Thanh tiến trình có hai pha.** Upload là pha riêng vì nó phụ thuộc đường
+   truyền của người dùng; thanh chỉ bắt đầu khi server đã nhận file thì đứng im
+   cả phút (acceptance: không đứng im quá 20 giây).
+3. **Poll fail ≠ job fail.** Mạng rớt giữa chừng thì đếm và bỏ qua tới 5 lần
+   liên tiếp — job đang chạy trên GPU 3 phút không đáng chết vì một request
+   hỏng. Nhịp poll: 2s, backoff sau 60s, chặn trên 10s, bỏ cuộc ở 15 phút, mọi
+   thứ treo trên một `AbortController` mà lúc unmount sẽ cắt.
+4. **Ghi âm viết theo iOS Safari.** `audio/mp4` chứ không phải webm, không
+   truyền `timeslice` (iOS chỉ trả data lúc `stop()`), độ dài đo bằng đồng hồ
+   (Safari trả `duration = Infinity` cho blob của MediaRecorder), `AudioContext`
+   `resume()` sau cử chỉ người dùng. Không có `MediaRecorder` thì tab tự ẩn.
+
+### Rate limit — plan §9, nợ từ Phase 3
+
+`modal_app/ratelimit.py`: 5 job/giờ cho mỗi client, cửa sổ trượt. Nằm ở backend
+chứ không ở route handler của Vercel, vì upload đi thẳng lên Modal nên frontend
+không nằm trên đường đó.
+
+Hai chi tiết cố ý:
+
+- **Không lưu địa chỉ IP.** Khoá là `sha256(salt:address)` cắt 32 ký tự. Plan §8
+  mục 5 muốn audit trail là job id + timestamp và rõ ràng *không* phải nội dung
+  người dùng; IP gần nội dung hơn là gần job id.
+- **Request bị từ chối không tốn lượt.** `/submit` đọc quota trước (read-only),
+  chỉ trừ lượt ngay trước khi spawn. Ngược lại thì gõ sai một tham số cũng mất
+  một lượt, và client hammer endpoint sẽ tự đẩy lượt kế tiếp ra xa mãi.
+
+### Cấu hình lúc deploy
+
+Hai biến, cả hai đều tuỳ chọn, đi từ máy chạy `modal deploy` vào container qua
+`app.config_secret()`:
+
+| Biến | Đặt ở đâu | Không đặt thì |
+|---|---|---|
+| `ALLOWED_ORIGINS` | GitHub **variable** | CORS mở `*` |
+| `RATE_LIMIT_SALT` | GitHub **secret** | salt là hằng số cố định |
+
+`Secret.from_dict` chứ không phải `Secret.from_name`: secret có tên phải tồn
+tại trước khi tra được, nên một bản clone mới deploy lần đầu sẽ fail vì thứ vốn
+hoàn toàn tuỳ chọn. Rỗng nghĩa là "chưa cấu hình", và cả hai chỗ đọc đều hiểu
+như vậy.
+
+`ALLOWED_ORIGINS` (phẩy ngăn cách) khoá CORS lại khi đã có domain Vercel.
+`RATE_LIMIT_SALT` làm hash của rate limit không đoán được — không có nó thì key
+vẫn không đảo ngược được, nhưng ai cầm được Dict vẫn thử được xem một địa chỉ
+cụ thể đã submit hay chưa.
+
+### Còn phải verify bằng thiết bị thật
+
+CI chạy eslint + prettier + tsc + `next build`. Các mục acceptance của Phase 4
+cần máy thật và một deployment thật:
+
+- [ ] chạy trọn vẹn trên Safari iOS
+- [ ] ghi âm hoạt động trên iOS Safari
+- [ ] file 7 MB upload thành công
+- [ ] progress bar không đứng im quá 20 giây
+- [ ] chưa có preset giọng nào (`web/public/presets/index.json` rỗng) — cần 4–6
+      clip tự thu hoặc có licence rõ ràng, plan §8 mục 4
+
+---
+
+## Phase 5 — Pitch auto-detect
+
+### Port từ [`chamaya00/thanh-pitch`](https://github.com/chamaya00/thanh-pitch)
+
+`modal_app/pitch.py` là hàm `detectPitch` trong `index.html` của repo đó, giữ
+nguyên thuật toán và **nguyên mọi hằng số đã tune**: ngưỡng tuyệt đối 0.13, gate
+RMS 0.006, gate clarity 0.72, trần fallback 0.55, quy tắc "cực tiểu cục bộ đầu
+tiên dưới ngưỡng", nội suy parabol, và hai dải `RANGES.speak` 60–500 Hz /
+`RANGES.sing` 60–1200 Hz. Không có con số nào ở đây là đoán lại từ đầu.
+
+Hai chỗ đổi, đều vì chạy trên cả file thay vì từng frame analyser:
+
+1. **Chạy theo lô.** Bản trình duyệt duyệt vòng lặp thẳng trên 4096 mẫu mỗi
+   animation frame. Bài 15 phút là ~18000 frame, nên hàm sai khác được tính qua
+   FFT theo block 2000 frame — cùng công thức (`d(τ) = Σx² + Σx²ₜ − 2Σxxₜ`),
+   chỉ là phần tương quan giao cho FFT.
+2. **Bỏ bộ lọc trung vị 3 frame.** Nó tồn tại để kim trên màn hình không nhảy
+   quãng tám. Lấy trung vị trên *mọi* frame hữu thanh của cả file — thứ mà gợi ý
+   dịch cao độ vốn cần — làm việc đó tốt hơn.
+
+Tốc độ: bài 8,5 phút mất ~4s trên CPU container. Không cần GPU, không cần
+librosa (`api_image` vẫn chỉ có ffmpeg + numpy, `/status` vẫn khởi động trong
+vài giây).
+
+### `None` không phải `0`
+
+Đây là chỗ cả tính năng dựa vào. `/submit` **bỏ trống** `semitone_shift` nghĩa
+là "tự đo"; gửi `0` nghĩa là "giữ nguyên cao độ". `clean_params` giữ `None`
+nguyên vẹn thay vì `or 0`, và `pipeline._resolve_shift` là chỗ duy nhất biến nó
+thành số.
+
+Đo **sau separation, trước khi chunk**, trên vocal stem chứ không phải bản mix —
+đo bản mix là đo cả nhạc nền lẫn người hát. Nhánh `speech` không có separation
+nên đo thẳng file nguồn. Một giá trị cho cả bài, không bao giờ tính lại theo
+từng chunk: đó là bug mà plan §10 gọi là phổ biến nhất của loại app này.
+
+### Ba chỗ khác plan, cố ý
+
+1. **Slider không mở sẵn bằng giá trị gợi ý — vì chưa có giá trị nào.** Plan §7
+   nói hiển thị gợi ý làm mặc định trên slider, nhưng cũng nói gợi ý được tính
+   trong `pipeline.py` sau separation. Hai điều đó không xảy ra cùng lúc: lúc
+   người dùng nhìn slider thì chưa tách nhạc. Nên "Tự động" là một *chế độ* bật
+   sẵn, và giá trị đo được hiện ra khi job chạy tới đó; tắt "Tự động" thì slider
+   mở đúng ở con số lần trước đã áp dụng.
+2. **`jobs.public()` lộ đúng một tham số.** `semitone_shift` là thứ duy nhất
+   trong `params` đi ra ngoài, vì với auto-detect thì client không chọn nó —
+   `/status` là đường duy nhất để thấy đã áp dụng bao nhiêu.
+3. **Hai bên đo bằng cùng một dải F0.** Dải chỉ giới hạn khoảng tìm chu kỳ chứ
+   không lọc kết quả, nên tiếng cao hơn trần sẽ bị gập xuống quãng tám dưới
+   (700 Hz đọc bằng dải `speech` ra 350). Đo hai bên bằng hai dải khác nhau sẽ
+   lệch một cách khó thấy.
+
+### Acceptance §7
+
+Cả hai mục pass bằng test tổng hợp (`tests/test_pitch.py`) — tone có tần số biết
+trước là một trong số ít thứ trong pipeline audio có đáp án đúng kiểm được:
+
+- [x] gợi ý cho cặp nam→nữ ra khoảng +10 đến +14 (130 Hz → 245 Hz cho +11)
+- [x] bài có intro nhạc dài không làm lệch kết quả — 45s im lặng + 20s hát ở
+      220 Hz vẫn ra 220,0 Hz
+- [ ] còn phải nghe bằng tai trên giọng thật: tone tổng hợp không có vibrato,
+      không có luyến, và không có tiếng nhạc rò sang vocal stem
