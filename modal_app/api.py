@@ -19,6 +19,9 @@ Four things this layer owns, and nothing else does:
   all (plan §9, and see `ratelimit`).
 * **Volume freshness.** The pipeline writes `output.mp3` in a different
   container, so `/download` reloads the Volume before it looks.
+* **The audit trail.** A submit and a download are the two moments a person is
+  on the other end of the wire; both are logged as a job id, a timestamp and
+  nothing about the audio (plan §8 item 5, and see `audit`).
 """
 
 import os
@@ -28,7 +31,7 @@ import modal
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import jobs, pipeline, ratelimit, storage
+from . import audit, jobs, pipeline, ratelimit, storage
 from .app import APP_NAME, DATA_DIR, api_image, app, config_secret, data_vol
 from .audio_utils import AudioError
 from .separation import DEFAULT_SEPARATION_MODEL, SeparationError, safe_ext
@@ -178,6 +181,17 @@ async def submit(
     reference_bytes = await _read_upload(reference, MAX_REFERENCE_BYTES, "reference")
 
     job_id = _start_job(mode, params, source_bytes, reference_bytes, client)
+    # The audit trail proper (plan §8 item 5): who asked, when, for what shape
+    # of job, and that the gate above was passed — no file names, no audio.
+    audit.record(
+        audit.SUBMIT,
+        job_id,
+        mode=mode,
+        client=client,
+        consent=consent,
+        input_bytes=len(source_bytes),
+        reference_bytes=len(reference_bytes),
+    )
     return {
         "job_id": job_id,
         "status": jobs.QUEUED,
@@ -217,6 +231,7 @@ async def download(job_id: str) -> Response:
     except storage.StorageError as exc:
         raise HTTPException(410, "output has expired, please convert again") from exc
 
+    audit.record(audit.DOWNLOAD, job_id, output_bytes=len(data))
     return Response(
         content=data,
         media_type="audio/mpeg",

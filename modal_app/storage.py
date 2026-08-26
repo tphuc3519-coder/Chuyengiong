@@ -197,7 +197,7 @@ def cleanup_expired(
 )
 def cleanup(max_age_hours: float = DEFAULT_MAX_AGE_HOURS) -> int:
     """Scheduled sweep: expired files off the Volume, expired records out of the Dict."""
-    from . import jobs, ratelimit
+    from . import audit, jobs, ratelimit
 
     data_vol.reload()
     removed = cleanup_expired(max_age_hours)
@@ -209,8 +209,8 @@ def cleanup(max_age_hours: float = DEFAULT_MAX_AGE_HOURS) -> int:
     # every key still in there is either active or dead weight.
     windows = ratelimit.prune()
     data_vol.commit()
-    print(
-        f"[cleanup] removed {len(removed)} job dirs, {forgotten} job records, "
-        f"{windows} rate limit windows"
-    )
+    # The sweep is the other half of the audit trail (plan §8 item 5): a job id
+    # that stops appearing in the logs did so because its files were deleted on
+    # schedule, and this line is what says so.
+    audit.record(audit.EXPIRE, jobs=len(removed), records=forgotten, windows=windows)
     return len(removed)

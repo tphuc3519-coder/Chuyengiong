@@ -24,3 +24,12 @@ export function modalApiUrlOrNull(): string | null {
     return null;
   }
 }
+
+/**
+ * Where a takedown request goes (plan §8 item 3). Optional: the terms page
+ * says so plainly when it is unset rather than printing a dead link, which is
+ * the honest state for a deployment that has not published a contact yet.
+ */
+export function contactEmail(): string | null {
+  return process.env.CONTACT_EMAIL?.trim() || null;
+}

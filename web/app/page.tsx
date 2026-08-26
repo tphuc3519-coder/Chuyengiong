@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { Advanced } from "./components/Advanced";
@@ -176,7 +177,7 @@ export default function Page() {
         )}
         <p>
           File tải lên và kết quả bị xoá khỏi máy chủ sau 6 giờ. Đừng dùng giọng của người khác khi
-          chưa được họ cho phép.
+          chưa được họ cho phép — xem <Link href="/terms">điều khoản sử dụng</Link>.
         </p>
       </footer>
     </main>

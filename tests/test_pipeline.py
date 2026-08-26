@@ -6,10 +6,12 @@ runs once, before the job record is written, so a value that gets past it is a
 value the GPU will be handed and the status endpoint will report.
 """
 
+import json
+
 import pytest
 
 from modal_app import audio_utils as au
-from modal_app import jobs, pipeline, storage
+from modal_app import audit, jobs, pipeline, storage
 
 
 def test_defaults_come_from_the_mode():
@@ -166,3 +168,40 @@ def test_the_song_branch_measures_the_vocal_stem_not_the_mix(monkeypatch, job_st
     params = {"semitone_shift": None}
     pipeline._resolve_shift(job_id, params, b"vocal-stem", b"ref", "singing")
     assert seen == {"source": b"vocal-stem", "mode": "singing"}
+
+
+# --- the audit trail (plan §8 item 5) -------------------------------------
+
+
+def last_audit(captured: str) -> dict:
+    line = [ln for ln in captured.splitlines() if ln.startswith(audit.PREFIX)][-1]
+    return json.loads(line[len(audit.PREFIX) + 1 :])
+
+
+def test_a_finished_run_records_what_it_did(capsys):
+    job_id = "a" * 32
+    params = {"semitone_shift": 5, "diffusion_steps": 50, "separation_model": "htdemucs"}
+    pipeline._finished(job_id, "song", params, started=0.0)
+
+    entry = last_audit(capsys.readouterr().out)
+    assert entry["event"] == audit.DONE
+    assert (entry["job"], entry["mode"], entry["shift"], entry["steps"]) == (
+        job_id,
+        "song",
+        5,
+        50,
+    )
+    assert entry["seconds"] > 0
+    assert entry["reason"] is None
+
+
+def test_a_failure_records_the_exception_class_not_its_message(capsys):
+    """The message can quote ffmpeg on the user's own file; `/status` carries
+    it to the one person entitled to read it, and the log does not."""
+    exc = RuntimeError("cannot decode /data/deadbeef/input.mp3: bí mật")
+    pipeline._finished("a" * 32, "speech", {"semitone_shift": None}, started=0.0, exc=exc)
+
+    entry = last_audit(capsys.readouterr().out)
+    assert entry["event"] == audit.FAILED
+    assert entry["reason"] == "RuntimeError"
+    assert "bí mật" not in json.dumps(entry, ensure_ascii=False)

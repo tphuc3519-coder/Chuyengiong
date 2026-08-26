@@ -10,12 +10,13 @@ are the clamped ones, and that polling a job that is still running is a clear
 409 rather than a 404 or an empty file.
 """
 
+import json
 import types
 
 import pytest
 from fastapi.testclient import TestClient
 
-from modal_app import api, jobs, pipeline, ratelimit
+from modal_app import api, audit, jobs, pipeline, ratelimit
 
 
 @pytest.fixture(autouse=True)
@@ -299,3 +300,58 @@ def test_the_api_still_starts_without_the_audio_stack():
     no GPU image and importing conversion at module scope would need one."""
     assert not hasattr(api, "VoiceConverter")
     assert pipeline.run_song_pipeline.info.function_name == "run_song_pipeline"
+
+
+# --- audit trail ----------------------------------------------------------
+
+
+def audit_lines(captured: str) -> list[dict]:
+    return [
+        json.loads(line[len(audit.PREFIX) + 1 :])
+        for line in captured.splitlines()
+        if line.startswith(audit.PREFIX)
+    ]
+
+
+def test_a_submit_is_audited_without_naming_the_files(client, started, capsys):
+    """Plan §8 item 5: job id, timestamp, and that the gate was passed — the
+    trail a complaint would be answered from. Nothing about the audio."""
+    client.post("/submit", **upload(), headers={"x-forwarded-for": "198.51.100.4"})
+    entry = audit_lines(capsys.readouterr().out)[-1]
+
+    assert entry["event"] == audit.SUBMIT
+    assert entry["job"] == "b" * 32
+    assert entry["ts"].endswith("Z")
+    assert entry["consent"] is True
+    assert (entry["input_bytes"], entry["reference_bytes"]) == (10, 10)
+    # The address is hashed by `ratelimit`, and neither it nor the file names
+    # the client sent appear anywhere in the line.
+    assert entry["client"] == ratelimit.client_key("198.51.100.4")
+    printed = json.dumps(entry)
+    assert "198.51.100.4" not in printed
+    assert "song.m4a" not in printed and "voice.wav" not in printed
+
+
+def test_a_refused_submit_leaves_no_audit_line(client, started, capsys):
+    """No job started, nothing to trace: the trail is of jobs, not of requests."""
+    client.post("/submit", **upload(consent="false"))
+    assert audit_lines(capsys.readouterr().out) == []
+
+
+def test_a_download_is_audited(client, monkeypatch, volume, capsys):
+    monkeypatch.setattr(jobs, "find", lambda job_id, store=None: as_status(jobs.DONE))
+    monkeypatch.setattr(api.storage, "get", lambda job_id, name, root=None: b"ID3-mp3")
+
+    client.get(f"/download/{'e' * 32}")
+    entry = audit_lines(capsys.readouterr().out)[-1]
+    assert (entry["event"], entry["job"], entry["output_bytes"]) == (
+        audit.DOWNLOAD,
+        "e" * 32,
+        7,
+    )
+
+
+def test_a_download_that_serves_nothing_is_not_audited(client, monkeypatch, volume, capsys):
+    monkeypatch.setattr(jobs, "find", lambda job_id, store=None: as_status(jobs.CONVERTING))
+    client.get(f"/download/{'e' * 32}")
+    assert audit_lines(capsys.readouterr().out) == []
