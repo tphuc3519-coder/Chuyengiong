@@ -44,22 +44,76 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * What a `fetch` that never reached the server means, per request.
+ *
+ * `fetch` rejects with a bare `TypeError` for every network-level failure, and
+ * the text it carries is the browser's own — "Load failed" on Safari. Reported
+ * as one message it says only that something did not connect, which is not
+ * enough to act on and was not enough to debug from either: three different
+ * requests, three different situations, one indistinguishable error.
+ *
+ * The download line is the one that matters most. The result is on the server
+ * for six hours at that point, so the run is not lost and the user should not
+ * be told to start it again.
+ */
+const OFFLINE = {
+  config: "Không lấy được địa chỉ máy chủ xử lý. Tải lại trang rồi thử lại.",
+  status: "Mất liên lạc khi đang xử lý. Job có thể vẫn đang chạy — chờ chút rồi tải lại trang.",
+  download:
+    "Đã xử lý xong nhưng chưa tải được file về. Kết quả còn trên máy chủ 6 giờ, thử lại nhé.",
+} as const;
+
+/** `work`, with a bare network `TypeError` turned into a labelled failure. */
+async function offlineAs<T>(step: keyof typeof OFFLINE, work: Promise<T>): Promise<T> {
+  try {
+    return await work;
+  } catch (error) {
+    // Status 0 keeps the retry loops treating it as worth repeating: they stop
+    // on a 4xx, which is an answer, and this is the absence of one.
+    if (error instanceof TypeError) throw new ApiError(0, OFFLINE[step]);
+    throw error;
+  }
+}
+
 let apiBasePromise: Promise<string> | null = null;
 
-/** The Modal base URL, fetched once per page load and then remembered. */
-export function apiBase(): Promise<string> {
-  apiBasePromise ??= fetch("/api/config", { cache: "no-store" })
-    .then(async (response) => {
+// The smallest request the app makes, and the one every other request waits on:
+// nothing can be uploaded or downloaded until it says where Modal is. `watch`
+// rides out five failed polls and `fetchResult` four failed downloads, both
+// because the network drops on mobile — and this had none, so a single blip
+// before either of them got started ended the run.
+const CONFIG_ATTEMPTS = 3;
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchApiBase(): Promise<string> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const response = await fetch("/api/config", { cache: "no-store" });
       const body = await response.json().catch(() => ({}));
       if (!response.ok || !body?.apiBase) {
         throw new ApiError(response.status, body?.error ?? "converter is not configured");
       }
       return body.apiBase as string;
-    })
-    .catch((error) => {
-      apiBasePromise = null; // let the next attempt retry rather than cache the failure
-      throw error;
-    });
+    } catch (error) {
+      // A reply is an answer, however unwelcome: MODAL_API_URL is unset on the
+      // deployment and asking three times will not set it. Only a request that
+      // never arrived is worth repeating.
+      if (error instanceof ApiError || attempt >= CONFIG_ATTEMPTS) throw error;
+      await wait(attempt * 400);
+    }
+  }
+}
+
+/** The Modal base URL, fetched once per page load and then remembered. */
+export function apiBase(): Promise<string> {
+  apiBasePromise ??= offlineAs("config", fetchApiBase()).catch((error) => {
+    apiBasePromise = null; // let the next attempt retry rather than cache the failure
+    throw error;
+  });
   return apiBasePromise;
 }
 
@@ -112,7 +166,7 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
             try {
               resolve(JSON.parse(request.responseText) as SubmitResult);
             } catch {
-              reject(new ApiError(request.status, "the converter sent an unreadable reply"));
+              reject(new ApiError(request.status, "Máy chủ trả về dữ liệu không đọc được."));
             }
             return;
           }
@@ -124,8 +178,9 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
           );
         };
         request.onerror = () =>
-          reject(new ApiError(0, "could not reach the converter — check your connection"));
-        request.ontimeout = () => reject(new ApiError(0, "the upload timed out"));
+          reject(new ApiError(0, "Không gửi được file lên máy chủ. Kiểm tra mạng rồi thử lại."));
+        request.ontimeout = () =>
+          reject(new ApiError(0, "Tải file lên quá lâu, đã dừng. Thử lại nhé."));
         request.onabort = () => reject(new DOMException("aborted", "AbortError"));
 
         if (input.signal?.aborted) {
@@ -141,7 +196,10 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
 }
 
 export async function poll(jobId: string, signal?: AbortSignal): Promise<JobRecord> {
-  const response = await fetch(`/api/status/${jobId}`, { cache: "no-store", signal });
+  const response = await offlineAs(
+    "status",
+    fetch(`/api/status/${jobId}`, { cache: "no-store", signal }),
+  );
   const body = await response.text();
   if (!response.ok) {
     throw new ApiError(response.status, detail(body, `status check failed (${response.status})`));
@@ -151,7 +209,7 @@ export async function poll(jobId: string, signal?: AbortSignal): Promise<JobReco
 
 export async function download(jobId: string, signal?: AbortSignal): Promise<Blob> {
   const base = await apiBase();
-  const response = await fetch(`${base}/download/${jobId}`, { signal });
+  const response = await offlineAs("download", fetch(`${base}/download/${jobId}`, { signal }));
   if (!response.ok) {
     throw new ApiError(
       response.status,

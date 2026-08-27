@@ -41,7 +41,7 @@ export default function Page() {
   const [remaining, setRemaining] = useState<number | null>(null);
   const [detected, setDetected] = useState<number | null>(null);
 
-  const { state, start, reset } = useConversion();
+  const { state, start, resume, reset } = useConversion();
   const busy = state.phase === "uploading" || state.phase === "running";
   const ready = Boolean(source && reference && consent) && !busy;
 
@@ -150,9 +150,24 @@ export default function Page() {
           </fieldset>
 
           {state.phase === "error" && state.error && (
-            <p className="banner error" role="alert">
-              {state.error}
-            </p>
+            <div className="banner error" role="alert">
+              <p>{state.error}</p>
+              {/*
+                A dropped connection is not a lost conversion: the job keeps
+                running on the server and the result stays there for six hours.
+                Without this the only way back to a finished file was reading a
+                job id out of the server's own logs.
+              */}
+              {state.jobId && (
+                <button
+                  type="button"
+                  className="link-button"
+                  onClick={() => resume(state.jobId as string)}
+                >
+                  Lấy lại kết quả của lượt vừa rồi
+                </button>
+              )}
+            </div>
           )}
 
           <button type="submit" className="button primary" disabled={!ready}>

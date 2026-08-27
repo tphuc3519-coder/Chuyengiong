@@ -152,6 +152,22 @@ def test_a_job_id_that_is_not_a_job_id_never_reaches_storage(client, job_id):
     assert client.get(f"/status/{job_id}").status_code == 404
 
 
+def test_a_malformed_id_and_a_missing_job_do_not_say_the_same_thing(client, monkeypatch):
+    """Both are 404s and they used to read identically, which sent someone
+    looking for a lost job when they had pasted half an id off a console that
+    truncates. A job id is 32 hex characters; saying how many arrived is what
+    tells the two apart."""
+    truncated = client.get(f"/status/{'d' * 20}")
+    assert truncated.status_code == 404
+    assert "20" in truncated.json()["detail"], "the reply does not say what was wrong"
+
+    monkeypatch.setattr(jobs, "find", lambda job_id, store=None: None)
+    missing = client.get(f"/status/{'d' * 32}")
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "no such job"
+    assert missing.json()["detail"] != truncated.json()["detail"]
+
+
 # --- download -------------------------------------------------------------
 
 
