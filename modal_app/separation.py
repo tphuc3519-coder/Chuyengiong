@@ -100,6 +100,23 @@ def safe_ext(name: str | None) -> str:
     return ext if ext in ALLOWED_EXTS else DEFAULT_EXT
 
 
+def point_output_at(separator, out_dir: str) -> None:
+    """Send the next `separate()` call's stems to `out_dir`.
+
+    Both the wrapper and the architecture instance, not just the wrapper.
+    `load_model` copies the directory it was constructed with into the
+    per-architecture separator's config, and *that* copy is the one the stem
+    write joins against — so moving the wrapper alone leaves the stems in
+    MODEL_DIR, the caller collects an empty directory, and the job fails as
+    "produced no vocal stem" with the model working perfectly. audio-separator
+    does the same two-step wherever it redirects its own output.
+    """
+    separator.output_dir = out_dir
+    instance = getattr(separator, "model_instance", None)
+    if instance is not None:
+        instance.output_dir = out_dir
+
+
 def _collect_stems(out_dir, stems: list[str]) -> dict[str, str]:
     """Rename whatever the model wrote to `<stem>.<ext>`. Ported as-is.
 
@@ -216,7 +233,7 @@ class Separator:
 
             # audio-separator takes its output directory from the instance,
             # not from separate(), so point it at this call's temp dir.
-            self._separator.output_dir = str(out_dir)
+            point_output_at(self._separator, str(out_dir))
             names = {}
             for stem in cfg["stems"]:
                 names[stem] = stem.lower()

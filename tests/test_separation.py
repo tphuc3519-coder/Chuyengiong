@@ -104,3 +104,37 @@ def test_four_stem_output_keeps_all_four(tmp_path):
     out = write(tmp_path, "vocals.wav", "drums.wav", "bass.wav", "other.wav")
     produced = sep._collect_stems(out, sep.SEPARATION_MODELS["htdemucs"]["stems"])
     assert list(produced) == ["vocals", "drums", "bass", "other"]
+
+
+# --- where the stems land -------------------------------------------------
+
+
+class FakeInstance:
+    """Stands in for the per-architecture separator `load_model` builds."""
+
+    def __init__(self, output_dir):
+        self.output_dir = output_dir
+
+
+class FakeSeparator:
+    def __init__(self, output_dir, instance=True):
+        self.output_dir = output_dir
+        self.model_instance = FakeInstance(output_dir) if instance else None
+
+
+def test_redirecting_output_moves_the_architecture_instance_too():
+    """The bug this exists for: `load_model` runs once per container with
+    MODEL_DIR and copies it into the instance's config, so moving only the
+    wrapper leaves every stem in MODEL_DIR. The job then fails as "produced no
+    vocal stem" while the model is working perfectly."""
+    separator = FakeSeparator("/models")
+    sep.point_output_at(separator, "/tmp/job/stems")
+    assert separator.output_dir == "/tmp/job/stems"
+    assert separator.model_instance.output_dir == "/tmp/job/stems"
+
+
+def test_redirecting_output_before_a_model_is_loaded_is_not_an_error():
+    """`model_instance` is None until `load_model` runs."""
+    separator = FakeSeparator("/models", instance=False)
+    sep.point_output_at(separator, "/tmp/job/stems")
+    assert separator.output_dir == "/tmp/job/stems"
