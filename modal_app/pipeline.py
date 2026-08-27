@@ -183,6 +183,21 @@ def _resolve_shift(job_id: str, params: dict, source: bytes, reference: bytes, m
     return shift
 
 
+def _done_already(job_id: str, name: str) -> bytes | None:
+    """What an earlier run of this job already finished, or `None`.
+
+    Modal restarts a preempted container with the same input, and the restart
+    begins at the top of the pipeline — so a song that was preempted while
+    converting would separate itself all over again, on a GPU, for nothing. Each
+    stage asks this first instead.
+
+    Safe because `storage.put` writes to a temp name and renames: an artifact
+    that is there is whole, and a stage killed mid-write leaves nothing to
+    mistake for a finished one.
+    """
+    return storage.get(job_id, name) if storage.exists(job_id, name) else None
+
+
 @app.function(
     image=api_image,
     volumes={DATA_DIR: data_vol},
@@ -202,42 +217,49 @@ def run_song_pipeline(job_id: str, params: dict) -> str:
     data_vol.reload()
     try:
         jobs.update(job_id, jobs.SEPARATING)
-        stems = Separator(model=params["separation_model"]).separate.remote(
-            storage.get(job_id, INPUT), params["source_ext"]
-        )
-        storage.put(job_id, VOCAL, stems[VOCAL_STEM])
-        storage.put(job_id, INSTRUMENTAL, stems[INSTRUMENTAL_STEM])
-        data_vol.commit()
+        vocal = _done_already(job_id, VOCAL)
+        instrumental = _done_already(job_id, INSTRUMENTAL)
+        if vocal is None or instrumental is None:
+            stems = Separator(model=params["separation_model"]).separate.remote(
+                storage.get(job_id, INPUT), params["source_ext"]
+            )
+            vocal, instrumental = stems[VOCAL_STEM], stems[INSTRUMENTAL_STEM]
+            storage.put(job_id, VOCAL, vocal)
+            storage.put(job_id, INSTRUMENTAL, instrumental)
+            data_vol.commit()
 
         jobs.update(job_id, jobs.CONVERTING)
-        reference = storage.get(job_id, REFERENCE)
-        # After separation, before chunking (plan §7). The vocal stem is what
-        # gets measured — silence detection and F0 on a full mix would both be
-        # reading the backing track as well as the singer.
-        shift = _resolve_shift(job_id, params, stems[VOCAL_STEM], reference, "singing")
-        converted = VoiceConverter(mode="singing").convert.remote(
-            source_wav=stems[VOCAL_STEM],
-            reference_wav=reference,
-            # One shift for the whole track, computed by the caller. Never
-            # per chunk, never re-detected here — see the Phase 1 rules.
-            semitone_shift=shift,
-            diffusion_steps=params["diffusion_steps"],
-        )
-        storage.put(job_id, CONVERTED, converted)
-        data_vol.commit()
+        converted = _done_already(job_id, CONVERTED)
+        if converted is None:
+            reference = storage.get(job_id, REFERENCE)
+            # After separation, before chunking (plan §7). The vocal stem is what
+            # gets measured — silence detection and F0 on a full mix would both be
+            # reading the backing track as well as the singer.
+            shift = _resolve_shift(job_id, params, vocal, reference, "singing")
+            converted = VoiceConverter(mode="singing").convert.remote(
+                source_wav=vocal,
+                reference_wav=reference,
+                # One shift for the whole track, computed by the caller. Never
+                # per chunk, never re-detected here — see the Phase 1 rules.
+                semitone_shift=shift,
+                diffusion_steps=params["diffusion_steps"],
+            )
+            storage.put(job_id, CONVERTED, converted)
+            data_vol.commit()
 
         jobs.update(job_id, jobs.MIXING)
-        storage.put(
-            job_id,
-            OUTPUT,
-            mix(
-                converted,
-                stems[INSTRUMENTAL_STEM],
-                vocal_gain_db=params["vocal_gain_db"],
-                watermark=_watermark(job_id, params),
-            ),
-        )
-        data_vol.commit()
+        if not storage.exists(job_id, OUTPUT):
+            storage.put(
+                job_id,
+                OUTPUT,
+                mix(
+                    converted,
+                    instrumental,
+                    vocal_gain_db=params["vocal_gain_db"],
+                    watermark=_watermark(job_id, params),
+                ),
+            )
+            data_vol.commit()
 
         jobs.update(job_id, jobs.DONE)
         _finished(job_id, "song", params, started)
@@ -259,20 +281,23 @@ def run_speech_pipeline(job_id: str, params: dict) -> str:
     data_vol.reload()
     try:
         jobs.update(job_id, jobs.CONVERTING)
-        source = storage.get(job_id, INPUT)
-        reference = storage.get(job_id, REFERENCE)
-        # No separation on this branch, so the input already is the voice.
-        shift = _resolve_shift(job_id, params, source, reference, "speech")
-        converted = VoiceConverter(mode="speech").convert.remote(
-            source_wav=source,
-            reference_wav=reference,
-            semitone_shift=shift,
-            diffusion_steps=params["diffusion_steps"],
-        )
-        storage.put(job_id, CONVERTED, converted)
+        converted = _done_already(job_id, CONVERTED)
+        if converted is None:
+            source = storage.get(job_id, INPUT)
+            reference = storage.get(job_id, REFERENCE)
+            # No separation on this branch, so the input already is the voice.
+            shift = _resolve_shift(job_id, params, source, reference, "speech")
+            converted = VoiceConverter(mode="speech").convert.remote(
+                source_wav=source,
+                reference_wav=reference,
+                semitone_shift=shift,
+                diffusion_steps=params["diffusion_steps"],
+            )
+            storage.put(job_id, CONVERTED, converted)
         # The mp3 encode is cheap and needs no separate state; the bar sits at
         # `converting` until the file is on the Volume.
-        storage.put(job_id, OUTPUT, to_mp3(converted, watermark=_watermark(job_id, params)))
+        if not storage.exists(job_id, OUTPUT):
+            storage.put(job_id, OUTPUT, to_mp3(converted, watermark=_watermark(job_id, params)))
         data_vol.commit()
 
         jobs.update(job_id, jobs.DONE)
