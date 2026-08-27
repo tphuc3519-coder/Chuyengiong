@@ -121,6 +121,20 @@ export function useConversion() {
     setState(IDLE);
   }, [cancel]);
 
+  /** Watch a job to the end and hand back its file. Shared with `resume`. */
+  const collect = useCallback(async (jobId: string, controller: AbortController) => {
+    const record = await watch(jobId, controller.signal, (update) =>
+      setState((current) => ({
+        ...current,
+        status: update.status,
+        progress: update.progress,
+        semitoneShift: update.semitone_shift ?? current.semitoneShift,
+      })),
+    );
+    const blob = await fetchResult(record.id, controller.signal);
+    setState((current) => ({ ...current, phase: "done", status: "done", progress: 100, blob }));
+  }, []);
+
   const start = useCallback(
     async (input: Omit<SubmitInput, "onProgress" | "signal">) => {
       cancel();
@@ -148,23 +162,7 @@ export function useConversion() {
           jobsRemaining: submitted.jobs_remaining ?? null,
         }));
 
-        const record = await watch(submitted.job_id, controller.signal, (update) =>
-          setState((current) => ({
-            ...current,
-            status: update.status,
-            progress: update.progress,
-            semitoneShift: update.semitone_shift ?? current.semitoneShift,
-          })),
-        );
-
-        const blob = await fetchResult(record.id, controller.signal);
-        setState((current) => ({
-          ...current,
-          phase: "done",
-          status: "done",
-          progress: 100,
-          blob,
-        }));
+        await collect(submitted.job_id, controller);
       } catch (error) {
         if (aborted(error)) return; // the user left or started another run
         setState((current) => ({ ...current, phase: "error", error: message(error) }));
@@ -172,10 +170,39 @@ export function useConversion() {
         if (abort.current === controller) abort.current = null;
       }
     },
-    [cancel],
+    [cancel, collect],
   );
 
-  return { state, start, reset, cancel };
+  /**
+   * Pick a job back up after the connection dropped.
+   *
+   * A lost connection is not a lost conversion: the result sits on the server
+   * for six hours. On a phone it is also the likely ending for a job that runs
+   * for minutes — iOS suspends a backgrounded tab and takes the poll loop's
+   * timers and sockets with it, so the wake-up finds a dead fetch. Without
+   * this the only route back to a finished file was reading a job id out of
+   * the server's own logs, which is not something to ask of anyone.
+   */
+  const resume = useCallback(
+    async (jobId: string) => {
+      cancel();
+      const controller = new AbortController();
+      abort.current = controller;
+      setState((current) => ({ ...current, phase: "running", error: null }));
+
+      try {
+        await collect(jobId, controller);
+      } catch (error) {
+        if (aborted(error)) return;
+        setState((current) => ({ ...current, phase: "error", error: message(error) }));
+      } finally {
+        if (abort.current === controller) abort.current = null;
+      }
+    },
+    [cancel, collect],
+  );
+
+  return { state, start, resume, reset, cancel };
 }
 
 /**
