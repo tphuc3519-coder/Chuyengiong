@@ -84,11 +84,14 @@ export default function Page() {
         </p>
       </header>
 
-      {state.phase === "done" && state.blob && state.jobId ? (
+      {/* No `state.blob` in the condition: the run is done when the server says
+          so, and the bytes are fetched afterwards for the player alone. */}
+      {state.phase === "done" && state.jobId && state.resultUrl ? (
         <section className="card">
           <h2>Xong</h2>
           <Result
             blob={state.blob}
+            resultUrl={state.resultUrl}
             jobId={state.jobId}
             semitoneShift={state.semitoneShift}
             onReset={reset}
