@@ -4,7 +4,12 @@ import { useEffect, useState } from "react";
 
 import { FileDrop } from "./FileDrop";
 import { Recorder, recorderSupported } from "./Recorder";
-import { MAX_REFERENCE_BYTES, REFERENCE_MIN_SEC, REFERENCE_MAX_SEC } from "@/lib/params";
+import {
+  AUDIO_ACCEPT,
+  MAX_REFERENCE_BYTES,
+  REFERENCE_MIN_SEC,
+  REFERENCE_MAX_SEC,
+} from "@/lib/params";
 import { fetchPreset, loadPresets, type Preset } from "@/lib/presets";
 
 type Source = "upload" | "record" | "preset";
@@ -78,7 +83,7 @@ export function ReferencePicker({
             setChosen(null);
             onFile(picked);
           }}
-          accept="audio/*"
+          accept={AUDIO_ACCEPT}
           maxBytes={MAX_REFERENCE_BYTES}
           label="Giọng mẫu"
           hint={`${REFERENCE_MIN_SEC}–${REFERENCE_MAX_SEC}s, một người nói, không nhạc nền`}
