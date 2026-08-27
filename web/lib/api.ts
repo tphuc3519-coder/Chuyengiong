@@ -166,10 +166,25 @@ export async function download(jobId: string, signal?: AbortSignal): Promise<Blo
 export const POLL_INTERVAL_MS = 2000;
 export const POLL_BACKOFF_AFTER_MS = 60_000;
 export const POLL_MAX_INTERVAL_MS = 10_000;
-export const POLL_TIMEOUT_MS = 15 * 60_000;
+/**
+ * Mirrored from `PIPELINE_TIMEOUT` in `modal_app/pipeline.py`.
+ *
+ * Deliberately not the fifteen minutes plan §6 asks for: the two numbers drifted
+ * apart, and a client that gives up before the server does is the worse half of
+ * the pair. It tells the user a running job failed and to try again, and trying
+ * again starts a *second* GPU job beside the first — twice the bill and one more
+ * slot off the hourly cap, for work that was going to arrive anyway. Fifteen
+ * minutes is not even a generous ceiling: the input cap is fifteen minutes of
+ * audio (`SOURCE_MAX_SEC`), which is minutes of GPU on its own before a cold
+ * container has fetched its weights.
+ *
+ * So it waits exactly as long as the backend can run. Past this the pipeline
+ * really has been killed, and "try again" is honest advice.
+ */
+export const POLL_TIMEOUT_MS = 30 * 60_000;
 
 /**
- * Plan §6: every 2 seconds, backing off after a minute, giving up at fifteen.
+ * Plan §6: every 2 seconds, backing off after a minute.
  *
  * The backoff is capped at 10s rather than left to double: separation and
  * conversion are minutes long, and a bar that can sit still for half a minute

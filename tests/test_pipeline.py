@@ -237,3 +237,32 @@ def test_the_audit_line_says_whether_the_output_was_watermarked():
     should carry a watermark at all."""
     line = audit.event_line(audit.DONE, "b" * 32, mode="song", watermark=True)
     assert json.loads(line.split(" ", 1)[1])["watermark"] is True
+
+
+# --- the browser's patience vs the server's ------------------------------
+
+
+def test_the_browser_does_not_give_up_before_the_pipeline_does():
+    """These two drifted apart once and cost a real job.
+
+    A client that stops polling first tells the user a *running* job failed and
+    to try again — and trying again starts a second GPU job beside the first,
+    doubling the bill and spending another slot off the hourly cap. Only the
+    server may decide a job is over, so its timeout is the floor for the
+    browser's. A comment was all that held them together last time, which is
+    why this is a test.
+    """
+    import re
+    from pathlib import Path
+
+    api_ts = Path(__file__).resolve().parent.parent / "web" / "lib" / "api.ts"
+    source = api_ts.read_text()
+
+    match = re.search(r"POLL_TIMEOUT_MS\s*=\s*(\d+)\s*\*\s*60_000", source)
+    assert match, "POLL_TIMEOUT_MS is not declared as `<minutes> * 60_000` any more"
+
+    browser_sec = int(match.group(1)) * 60
+    assert browser_sec >= pipeline.PIPELINE_TIMEOUT, (
+        f"the browser gives up at {browser_sec}s but the pipeline runs to "
+        f"{pipeline.PIPELINE_TIMEOUT}s"
+    )
