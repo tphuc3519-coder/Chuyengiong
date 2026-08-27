@@ -59,7 +59,7 @@ export class ApiError extends Error {
  */
 const OFFLINE = {
   config: "Không lấy được địa chỉ máy chủ xử lý. Tải lại trang rồi thử lại.",
-  status: "Mất liên lạc khi đang xử lý. Job có thể vẫn đang chạy — chờ chút rồi tải lại trang.",
+  status: "Mất liên lạc khi đang xử lý. Job có thể vẫn đang chạy — bấm lấy lại kết quả bên dưới.",
   download:
     "Đã xử lý xong nhưng chưa tải được file về. Kết quả còn trên máy chủ 6 giờ, thử lại nhé.",
 } as const;
@@ -103,7 +103,7 @@ async function fetchApiBase(): Promise<string> {
       const response = await fetch("/api/config", { cache: "no-store" });
       const body = await response.json().catch(() => ({}));
       if (!response.ok || !body?.apiBase) {
-        throw new ApiError(response.status, body?.error ?? "converter is not configured");
+        throw new ApiError(response.status, body?.error ?? "Máy chủ xử lý chưa được cấu hình.");
       }
       return body.apiBase as string;
     } catch (error) {
@@ -181,7 +181,7 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
           reject(
             new ApiError(
               request.status,
-              detail(request.responseText, `upload failed (${request.status})`),
+              detail(request.responseText, `Tải file lên thất bại (${request.status}).`),
             ),
           );
         };
@@ -208,7 +208,10 @@ export async function poll(jobId: string, signal?: AbortSignal): Promise<JobReco
     const response = await fetch(`/api/status/${jobId}`, { cache: "no-store", signal });
     const body = await response.text();
     if (!response.ok) {
-      throw new ApiError(response.status, detail(body, `status check failed (${response.status})`));
+      throw new ApiError(
+        response.status,
+        detail(body, `Máy chủ trả lời lỗi khi hỏi trạng thái (${response.status}).`),
+      );
     }
     return JSON.parse(body) as JobRecord;
   });
@@ -221,7 +224,7 @@ export async function download(jobId: string, signal?: AbortSignal): Promise<Blo
     if (!response.ok) {
       throw new ApiError(
         response.status,
-        detail(await response.text(), "could not fetch the result"),
+        detail(await response.text(), "Không tải được kết quả từ máy chủ."),
       );
     }
     // The megabytes arrive here, not above: `fetch` resolved on the headers.

@@ -12,7 +12,6 @@ import { ReferencePicker } from "./components/ReferencePicker";
 import { Result } from "./components/Result";
 import {
   AUDIO_ACCEPT,
-  JOBS_PER_HOUR,
   MAX_INPUT_BYTES,
   SOURCE_MAX_SEC,
   defaultParams,
@@ -153,12 +152,12 @@ export default function Page() {
             <div className="banner error" role="alert">
               <p>{state.error}</p>
               {/*
-                A dropped connection is not a lost conversion: the job keeps
-                running on the server and the result stays there for six hours.
-                Without this the only way back to a finished file was reading a
-                job id out of the server's own logs.
+                Only when there is something to go back for. A job the server
+                reported as `failed` is finished being wrong: polling it again
+                takes two seconds to reproduce the same message, which reads as
+                a button that does nothing.
               */}
-              {state.jobId && (
+              {state.jobId && state.status !== "failed" && (
                 <button
                   type="button"
                   className="link-button"
@@ -168,12 +167,14 @@ export default function Page() {
                 </button>
               )}
               {/*
-                And a way out when even that fails. The in-page download reads
-                megabytes into a blob, which is the step that dies on a phone;
-                this hands the same file to the browser to fetch on its own,
-                which has worked when the fetch did not.
+                And a way out when even that fails: the in-page download reads
+                megabytes into a blob, and that is the step that breaks on a
+                phone. Strictly once the run reached `done`, because that is
+                when a file exists — `/download` answers anything earlier with
+                409 JSON, and following the link would navigate the tab off the
+                app and take the job id with it.
               */}
-              {state.resultUrl && (
+              {state.resultUrl && state.status === "done" && (
                 <a className="link-button" href={state.resultUrl}>
                   Hoặc tải thẳng file về máy
                 </a>
@@ -197,11 +198,9 @@ export default function Page() {
       )}
 
       <footer className="footnote">
-        {remaining !== null && (
-          <p>
-            Còn {remaining}/{JOBS_PER_HOUR} lượt chuyển trong giờ này.
-          </p>
-        )}
+        {/* No denominator: the cap is whatever `JOBS_PER_HOUR` says on the
+            deployment, and printing 5 there gave "Còn 9/5 lượt". */}
+        {remaining !== null && <p>Còn {remaining} lượt chuyển trong giờ này.</p>}
         <p>
           File tải lên và kết quả bị xoá khỏi máy chủ sau 6 giờ. Đừng dùng giọng của người khác khi
           chưa được họ cho phép — xem <Link href="/terms">điều khoản sử dụng</Link>.
