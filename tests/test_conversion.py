@@ -39,6 +39,23 @@ def test_requirements_drop_gui_and_eval_only_packages():
     assert {"munch", "einops", "descript-audio-codec", "transformers"} <= names
 
 
+def test_protobuf_is_lifted_back_over_the_cap_dac_puts_on_it():
+    """The bug this exists for, and why it cost an afternoon to find.
+
+    `descript-audiotools` caps protobuf at `<3.20` for a tensorboard logger only
+    training reaches. Modal's agent runs inside this same image and reads
+    `api_pb2.<Enum>.ValueType`, which protobuf grew in 3.20 — under the cap every
+    container died before this module was imported, so it looked like a GPU that
+    would not start rather than a dependency conflict. Nothing at runtime can
+    assert this: the floor is what there is to hold on to.
+    """
+    floor = conversion.PROTOBUF_SPEC.split(">=")[1].split(",")[0]
+    assert tuple(int(part) for part in floor.split(".")) >= (3, 20)
+    # Its own build step. Listed among the requirements, the resolver would have
+    # to satisfy the cap instead of landing after it.
+    assert "protobuf" not in " ".join(conversion.SEED_VC_REQUIREMENTS)
+
+
 def test_defaults_match_the_plan_table():
     assert au.DEFAULT_DIFFUSION_STEPS == {"speech": 25, "singing": 50}
     assert au.MAX_SEMITONE_SHIFT == {"speech": 8, "singing": 12}

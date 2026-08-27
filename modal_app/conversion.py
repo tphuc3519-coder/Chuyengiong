@@ -79,12 +79,30 @@ SEED_VC_REQUIREMENTS = [
     "python-dotenv",
 ]
 
+# `descript-audio-codec`, which seed-vc pins, pulls in `descript-audiotools`,
+# which caps protobuf at `<3.20` for a tensorboard logger that only training
+# touches. Modal's own agent runs inside this image and reads
+# `api_pb2.<Enum>.ValueType`, an attribute protobuf grew in 3.20 — under that cap
+# every container dies with
+#
+#     AttributeError: Enum VolumeFsVersion has no value defined for name 'ValueType'
+#
+# before a line of this module runs, which reads as the GPU never starting rather
+# than as a dependency conflict. The separation image escapes it only by not
+# depending on DAC.
+#
+# A separate build step, deliberately: inside `SEED_VC_REQUIREMENTS` the resolver
+# would have to satisfy the cap, and here it lands after it instead. pip prints a
+# conflict warning, which is the intended outcome — the upper bound is Modal's own.
+PROTOBUF_SPEC = "protobuf>=3.20,<7"
+
 vc_image = (
     base_image.run_commands(
         f"git clone {SEED_VC_REPO} {SEED_VC_DIR}",
         f"cd {SEED_VC_DIR} && git checkout {SEED_VC_COMMIT}",
     )
     .pip_install(*SEED_VC_REQUIREMENTS)
+    .pip_install(PROTOBUF_SPEC)
     .env({"PYTHONPATH": SEED_VC_DIR, "HF_HOME": MODEL_DIR})
 )
 
