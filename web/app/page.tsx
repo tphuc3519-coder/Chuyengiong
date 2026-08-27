@@ -11,6 +11,7 @@ import { Progress } from "./components/Progress";
 import { ReferencePicker } from "./components/ReferencePicker";
 import { Result } from "./components/Result";
 import {
+  AUDIO_ACCEPT,
   JOBS_PER_HOUR,
   MAX_INPUT_BYTES,
   SOURCE_MAX_SEC,
@@ -126,7 +127,7 @@ export default function Page() {
             <FileDrop
               file={source}
               onFile={setSource}
-              accept="audio/*"
+              accept={AUDIO_ACCEPT}
               maxBytes={MAX_INPUT_BYTES}
               label={mode === "song" ? "Bài hát" : "Đoạn thoại"}
               hint={`Kéo thả hoặc bấm để chọn · tối đa ${SOURCE_MAX_SEC / 60} phút`}

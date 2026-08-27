@@ -36,6 +36,32 @@ export const MAX_INPUT_BYTES = 60 * 1024 * 1024;
 export const MAX_REFERENCE_BYTES = 20 * 1024 * 1024;
 export const SOURCE_MAX_SEC = 15 * 60;
 
+/**
+ * What the file pickers offer, mirrored from `ALLOWED_EXTS` in
+ * `modal_app/separation.py`.
+ *
+ * The extensions are spelled out rather than left to `audio/*` because iOS
+ * Safari resolves the wildcard against its own file types and greys out
+ * everything it fails to map: an mp3 sitting in Files cannot be picked while an
+ * mp4 goes through, which reads as "the app refuses music". Offering the
+ * extension as well gets those files back, and costs nothing elsewhere — a
+ * picker matches the union of what `accept` lists. `video/mp4` is deliberate:
+ * the backend takes an mp4 and lets ffmpeg pull the audio out of it.
+ */
+export const AUDIO_ACCEPT = [
+  "audio/*",
+  "video/mp4",
+  ".mp3",
+  ".wav",
+  ".m4a",
+  ".mp4",
+  ".flac",
+  ".ogg",
+  ".opus",
+  ".aac",
+  ".wma",
+].join(",");
+
 export type Params = {
   /**
    * null = auto-detect (plan §7). Not the same as 0, which is a deliberate
