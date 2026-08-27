@@ -132,7 +132,16 @@ export function useConversion() {
     setState(IDLE);
   }, [cancel]);
 
-  /** Watch a job to the end and hand back its file. Shared with `resume`. */
+  /**
+   * Watch a job to the end. Shared with `resume`.
+   *
+   * The run is finished the moment the server says `done` — the file exists,
+   * and the link to it is already in state. Fetching the bytes is a separate
+   * thing that happens afterwards and is allowed to fail: `response.blob()`
+   * reads megabytes into the page, which is exactly what an hours-old Safari
+   * tab will not do, and that failure used to stand between the user and a
+   * finished conversion. Now it costs them the inline player and nothing else.
+   */
   const collect = useCallback(async (jobId: string, controller: AbortController) => {
     const record = await watch(jobId, controller.signal, (update) =>
       setState((current) => ({
@@ -142,8 +151,15 @@ export function useConversion() {
         semitoneShift: update.semitone_shift ?? current.semitoneShift,
       })),
     );
-    const blob = await fetchResult(record.id, controller.signal);
-    setState((current) => ({ ...current, phase: "done", status: "done", progress: 100, blob }));
+    setState((current) => ({ ...current, phase: "done", status: "done", progress: 100 }));
+
+    try {
+      const blob = await fetchResult(record.id, controller.signal);
+      setState((current) => ({ ...current, blob }));
+    } catch (error) {
+      if (aborted(error)) throw error;
+      // Playing it here was the convenience; the link is the deliverable.
+    }
   }, []);
 
   const start = useCallback(
