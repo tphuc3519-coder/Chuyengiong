@@ -311,3 +311,79 @@ def test_a_header_that_is_not_pcm_underneath_is_still_refused():
     ext[at + 24 : at + 26] = (3).to_bytes(2, "little")  # IEEE float
     with pytest.raises(au.AudioError):
         au.decode_wav_channels(bytes(ext))
+
+
+# --- which part of a long reference gets used -----------------------------
+
+
+def voiced(seconds: float, sample_rate: int = 44100, amplitude: float = 0.35) -> np.ndarray:
+    """A tone with a syllable-rate envelope — loud, and loud in bursts."""
+    t = np.arange(int(seconds * sample_rate)) / sample_rate
+    envelope = 0.5 + 0.5 * np.sin(2 * np.pi * 3.5 * t)
+    return (amplitude * envelope * np.sin(2 * np.pi * 140 * t)).astype(np.float32)
+
+
+def room_tone(seconds: float, sample_rate: int = 44100) -> np.ndarray:
+    """Near-silence: the part of a recording nobody is talking over."""
+    rng = np.random.default_rng(0)
+    return (0.004 * rng.standard_normal(int(seconds * sample_rate))).astype(np.float32)
+
+
+def test_a_long_reference_is_cut_where_the_voice_actually_is():
+    """The bug this exists for: the first N seconds is the worst guess at the
+    usable part of a recording, and it was the only one being taken. Someone
+    handing in a minute of audio with a quiet start got judged on the silence."""
+    clip = np.concatenate([room_tone(25), voiced(20)])
+    start, stop = au.usable_reference_window(clip, 44100)
+    assert start / 44100 == pytest.approx(25, abs=0.5)
+    assert (stop - start) / 44100 == pytest.approx(au.REFERENCE_MAX_SEC, abs=0.1)
+
+
+def test_the_voice_is_found_in_the_middle_too():
+    clip = np.concatenate([room_tone(10), voiced(20), room_tone(15)])
+    start, _ = au.usable_reference_window(clip, 44100)
+    assert start / 44100 == pytest.approx(10, abs=0.5)
+
+
+def test_a_uniformly_good_clip_is_still_taken_from_the_front():
+    """Ties go to the earliest window, so nothing moves for a clip that was
+    already fine — the old behaviour survives where it was right."""
+    start, stop = au.usable_reference_window(voiced(45), 44100)
+    assert start == 0
+    assert stop / 44100 == pytest.approx(au.REFERENCE_MAX_SEC, abs=0.1)
+
+
+def test_a_reference_under_the_cap_is_left_whole():
+    clip = voiced(12)
+    assert au.usable_reference_window(clip, 44100) == (0, len(clip))
+    assert len(au.prepare_reference(clip, 44100)) == len(clip)
+
+
+def test_a_long_reference_is_not_an_error():
+    """The cap is the model's context window, not a rule about microphones."""
+    trimmed = au.prepare_reference(np.concatenate([room_tone(25), voiced(20)]), 44100)
+    assert len(trimmed) / 44100 == pytest.approx(au.REFERENCE_MAX_SEC, abs=0.1)
+
+
+def test_prepare_reference_hands_back_the_voice_and_not_the_silence():
+    """`prepare_reference` has to *use* the chosen window, not merely compute it.
+    Asserting the length alone passes for the old first-N-seconds cut too, which
+    is the one this needs to fail on: it would hand the model 20s of room tone
+    and the output would sound like nobody in particular."""
+    clip = np.concatenate([room_tone(25), voiced(20)])
+    picked = au.prepare_reference(clip, 44100)
+    assert float(np.abs(picked).max()) > 0.1, "the silent head was handed to the model"
+    # And it is the voice: an order of magnitude above what room tone peaks at.
+    assert float(np.abs(picked).max()) > 10 * float(np.abs(clip[: 25 * 44100]).max())
+
+
+def test_too_short_is_still_refused():
+    with pytest.raises(au.AudioError):
+        au.prepare_reference(voiced(3), 44100)
+
+
+def test_digital_silence_does_not_divide_by_zero():
+    silence = np.zeros(int(45 * 44100), dtype=np.float32)
+    start, stop = au.usable_reference_window(silence, 44100)
+    assert start == 0
+    assert stop / 44100 == pytest.approx(au.REFERENCE_MAX_SEC, abs=0.1)

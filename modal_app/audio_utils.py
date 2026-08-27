@@ -224,15 +224,66 @@ def check_mode(mode: str) -> str:
     return mode
 
 
+# Frame size for picking the usable stretch of a long reference. ~46ms at 44.1k
+# is short enough to sit inside a syllable and long enough not to be reading
+# individual glottal pulses.
+SPEECH_FRAME = 2048
+# A frame counts as speech above this fraction of the clip's own peak. Relative,
+# not absolute, so a quietly recorded sample is judged on its own terms; low
+# enough to keep the tail of a word, high enough to drop room tone.
+SPEECH_FLOOR = 0.06
+
+
+def usable_reference_window(audio: np.ndarray, sample_rate: int) -> tuple[int, int]:
+    """`(start, stop)` of the most speech-like `REFERENCE_MAX_SEC` of `audio`.
+
+    Which stretch gets used decides how much the output sounds like the target,
+    and the first N seconds of a recording is the worst available guess at it:
+    that is where somebody is still settling, or the room is, or nobody has
+    started talking yet. So score every candidate window by how much of it is
+    actually voice — frames above a fraction of the clip's own peak — and take
+    the best.
+
+    Ties go to the earliest window, which keeps a clip that is uniformly good
+    landing where it always did.
+    """
+    limit = int(REFERENCE_MAX_SEC * sample_rate)
+    if len(audio) <= limit:
+        return 0, len(audio)
+
+    usable = len(audio) - len(audio) % SPEECH_FRAME
+    frames = np.abs(audio[:usable]).reshape(-1, SPEECH_FRAME).max(axis=1)
+    peak = float(frames.max()) if len(frames) else 0.0
+    if peak <= 0:
+        return 0, limit  # digital silence; nothing to choose between
+    speech = (frames >= peak * SPEECH_FLOOR).astype(np.int32)
+
+    per_window = max(1, limit // SPEECH_FRAME)
+    if len(speech) <= per_window:
+        return 0, limit
+    # Speech frames per candidate window, every window at once.
+    totals = np.convolve(speech, np.ones(per_window, dtype=np.int32), mode="valid")
+    start = int(totals.argmax()) * SPEECH_FRAME
+    return start, start + limit
+
+
 def prepare_reference(audio: np.ndarray, sample_rate: int) -> np.ndarray:
-    """Validate the voice sample and trim it to the usable window."""
+    """Validate the voice sample and cut it down to the usable window.
+
+    A sample longer than the cap is not an error and never was — the cap is the
+    model's, not the microphone's. seed-vc fits the reference and the audio it
+    is converting into one 30s context window, so every second of reference is a
+    second the song loses per forward pass; at 20s that leaves 10s, and much
+    past it the conversion is all seams. Hand in a minute if it is easier: this
+    picks the part of it worth keeping.
+    """
     seconds = duration_sec(audio, sample_rate)
     if seconds < REFERENCE_MIN_SEC:
         raise AudioError(
             f"reference voice is {seconds:.1f}s, need at least {REFERENCE_MIN_SEC:.0f}s"
         )
-    limit = int(REFERENCE_MAX_SEC * sample_rate)
-    return audio[:limit] if len(audio) > limit else audio
+    start, stop = usable_reference_window(audio, sample_rate)
+    return audio[start:stop]
 
 
 def check_source(audio: np.ndarray, sample_rate: int) -> np.ndarray:
