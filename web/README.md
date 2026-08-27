@@ -67,6 +67,6 @@ mới, để form không mất file đang chọn) và footer trang chủ. Render
 không prerender, để đổi `CONTACT_EMAIL` không phải build lại.
 
 Trang này chỉ viết ra những gì code thật sự làm: cổng đồng thuận ở `/submit`,
-TTL 6 giờ, metadata `AI-generated` trên mọi file, giới hạn 5 lượt/giờ, và nhật
+TTL 6 giờ, metadata `AI-generated` trên mọi file, và nhật
 ký chỉ có mã job — không có nội dung audio, tên file hay địa chỉ IP. Đổi một
 trong các con số đó thì sửa cả hai nơi.

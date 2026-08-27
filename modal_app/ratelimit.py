@@ -1,8 +1,14 @@
 """Per-client rate limit for `/submit`, stored in `modal.Dict`.
 
-Plan §9 caps the MVP at 5 jobs per hour per IP. The cap exists to bound GPU
-spend, not to fight abuse: a determined caller can change address, but an
-accidental loop in a client cannot quietly run up a bill.
+Plan §9 caps the MVP at 5 jobs per hour per IP, to bound GPU spend rather than
+to fight abuse — a determined caller can change address, but an accidental loop
+in a client cannot quietly run up a bill.
+
+That cap is **off unless `JOBS_PER_HOUR` says otherwise** (see `max_jobs`). It
+was charging a slot per job whatever became of it, so an operator debugging
+their own deployment ran out of attempts on five *failures* and could not get
+back in to fix anything. Off is the operator's call, and reversible: the
+limiter below is unchanged and one variable puts it back.
 
 It lives here rather than in the frontend's route handlers because the browser
 uploads straight to Modal (a 3 minute mp3 is past Vercel's 4.5 MB body limit),
@@ -27,9 +33,37 @@ from typing import Any
 
 from .app import rate_dict
 
-# Plan §9: 5 jobs/hour at MVP.
-MAX_JOBS = 5
+# Plan §9 capped the MVP at 5 jobs/hour. That cap ships **off**: it was written
+# to bound GPU spend, and what it actually did was charge an operator debugging
+# their own deployment a slot for every job that crashed — five failures and the
+# app locks you out of fixing it. Set `JOBS_PER_HOUR` to a positive integer to
+# put it back; anything else, empty included, means no cap.
+#
+# Nothing else about the limiter changed, so turning it back on is one variable
+# rather than a revert.
+ENV_LIMIT = "JOBS_PER_HOUR"
+NO_LIMIT = 0
+# What plan §9 asks for, and what `JOBS_PER_HOUR=5` restores. Not a default —
+# it is here so the tests and the docs have one number to point at.
+PLAN_MAX_JOBS = 5
 WINDOW_SEC = 3600.0
+
+
+def max_jobs(value: str | None = None) -> int:
+    """The cap in force, or `NO_LIMIT` when there is none.
+
+    Only a positive integer turns the cap on. A malformed value means no cap
+    rather than a guessed one: this is read at import time in every container,
+    and a limiter that refuses to load takes the whole app down with it.
+    """
+    raw = (os.environ.get(ENV_LIMIT, "") if value is None else value).strip()
+    if not raw:
+        return NO_LIMIT
+    try:
+        return max(NO_LIMIT, int(raw))
+    except ValueError:
+        return NO_LIMIT
+
 
 # Requests that reach Modal directly carry the client address in
 # `x-forwarded-for`; the first entry is the client, the rest are proxies.
@@ -40,7 +74,7 @@ UNKNOWN_CLIENT = "unknown"
 class RateLimited(RuntimeError):
     """Raised by `check`. Carries the seconds until the next slot frees up."""
 
-    def __init__(self, retry_after: int, limit: int = MAX_JOBS) -> None:
+    def __init__(self, retry_after: int, limit: int) -> None:
         self.retry_after = max(1, retry_after)
         self.limit = limit
         super().__init__(
@@ -97,14 +131,20 @@ def check(
     key: str,
     store: MutableMapping[str, Any] | None = None,
     now: float | None = None,
-    limit: int = MAX_JOBS,
+    limit: int | None = None,
     window_sec: float = WINDOW_SEC,
-) -> int:
+) -> int | None:
     """Record one request against `key`. Returns how many remain in the window.
 
     Raises `RateLimited` and records nothing when the window is already full,
     so a rejected request does not push the next slot further away.
+
+    `None` when no cap is configured, and then nothing is recorded either —
+    there is no point growing a Dict nobody reads.
     """
+    limit = max_jobs() if limit is None else limit
+    if limit == NO_LIMIT:
+        return None
     store = _store(store)
     stamp = time.time() if now is None else now
     stamps = _recent(key, store, stamp, window_sec)
@@ -121,10 +161,18 @@ def remaining(
     key: str,
     store: MutableMapping[str, Any] | None = None,
     now: float | None = None,
-    limit: int = MAX_JOBS,
+    limit: int | None = None,
     window_sec: float = WINDOW_SEC,
-) -> int:
-    """How many jobs `key` may still start. Read-only — nothing is recorded."""
+) -> int | None:
+    """How many jobs `key` may still start. Read-only — nothing is recorded.
+
+    `None` when no cap is configured. It reaches the browser as `null`, which is
+    what makes the "N lượt còn lại" line disappear rather than quote a ceiling
+    that is not there.
+    """
+    limit = max_jobs() if limit is None else limit
+    if limit == NO_LIMIT:
+        return None
     stamp = time.time() if now is None else now
     return max(0, limit - len(_recent(key, _store(store), stamp, window_sec)))
 
@@ -133,7 +181,7 @@ def retry_after(
     key: str,
     store: MutableMapping[str, Any] | None = None,
     now: float | None = None,
-    limit: int = MAX_JOBS,
+    limit: int | None = None,
     window_sec: float = WINDOW_SEC,
 ) -> int:
     """Seconds until `key` has a slot again; 0 when it already has one.
@@ -141,7 +189,13 @@ def retry_after(
     The wait is until the *oldest* recorded request leaves the window, which is
     usually far less than a full window — telling a client to come back in an
     hour when the next slot opens in five minutes is its own kind of wrong.
+
+    With no cap configured there is never a wait, so this is always 0 and
+    `_check_quota` waves every request through.
     """
+    limit = max_jobs() if limit is None else limit
+    if limit == NO_LIMIT:
+        return 0
     stamp = time.time() if now is None else now
     stamps = _recent(key, _store(store), stamp, window_sec)
     if len(stamps) < limit:

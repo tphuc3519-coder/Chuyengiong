@@ -37,6 +37,9 @@ jobs:
           RATE_LIMIT_SALT: ${{ secrets.RATE_LIMIT_SALT }}
           # Empty means watermarking is on; set the variable to 0 to turn it off.
           WATERMARK: ${{ vars.WATERMARK }}
+          # Empty means no per-IP cap; set the variable to a positive integer
+          # (5 is what plan §9 asks for) to put one back.
+          JOBS_PER_HOUR: ${{ vars.JOBS_PER_HOUR }}
         # modal_app.deploy, not modal_app.api: a function is published only if
         # the module defining it was imported, and the cron plus the GPU class
         # live in modules the API never touches.

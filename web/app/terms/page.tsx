@@ -95,7 +95,6 @@ export default function TermsPage() {
 
         <h2>6. Giới hạn</h2>
         <ul>
-          <li>5 lượt chuyển mỗi giờ cho mỗi người dùng;</li>
           <li>file nguồn tối đa 15 phút;</li>
           <li>giọng mẫu 5–30 giây;</li>
           <li>
