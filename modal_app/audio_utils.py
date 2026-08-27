@@ -55,6 +55,52 @@ class AudioError(ValueError):
 
 # --- wav bytes <-> array --------------------------------------------------
 
+# A wav that has been through ffmpeg's `loudnorm` carries this tag instead of
+# plain PCM, and `wave` refuses it outright — "unknown format: 65534" — even
+# though the samples behind it are ordinary 16-bit PCM whenever the SubFormat
+# says so. Reading it is a header question, not a data one.
+WAVE_FORMAT_EXTENSIBLE = 0xFFFE
+WAVE_FORMAT_PCM = 0x0001
+
+
+def _fmt_offset(data: bytes) -> int:
+    """Where the `fmt ` chunk's body starts, or -1 if there is no finding it."""
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return -1
+    pos = 12
+    while pos + 8 <= len(data):
+        size = int.from_bytes(data[pos + 4 : pos + 8], "little")
+        if data[pos : pos + 4] == b"fmt ":
+            return pos + 8
+        pos += 8 + size + (size & 1)  # chunks are word aligned
+    return -1
+
+
+def _as_plain_pcm(data: bytes) -> bytes:
+    """`data` with an extensible-PCM header rewritten as plain PCM.
+
+    Everything `wave` reads past the tag — channels, rate, bit depth — sits at
+    the same offset in both layouts, so the rewrite is those two bytes and
+    nothing else. Anything this cannot vouch for comes back untouched, and
+    `wave` gets to raise about it as before rather than being handed something
+    doctored.
+    """
+    start = _fmt_offset(data)
+    if start < 0 or len(data) < start + 26:
+        return data
+    if int.from_bytes(data[start : start + 2], "little") != WAVE_FORMAT_EXTENSIBLE:
+        return data
+    # The extension runs cbSize, wValidBitsPerSample, dwChannelMask, then a
+    # 16 byte SubFormat GUID whose first two bytes hold the real format tag.
+    sub = start + 24
+    if len(data) < sub + 2:
+        return data
+    if int.from_bytes(data[sub : sub + 2], "little") != WAVE_FORMAT_PCM:
+        return data
+    patched = bytearray(data)
+    patched[start : start + 2] = WAVE_FORMAT_PCM.to_bytes(2, "little")
+    return bytes(patched)
+
 
 def encode_wav(audio: np.ndarray, sample_rate: int) -> bytes:
     """Mono float32 in [-1, 1] -> 16-bit PCM wav bytes."""
@@ -74,7 +120,7 @@ def encode_wav(audio: np.ndarray, sample_rate: int) -> bytes:
 def decode_wav(data: bytes) -> tuple[np.ndarray, int]:
     """16-bit PCM wav bytes -> (mono float32, sample_rate). No resampling."""
     try:
-        with wave.open(io.BytesIO(data), "rb") as src:
+        with wave.open(io.BytesIO(_as_plain_pcm(data)), "rb") as src:
             channels = src.getnchannels()
             sample_rate = src.getframerate()
             if src.getsampwidth() != 2:
@@ -118,7 +164,7 @@ def decode_wav_channels(data: bytes) -> tuple[np.ndarray, int]:
     round trip through it is lossless and leaves a stereo mix stereo.
     """
     try:
-        with wave.open(io.BytesIO(data), "rb") as src:
+        with wave.open(io.BytesIO(_as_plain_pcm(data)), "rb") as src:
             channels = src.getnchannels()
             sample_rate = src.getframerate()
             if src.getsampwidth() != 2:

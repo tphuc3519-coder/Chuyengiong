@@ -258,3 +258,56 @@ def test_a_bad_shape_is_refused():
         au.encode_wav_channels(np.zeros((2, 2, 2), dtype=np.float32), 16000)
     with pytest.raises(au.AudioError):
         au.decode_wav_channels(b"not a wav")
+
+
+# --- extensible wav headers -----------------------------------------------
+
+
+def extensible(frames: np.ndarray, sample_rate: int) -> bytes:
+    """The same audio `encode_wav_channels` writes, re-headed as extensible.
+
+    Built by hand rather than by running ffmpeg, so the reader is covered on a
+    machine without it — `test_mixing` checks the real article.
+    """
+    plain = au.encode_wav_channels(frames, sample_rate)
+    at = plain.find(b"fmt ")
+
+    body = bytearray(plain[at + 8 : at + 8 + 16])
+    body[0:2] = au.WAVE_FORMAT_EXTENSIBLE.to_bytes(2, "little")
+    body += (22).to_bytes(2, "little")  # cbSize
+    body += (16).to_bytes(2, "little")  # wValidBitsPerSample
+    body += (3).to_bytes(4, "little")  # dwChannelMask: front left + right
+    body += au.WAVE_FORMAT_PCM.to_bytes(2, "little")  # SubFormat GUID, first field
+    body += bytes(14)  # ...and the rest of it
+
+    out = bytearray(
+        plain[:at] + b"fmt " + len(body).to_bytes(4, "little") + bytes(body) + plain[at + 24 :]
+    )
+    out[4:8] = (len(out) - 8).to_bytes(4, "little")  # the chunk grew; RIFF says so
+    return bytes(out)
+
+
+def test_an_extensible_pcm_header_reads_the_same_as_a_plain_one():
+    """What ffmpeg's `loudnorm` produces. `wave` rejects the tag outright, but
+    the samples behind it are ordinary PCM and the job needs them."""
+    frames = np.stack([np.linspace(-0.5, 0.5, 400), np.linspace(0.5, -0.5, 400)], axis=1)
+    frames = frames.astype(np.float32)
+    plain, ext = au.encode_wav_channels(frames, 44100), extensible(frames, 44100)
+    assert ext != plain, "the fixture did not actually change the header"
+
+    got, rate = au.decode_wav_channels(ext)
+    expected, _ = au.decode_wav_channels(plain)
+    assert rate == 44100
+    assert got.shape == expected.shape
+    assert np.allclose(got, expected)
+
+
+def test_a_header_that_is_not_pcm_underneath_is_still_refused():
+    """Only the tag is rewritten, and only when the SubFormat vouches for PCM —
+    an extensible float or A-law file has to keep failing."""
+    frames = np.zeros((100, 2), dtype=np.float32)
+    ext = bytearray(extensible(frames, 44100))
+    at = ext.find(b"fmt ") + 8
+    ext[at + 24 : at + 26] = (3).to_bytes(2, "little")  # IEEE float
+    with pytest.raises(au.AudioError):
+        au.decode_wav_channels(bytes(ext))

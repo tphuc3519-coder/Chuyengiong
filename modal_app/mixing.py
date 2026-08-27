@@ -23,8 +23,10 @@ stand-in.
 
 from __future__ import annotations
 
+import io
 import subprocess
 import tempfile
+import wave
 from collections.abc import Callable
 from pathlib import Path
 
@@ -50,6 +52,22 @@ def clamp_gain_db(gain_db: float) -> float:
     except (TypeError, ValueError):
         return 0.0
     return max(-MAX_VOCAL_GAIN_DB, min(MAX_VOCAL_GAIN_DB, value))
+
+
+def _sample_rate(wav: bytes) -> int:
+    """The rate of a wav this app wrote itself.
+
+    `wave` and not ffprobe because it is stdlib and this module stays free of
+    everything else; safe because the only wav reaching here is one `encode_wav`
+    produced, which is plain PCM by construction.
+    """
+    if not wav:
+        raise MixError("the vocal is empty")
+    try:
+        with wave.open(io.BytesIO(wav), "rb") as src:
+            return src.getframerate()
+    except (wave.Error, EOFError) as exc:  # truncated headers raise EOFError
+        raise MixError(f"cannot read the vocal's sample rate: {exc}") from exc
 
 
 def _ffmpeg(inputs: list[bytes], filter_complex: str, args: list[str], suffix: str) -> bytes:
@@ -136,10 +154,18 @@ def mix(
     which would quietly move the vocal back down in the mix.
     """
     gain = clamp_gain_db(vocal_gain_db)
+    # `loudnorm` runs at 192 kHz internally and hands that rate on, so the wav
+    # coming out is four times the size it needs to be and — because ffmpeg
+    # describes a rate that high with an explicit channel layout — carries a
+    # WAVE_FORMAT_EXTENSIBLE header. The watermark step then could not read its
+    # own input ("unknown format: 65534") and the job died one stage from done.
+    # Putting the rate back settles both: `amix` had already agreed on the
+    # vocal's, which is what this restores.
+    rate = _sample_rate(vocal_wav)
     graph = (
         f"[0:a]volume={gain:.2f}dB,{CENTRE}[v];"
         f"[v][1:a]amix=inputs=2:normalize=0:duration=longest[m];"
-        f"[m]{LOUDNORM}[out]"
+        f"[m]{LOUDNORM},aresample={rate}[out]"
     )
     mixed = _ffmpeg([vocal_wav, instrumental_wav], graph, ["-c:a", "pcm_s16le"], ".wav")
     return _apply(mixed, watermark)
