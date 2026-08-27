@@ -7,6 +7,7 @@ value the GPU will be handed and the status endpoint will report.
 """
 
 import json
+import types
 
 import pytest
 
@@ -280,3 +281,114 @@ def test_the_browser_does_not_give_up_before_the_pipeline_does():
         f"the browser gives up at {browser_sec}s but the pipeline runs to "
         f"{pipeline.PIPELINE_TIMEOUT}s"
     )
+
+
+# --- resuming after a restart ---------------------------------------------
+
+
+@pytest.fixture
+def volume_root(tmp_path, monkeypatch):
+    """Artifacts on a real directory, with the Volume handle stubbed out."""
+    monkeypatch.setattr(storage, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(
+        pipeline, "data_vol", types.SimpleNamespace(reload=lambda: None, commit=lambda: None)
+    )
+    return tmp_path
+
+
+def test_an_artifact_that_is_there_is_reused(volume_root):
+    job_id = "a" * 32
+    assert pipeline._done_already(job_id, pipeline.VOCAL) is None
+    storage.put(job_id, pipeline.VOCAL, b"stem-bytes")
+    assert pipeline._done_already(job_id, pipeline.VOCAL) == b"stem-bytes"
+
+
+def test_a_half_written_artifact_is_not_mistaken_for_a_finished_one(volume_root):
+    """The property the whole resume rests on. `storage.put` writes to a temp
+    name and renames, so a stage killed mid-write leaves a `.part` and nothing
+    a later run can pick up by mistake."""
+    job_id = "a" * 32
+    (volume_root / job_id).mkdir()
+    (volume_root / job_id / f"{pipeline.VOCAL}.part").write_bytes(b"half a stem")
+    assert pipeline._done_already(job_id, pipeline.VOCAL) is None
+
+
+def test_a_restarted_song_does_not_pay_for_the_gpu_twice(volume_root, monkeypatch, job_store):
+    """What this is all for. A preemption while converting used to restart the
+    pipeline at the top and separate the whole song again, on a GPU, for work
+    already sitting on the Volume."""
+    job_id = "a" * 32
+    jobs.create(job_id, "song", params={"semitone_shift": 0}, store=job_store)
+    monkeypatch.setattr(jobs, "job_dict", job_store)
+    monkeypatch.setattr(pipeline, "_finished", lambda *a, **k: None)
+
+    for name, payload in (
+        (pipeline.INPUT, b"song"),
+        (pipeline.REFERENCE, b"voice"),
+        (pipeline.VOCAL, b"vocal-stem"),
+        (pipeline.INSTRUMENTAL, b"instrumental-stem"),
+        (pipeline.CONVERTED, b"converted-vocal"),
+    ):
+        storage.put(job_id, name, payload)
+
+    used = {}
+
+    def no_gpu(*a, **k):
+        raise AssertionError("a restart paid for the GPU again")
+
+    monkeypatch.setattr("modal_app.separation.Separator", no_gpu)
+    monkeypatch.setattr("modal_app.conversion.VoiceConverter", no_gpu)
+    monkeypatch.setattr(
+        "modal_app.mixing.mix",
+        lambda vocal, instrumental, **k: (
+            used.update(vocal=vocal, instrumental=instrumental) or b"final-mp3"
+        ),
+    )
+
+    pipeline.run_song_pipeline.local(job_id, pipeline.clean_params("song"))
+
+    # The mix ran on what was already there, and only the mix.
+    assert used == {"vocal": b"converted-vocal", "instrumental": b"instrumental-stem"}
+    assert storage.get(job_id, pipeline.OUTPUT) == b"final-mp3"
+    assert jobs.get(job_id, job_store)["status"] == jobs.DONE
+
+
+def test_a_restart_redoes_only_what_is_missing(volume_root, monkeypatch, job_store):
+    """The common case: preempted during conversion, so the stems survived and
+    the converted vocal did not. Separation is skipped, conversion is not."""
+    job_id = "a" * 32
+    jobs.create(job_id, "song", params={"semitone_shift": 0}, store=job_store)
+    monkeypatch.setattr(jobs, "job_dict", job_store)
+    monkeypatch.setattr(pipeline, "_finished", lambda *a, **k: None)
+
+    for name, payload in (
+        (pipeline.INPUT, b"song"),
+        (pipeline.REFERENCE, b"voice"),
+        (pipeline.VOCAL, b"vocal-stem"),
+        (pipeline.INSTRUMENTAL, b"instrumental-stem"),
+    ):
+        storage.put(job_id, name, payload)
+
+    ran = {"separate": False, "convert": False}
+
+    def separator(**_):
+        raise AssertionError("stems were on the Volume and it separated anyway")
+
+    def converter(**_):
+        return types.SimpleNamespace(
+            convert=types.SimpleNamespace(
+                remote=lambda **kw: ran.update(convert=True, source=kw["source_wav"]) or b"fresh"
+            )
+        )
+
+    monkeypatch.setattr("modal_app.separation.Separator", separator)
+    monkeypatch.setattr("modal_app.conversion.VoiceConverter", converter)
+    monkeypatch.setattr("modal_app.mixing.mix", lambda vocal, instrumental, **k: b"final-mp3")
+
+    pipeline.run_song_pipeline.local(job_id, pipeline.clean_params("song"))
+
+    assert ran["convert"], "the missing stage did not run"
+    # And it converted the stem that was already there, not a fresh one.
+    assert ran["source"] == b"vocal-stem"
+    assert storage.get(job_id, pipeline.CONVERTED) == b"fresh"
+    assert jobs.get(job_id, job_store)["status"] == jobs.DONE

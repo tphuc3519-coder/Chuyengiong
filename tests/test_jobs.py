@@ -59,12 +59,27 @@ def test_speech_skips_separation_and_mixing(store):
     assert record["progress"] == 100
 
 
-def test_transitions_cannot_go_backwards(store):
+def test_a_restarted_pipeline_may_re_enter_a_state(store):
+    """The bug this exists for. Modal restarts a preempted container with the
+    same input, and a restarted pipeline runs again from the top — so it sets
+    `separating` on a job already separating. That used to be refused as moving
+    backwards, which turned a routine preemption into a dead job."""
+    job_id = new(store)["id"]
+    jobs.update(job_id, jobs.SEPARATING, store=store)
+    assert jobs.update(job_id, jobs.SEPARATING, store=store)["status"] == jobs.SEPARATING
+
+    # And from further along: a restart rewinds past whatever it had reached.
+    jobs.update(job_id, jobs.CONVERTING, store=store)
+    assert jobs.update(job_id, jobs.SEPARATING, store=store)["status"] == jobs.SEPARATING
+
+
+def test_a_rewind_does_not_walk_the_progress_bar_backwards(store):
+    """Status may go back; the bar may not. A bar that retreats reads as a
+    crash to someone watching it, even when the job is healthy."""
     job_id = new(store)["id"]
     jobs.update(job_id, jobs.CONVERTING, store=store)
-    for status in (jobs.SEPARATING, jobs.CONVERTING, jobs.QUEUED):
-        with pytest.raises(jobs.JobError):
-            jobs.update(job_id, status, store=store)
+    high = jobs.get(job_id, store)["progress"]
+    assert jobs.update(job_id, jobs.SEPARATING, store=store)["progress"] == high
 
 
 def test_terminal_states_are_terminal(store):
