@@ -65,7 +65,10 @@ base_image = (
         "scipy",
         "fastapi[standard]",
     )
-    .add_local_python_source("modal_app")
+    # copy=True: watermark.py and conversion.py both chain further build steps
+    # (pip_install, run_commands) onto this image, which Modal forbids after a
+    # mounted add_local_* — so bake the source in instead of mounting it.
+    .add_local_python_source("modal_app", copy=True)
 )
 
 # The CPU image: web endpoints, the cleanup cron and the pipeline orchestrator.
