@@ -202,7 +202,10 @@ export function useConversion() {
       cancel();
       const controller = new AbortController();
       abort.current = controller;
-      setState((current) => ({ ...current, phase: "running", error: null }));
+      // A fresh clock: this watch starts now, and carrying the original run's
+      // start forward showed 45:00 on a poll two seconds old.
+      startedAt.current = Date.now();
+      setState((current) => ({ ...current, phase: "running", error: null, elapsedMs: 0 }));
 
       try {
         await collect(jobId, controller);
