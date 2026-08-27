@@ -451,6 +451,11 @@ body {
   cursor: not-allowed;
 }
 
+a.link-button {
+  display: block;
+  text-align: left;
+}
+
 .link-button {
   margin-top: 0.4rem;
   padding: 0;
@@ -536,6 +541,13 @@ body {
 
 .field-error {
   margin-top: 0.5rem;
+}
+
+/* The error banner carries a recovery button under its text, so it is a block
+   with a paragraph inside rather than a bare paragraph. Browser margins on
+   that paragraph would push the two apart. */
+.banner.error > p {
+  margin: 0;
 }
 
 .field-note {

@@ -167,6 +167,17 @@ export default function Page() {
                   Lấy lại kết quả của lượt vừa rồi
                 </button>
               )}
+              {/*
+                And a way out when even that fails. The in-page download reads
+                megabytes into a blob, which is the step that dies on a phone;
+                this hands the same file to the browser to fetch on its own,
+                which has worked when the fetch did not.
+              */}
+              {state.resultUrl && (
+                <a className="link-button" href={state.resultUrl}>
+                  Hoặc tải thẳng file về máy
+                </a>
+              )}
             </div>
           )}
 
