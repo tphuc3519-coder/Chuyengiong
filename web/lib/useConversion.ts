@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   POLL_TIMEOUT_MS,
+  apiBase,
   download,
   poll,
   pollDelay,
@@ -35,6 +36,15 @@ export type RunState = {
   uploaded: number;
   elapsedMs: number;
   jobId: string | null;
+  /**
+   * The result straight off Modal, for the browser to fetch by itself.
+   *
+   * The in-page download reads megabytes into a blob, which is the step that
+   * dies on a phone. A plain link is the same file by a route that has already
+   * been shown to work when the fetch does not — no blob, no CORS, no page
+   * left holding the failure.
+   */
+  resultUrl: string | null;
   jobsRemaining: number | null;
   /** The shift the backend measured, once it has. Null while auto-detect runs. */
   semitoneShift: number | null;
@@ -49,6 +59,7 @@ const IDLE: RunState = {
   uploaded: 0,
   elapsedMs: 0,
   jobId: null,
+  resultUrl: null,
   jobsRemaining: null,
   semitoneShift: null,
   error: null,
@@ -153,12 +164,15 @@ export function useConversion() {
             ),
         });
 
+        // Already resolved — `submit` awaited it before sending a byte.
+        const base = await apiBase();
         setState((current) => ({
           ...current,
           phase: "running",
           status: submitted.status,
           uploaded: 1,
           jobId: submitted.job_id,
+          resultUrl: `${base}/download/${submitted.job_id}`,
           jobsRemaining: submitted.jobs_remaining ?? null,
         }));
 

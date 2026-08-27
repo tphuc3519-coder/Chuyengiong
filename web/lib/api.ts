@@ -64,10 +64,18 @@ const OFFLINE = {
     "Đã xử lý xong nhưng chưa tải được file về. Kết quả còn trên máy chủ 6 giờ, thử lại nhé.",
 } as const;
 
-/** `work`, with a bare network `TypeError` turned into a labelled failure. */
-async function offlineAs<T>(step: keyof typeof OFFLINE, work: Promise<T>): Promise<T> {
+/**
+ * `work`, with a bare network `TypeError` turned into a labelled failure.
+ *
+ * Takes a function, not a promise, so the whole exchange is inside it. Reading
+ * the body is where a large download actually dies — `fetch` resolves as soon
+ * as the headers land, and the megabytes arrive afterwards — so wrapping only
+ * the call left the very failure this exists for reporting as the browser's
+ * own "Load failed".
+ */
+async function offlineAs<T>(step: keyof typeof OFFLINE, work: () => Promise<T>): Promise<T> {
   try {
-    return await work;
+    return await work();
   } catch (error) {
     // Status 0 keeps the retry loops treating it as worth repeating: they stop
     // on a 4xx, which is an answer, and this is the absence of one.
@@ -110,7 +118,7 @@ async function fetchApiBase(): Promise<string> {
 
 /** The Modal base URL, fetched once per page load and then remembered. */
 export function apiBase(): Promise<string> {
-  apiBasePromise ??= offlineAs("config", fetchApiBase()).catch((error) => {
+  apiBasePromise ??= offlineAs("config", () => fetchApiBase()).catch((error) => {
     apiBasePromise = null; // let the next attempt retry rather than cache the failure
     throw error;
   });
@@ -196,27 +204,29 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
 }
 
 export async function poll(jobId: string, signal?: AbortSignal): Promise<JobRecord> {
-  const response = await offlineAs(
-    "status",
-    fetch(`/api/status/${jobId}`, { cache: "no-store", signal }),
-  );
-  const body = await response.text();
-  if (!response.ok) {
-    throw new ApiError(response.status, detail(body, `status check failed (${response.status})`));
-  }
-  return JSON.parse(body) as JobRecord;
+  return offlineAs("status", async () => {
+    const response = await fetch(`/api/status/${jobId}`, { cache: "no-store", signal });
+    const body = await response.text();
+    if (!response.ok) {
+      throw new ApiError(response.status, detail(body, `status check failed (${response.status})`));
+    }
+    return JSON.parse(body) as JobRecord;
+  });
 }
 
 export async function download(jobId: string, signal?: AbortSignal): Promise<Blob> {
   const base = await apiBase();
-  const response = await offlineAs("download", fetch(`${base}/download/${jobId}`, { signal }));
-  if (!response.ok) {
-    throw new ApiError(
-      response.status,
-      detail(await response.text(), "could not fetch the result"),
-    );
-  }
-  return response.blob();
+  return offlineAs("download", async () => {
+    const response = await fetch(`${base}/download/${jobId}`, { signal });
+    if (!response.ok) {
+      throw new ApiError(
+        response.status,
+        detail(await response.text(), "could not fetch the result"),
+      );
+    }
+    // The megabytes arrive here, not above: `fetch` resolved on the headers.
+    return response.blob();
+  });
 }
 
 // --- polling schedule -----------------------------------------------------

@@ -451,6 +451,11 @@ body {
   cursor: not-allowed;
 }
 
+a.link-button {
+  display: block;
+  text-align: left;
+}
+
 .link-button {
   margin-top: 0.4rem;
   padding: 0;
