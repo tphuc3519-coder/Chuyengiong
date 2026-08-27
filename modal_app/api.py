@@ -203,11 +203,21 @@ async def submit(
 
 @web.get("/status/{job_id}")
 async def status(job_id: str) -> dict:
-    """Poll this every 2 seconds. Reads the Dict only — no Volume, no GPU."""
+    """Poll this every 2 seconds. Reads the Dict only — no Volume, no GPU.
+
+    The two 404s say different things on purpose. A job id is 32 hex
+    characters, and the place people read one off is a console that truncates
+    long strings with an ellipsis — so "you did not send me a job id" is a
+    likely answer here and a completely different problem from "that job is
+    gone". Both used to be "no such job", which sent someone hunting for a
+    missing job when they had only pasted half an id.
+    """
     try:
         storage.check_job_id(job_id)
     except storage.StorageError as exc:
-        raise HTTPException(404, "no such job") from exc
+        raise HTTPException(
+            404, f"not a job id: expected 32 hex characters, got {len(job_id)}"
+        ) from exc
     record = jobs.find(job_id)
     if record is None:
         raise HTTPException(404, "no such job")
