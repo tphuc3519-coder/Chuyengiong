@@ -46,20 +46,42 @@ export class ApiError extends Error {
 
 let apiBasePromise: Promise<string> | null = null;
 
-/** The Modal base URL, fetched once per page load and then remembered. */
-export function apiBase(): Promise<string> {
-  apiBasePromise ??= fetch("/api/config", { cache: "no-store" })
-    .then(async (response) => {
+// The smallest request the app makes, and the one every other request waits on:
+// nothing can be uploaded or downloaded until it says where Modal is. `watch`
+// rides out five failed polls and `fetchResult` four failed downloads, both
+// because the network drops on mobile — and this had none, so a single blip
+// before either of them got started ended the run.
+const CONFIG_ATTEMPTS = 3;
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchApiBase(): Promise<string> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const response = await fetch("/api/config", { cache: "no-store" });
       const body = await response.json().catch(() => ({}));
       if (!response.ok || !body?.apiBase) {
         throw new ApiError(response.status, body?.error ?? "converter is not configured");
       }
       return body.apiBase as string;
-    })
-    .catch((error) => {
-      apiBasePromise = null; // let the next attempt retry rather than cache the failure
-      throw error;
-    });
+    } catch (error) {
+      // A reply is an answer, however unwelcome: MODAL_API_URL is unset on the
+      // deployment and asking three times will not set it. Only a request that
+      // never arrived is worth repeating.
+      if (error instanceof ApiError || attempt >= CONFIG_ATTEMPTS) throw error;
+      await wait(attempt * 400);
+    }
+  }
+}
+
+/** The Modal base URL, fetched once per page load and then remembered. */
+export function apiBase(): Promise<string> {
+  apiBasePromise ??= fetchApiBase().catch((error) => {
+    apiBasePromise = null; // let the next attempt retry rather than cache the failure
+    throw error;
+  });
   return apiBasePromise;
 }
 
