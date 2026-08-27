@@ -72,14 +72,23 @@ def check_status(status: str) -> str:
 
 
 def check_transition(current: str, new: str) -> str:
-    """Raise unless `current → new` is a legal move."""
+    """Raise unless `current → new` is a legal move.
+
+    Terminal is the only rule left. A running job used to be forbidden from
+    re-entering a state it had already been in, on the reasoning that a machine
+    only moves forward — but Modal restarts a preempted container with the same
+    input, and a restarted `run_song_pipeline` starts again from the top. It
+    genuinely is separating again. Refusing to say so killed the job outright,
+    over a routine bit of infrastructure, with the memorable line
+
+        JobError: cannot move backwards: separating → separating
+
+    Progress does not follow the status back: `update` keeps it monotonic, so a
+    rewind redoes the work without the bar reading as a crash.
+    """
     check_status(new)
     if current in TERMINAL:
         raise JobError(f"job is already {current}, cannot move to {new}")
-    if new == FAILED:
-        return new
-    if ORDER.index(new) <= ORDER.index(current):
-        raise JobError(f"cannot move backwards: {current} → {new}")
     return new
 
 
