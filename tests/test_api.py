@@ -66,7 +66,8 @@ def test_submit_returns_a_job_id_without_waiting(client, started):
         "job_id": "b" * 32,
         "status": jobs.QUEUED,
         "mode": "song",
-        "jobs_remaining": ratelimit.MAX_JOBS,
+        # No cap ships, so there is no ceiling to report.
+        "jobs_remaining": None,
     }
     assert started[0]["source"] == b"fake-audio"
     assert started[0]["reference"] == b"fake-voice"
@@ -226,17 +227,28 @@ def test_an_explicit_shift_is_passed_through_clamped(client, started):
 
 
 # --- rate limit -----------------------------------------------------------
+#
+# The cap ships off, so these turn it on: what they are for is the behaviour a
+# deployment gets once `JOBS_PER_HOUR` is set, not what an unset one does.
+
+
+CAP = ratelimit.PLAN_MAX_JOBS
+
+
+@pytest.fixture
+def capped(monkeypatch):
+    monkeypatch.setenv(ratelimit.ENV_LIMIT, str(CAP))
 
 
 def fill_quota(store, address="203.0.113.7"):
     """Use up one client's hourly allowance and return its request headers."""
     key = ratelimit.client_key(address)
-    for _ in range(ratelimit.MAX_JOBS):
-        ratelimit.check(key, store=store)
+    for _ in range(CAP):
+        ratelimit.check(key, store=store, limit=CAP)
     return {"x-forwarded-for": address}
 
 
-def test_a_client_over_its_hourly_cap_is_a_429(client, started, rate_store):
+def test_a_client_over_its_hourly_cap_is_a_429(client, started, rate_store, capped):
     """Plan §9: 5 jobs an hour. The cap is here because the browser uploads
     straight to Modal, so the frontend is not on this path at all."""
     headers = fill_quota(rate_store)
@@ -245,7 +257,7 @@ def test_a_client_over_its_hourly_cap_is_a_429(client, started, rate_store):
     assert started == []
 
 
-def test_retry_after_is_the_real_wait_not_a_whole_window(client, started, rate_store):
+def test_retry_after_is_the_real_wait_not_a_whole_window(client, started, rate_store, capped):
     """The oldest request is what frees the next slot, so a client ten minutes
     in should be told fifty, not sixty."""
     headers = fill_quota(rate_store)
@@ -258,25 +270,23 @@ def test_retry_after_is_the_real_wait_not_a_whole_window(client, started, rate_s
     assert 0 < wait <= ratelimit.WINDOW_SEC - 599
 
 
-def test_the_cap_is_per_client_not_global(client, started, rate_store):
+def test_the_cap_is_per_client_not_global(client, started, rate_store, capped):
     fill_quota(rate_store, "203.0.113.7")
     response = client.post("/submit", **upload(), headers={"x-forwarded-for": "198.51.100.9"})
     assert response.status_code == 200
     assert len(started) == 1
 
 
-def test_a_rejected_submit_does_not_spend_a_slot(client, started, rate_store):
+def test_a_rejected_submit_does_not_spend_a_slot(client, started, rate_store, capped):
     """Validation runs after the quota is read but before it is spent, so a
     client that sends a bad request can fix it and retry."""
     address = "203.0.113.7"
     headers = {"x-forwarded-for": address}
     assert client.post("/submit", **upload(consent="false"), headers=headers).status_code == 400
-    assert ratelimit.remaining(ratelimit.client_key(address), store=rate_store) == (
-        ratelimit.MAX_JOBS
-    )
+    assert ratelimit.remaining(ratelimit.client_key(address), store=rate_store) == (CAP)
 
 
-def test_the_slot_is_spent_when_the_job_actually_starts(client, monkeypatch, rate_store):
+def test_the_slot_is_spent_when_the_job_actually_starts(client, monkeypatch, rate_store, capped):
     """`_start_job` is the real thing here, with only the infrastructure stubbed."""
     address = "203.0.113.7"
     monkeypatch.setattr(api.storage, "put", lambda *a, **k: "")
@@ -286,10 +296,8 @@ def test_the_slot_is_spent_when_the_job_actually_starts(client, monkeypatch, rat
 
     response = client.post("/submit", **upload(), headers={"x-forwarded-for": address})
     assert response.status_code == 200
-    assert response.json()["jobs_remaining"] == ratelimit.MAX_JOBS - 1
-    assert ratelimit.remaining(ratelimit.client_key(address), store=rate_store) == (
-        ratelimit.MAX_JOBS - 1
-    )
+    assert response.json()["jobs_remaining"] == CAP - 1
+    assert ratelimit.remaining(ratelimit.client_key(address), store=rate_store) == (CAP - 1)
 
 
 # --- wiring ---------------------------------------------------------------

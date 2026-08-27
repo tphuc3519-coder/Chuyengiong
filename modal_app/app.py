@@ -34,7 +34,9 @@ rate_dict = modal.Dict.from_name("vc-ratelimit", create_if_missing=True)
 #                    non-reversible (`ratelimit._salt`)
 #   WATERMARK        set to 0/false/no/off to ship unwatermarked output; empty
 #                    means on, which is the default (`watermark.enabled`)
-CONFIG_KEYS = ("ALLOWED_ORIGINS", "RATE_LIMIT_SALT", "WATERMARK")
+#   JOBS_PER_HOUR    a positive integer puts the per-IP cap back; empty means
+#                    no cap, which is where this now starts (`ratelimit.max_jobs`)
+CONFIG_KEYS = ("ALLOWED_ORIGINS", "RATE_LIMIT_SALT", "WATERMARK", "JOBS_PER_HOUR")
 
 
 def config_secret() -> modal.Secret:

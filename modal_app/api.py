@@ -99,7 +99,7 @@ def _check_quota(client: str) -> None:
         return
     raise HTTPException(
         429,
-        f"rate limit reached: {ratelimit.MAX_JOBS} jobs per hour, "
+        f"rate limit reached: {ratelimit.max_jobs()} jobs per hour, "
         f"try again in {wait // 60 + 1} minute(s)",
         headers={"Retry-After": str(wait)},
     )

@@ -23,7 +23,15 @@ export const DEFAULT_DIFFUSION_STEPS: Record<Mode, number> = { song: 50, speech:
 
 export const MAX_VOCAL_GAIN_DB = 12;
 
-/** Plan §9, enforced in `modal_app/ratelimit.py`. Shown so the wall is visible. */
+/**
+ * The ceiling this labels the counter with — plan §9's number.
+ *
+ * Only ever rendered when the server reports one, which it does not unless
+ * `JOBS_PER_HOUR` is set on the deployment: `ratelimit.remaining` returns null
+ * with no cap configured, and null hides the line rather than quoting a wall
+ * that is not there. Set the deployment to something other than 5 and this has
+ * to move with it.
+ */
 export const JOBS_PER_HOUR = 5;
 
 /** Reference voice window, enforced again in `audio_utils.prepare_reference`. */

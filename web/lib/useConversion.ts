@@ -56,6 +56,7 @@ const IDLE: RunState = {
 };
 
 const MAX_POLL_FAILURES = 5;
+const MAX_DOWNLOAD_ATTEMPTS = 4;
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -77,7 +78,16 @@ function aborted(error: unknown): boolean {
 
 function message(error: unknown): string {
   if (error instanceof ApiError && error.status === 429) {
-    return "Đã dùng hết lượt trong giờ này (5 bài/giờ). Thử lại sau nhé.";
+    // No number: the cap is whatever `JOBS_PER_HOUR` says on the deployment,
+    // and quoting five here was already wrong once.
+    return "Đã dùng hết lượt trong giờ này. Thử lại sau nhé.";
+  }
+  // A `fetch` that never reached the server rejects with a TypeError, and the
+  // text it carries is the browser's own: Safari says "Load failed", Chrome
+  // "Failed to fetch". Neither names what broke or what to do about it, and
+  // showing it verbatim is how a dropped connection came to read as a bug.
+  if (error instanceof TypeError) {
+    return "Mất kết nối tới máy chủ. Kiểm tra mạng rồi thử lại.";
   }
   if (error instanceof Error && error.message) return error.message;
   return "Có lỗi không xác định.";
@@ -147,7 +157,7 @@ export function useConversion() {
           })),
         );
 
-        const blob = await download(record.id, controller.signal);
+        const blob = await fetchResult(record.id, controller.signal);
         setState((current) => ({
           ...current,
           phase: "done",
@@ -166,6 +176,31 @@ export function useConversion() {
   );
 
   return { state, start, reset, cancel };
+}
+
+/**
+ * Fetch the finished mp3, riding out a dropped connection.
+ *
+ * `watch` already survives five failed polls, on the reasoning that the network
+ * drops on mobile and a job minutes into a GPU should not die of it. The same
+ * reasoning applies harder here and had no retry at all: this is megabytes over
+ * a phone connection rather than a few hundred bytes, it is the very last step,
+ * and the result it was throwing away sits on the server for six hours. One
+ * blip turned a finished job into Safari's "Load failed".
+ */
+async function fetchResult(jobId: string, signal: AbortSignal): Promise<Blob> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await download(jobId, signal);
+    } catch (error) {
+      if (aborted(error)) throw error;
+      // A 4xx is an answer, not a dropped connection: the job is unknown or its
+      // files have expired, and asking again will say the same thing.
+      const fatal = error instanceof ApiError && error.status >= 400 && error.status < 500;
+      if (fatal || attempt >= MAX_DOWNLOAD_ATTEMPTS) throw error;
+      await sleep(attempt * 1000, signal);
+    }
+  }
 }
 
 async function watch(
