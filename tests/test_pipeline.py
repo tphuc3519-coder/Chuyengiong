@@ -133,15 +133,16 @@ def test_an_explicit_shift_is_used_without_measuring_anything(monkeypatch):
 
 
 def test_an_absent_shift_is_measured_and_written_back(monkeypatch, job_store):
+    """Speech, because speech is what auto-detect is for — see `AUTO_DETECT_MODES`."""
     job_id = "a" * 32
-    jobs.create(job_id, "song", params={"semitone_shift": None}, store=job_store)
-    monkeypatch.setattr("modal_app.pitch.suggest_semitone_shift", lambda *a, **k: 9)
+    jobs.create(job_id, "speech", params={"semitone_shift": None}, store=job_store)
+    monkeypatch.setattr("modal_app.pitch.suggest_semitone_shift", lambda *a, **k: 6)
 
     params = {"semitone_shift": None}
-    assert pipeline._resolve_shift(job_id, params, b"src", b"ref", "singing") == 9
+    assert pipeline._resolve_shift(job_id, params, b"src", b"ref", "speech") == 6
     # Both the in-flight params handed to the GPU and the record /status reads.
-    assert params["semitone_shift"] == 9
-    assert jobs.public(job_store[job_id])["semitone_shift"] == 9
+    assert params["semitone_shift"] == 6
+    assert jobs.public(job_store[job_id])["semitone_shift"] == 6
 
 
 def test_a_measured_shift_is_clamped_to_the_mode(monkeypatch, job_store):
@@ -154,20 +155,33 @@ def test_a_measured_shift_is_clamped_to_the_mode(monkeypatch, job_store):
     assert pipeline._resolve_shift(job_id, params, b"src", b"ref", "speech") == 8
 
 
-def test_the_song_branch_measures_the_vocal_stem_not_the_mix(monkeypatch, job_store):
-    """Measuring the full mix would read the backing track's pitch as well as
-    the singer's, which is why this runs after separation."""
+def test_a_song_keeps_the_key_it_was_written_in(monkeypatch, job_store):
+    """The bug this exists for. The converted vocal is mixed back over an
+    instrumental nothing here transposes, so a shift that is not a whole octave
+    puts the singer in a different key from the backing track. Measuring one
+    made it certain: the distance from a singer's median F0 to a *speaking*
+    reference is a musically arbitrary number."""
     job_id = "a" * 32
     jobs.create(job_id, "song", params={"semitone_shift": None}, store=job_store)
-    seen = {}
+    called = []
     monkeypatch.setattr(
         "modal_app.pitch.suggest_semitone_shift",
-        lambda source, reference, mode: seen.update(source=source, mode=mode) or 2,
+        lambda *a, **k: called.append(a) or 7,
     )
 
     params = {"semitone_shift": None}
-    pipeline._resolve_shift(job_id, params, b"vocal-stem", b"ref", "singing")
-    assert seen == {"source": b"vocal-stem", "mode": "singing"}
+    assert pipeline._resolve_shift(job_id, params, b"vocal-stem", b"ref", "singing") == 0
+    assert called == [], "a song measured a shift it should not have"
+    # /status still reports what was applied, and 0 is what was applied.
+    assert jobs.public(job_store[job_id])["semitone_shift"] == 0
+
+
+def test_a_song_still_takes_a_shift_the_user_asked_for(monkeypatch, job_store):
+    """Off by default is not the same as unavailable: the slider still moves,
+    and an octave is the one that stays in key."""
+    monkeypatch.setattr("modal_app.pitch.suggest_semitone_shift", lambda *a, **k: 7)
+    params = {"semitone_shift": -12}
+    assert pipeline._resolve_shift("a" * 32, params, b"vocal", b"ref", "singing") == -12
 
 
 # --- the audit trail (plan §8 item 5) -------------------------------------

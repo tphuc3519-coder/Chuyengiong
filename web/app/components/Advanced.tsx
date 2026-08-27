@@ -40,6 +40,11 @@ export function Advanced({
   const panelId = useId();
   const pitchLimit = MAX_SEMITONE_SHIFT[mode];
   const auto = params.semitoneShift === null;
+  // What "no explicit shift" means differs by mode, because the backend only
+  // measures one for speech (`AUTO_DETECT_MODES` in `pipeline.py`). A song's
+  // vocal is mixed back over an instrumental nothing transposes, so leaving the
+  // key alone is the answer there rather than a measurement.
+  const keepsKey = mode === "song";
 
   return (
     <div className="advanced">
@@ -60,9 +65,11 @@ export function Advanced({
             Dịch cao độ
             <output>
               {auto
-                ? detected === null
-                  ? "tự động"
-                  : `tự động · lần trước ${formatSemitones(detected)}`
+                ? keepsKey
+                  ? "giữ tone gốc"
+                  : detected === null
+                    ? "tự động"
+                    : `tự động · lần trước ${formatSemitones(detected)}`
                 : `${formatSemitones(params.semitoneShift ?? 0)} nửa cung`}
             </output>
           </span>
@@ -83,7 +90,7 @@ export function Advanced({
                 })
               }
             />
-            <span>Tự động dò từ giọng mẫu</span>
+            <span>{keepsKey ? "Giữ nguyên tone gốc" : "Tự động dò từ giọng mẫu"}</span>
           </label>
 
           {!auto && (
@@ -103,10 +110,12 @@ export function Advanced({
 
           <span className="slider-hint">
             {auto
-              ? "Đo F0 trung vị của giọng trong bài và của giọng mẫu rồi lấy chênh lệch. Chỉ tính trên đoạn có tiếng, nên nhạc dạo dài không làm lệch."
+              ? keepsKey
+                ? "Nhạc nền không được dịch theo, nên một lượng dịch lẻ sẽ đặt giọng vào tông khác bản phối. Để nguyên là an toàn."
+                : "Đo F0 trung vị của giọng trong bài và của giọng mẫu rồi lấy chênh lệch. Chỉ tính trên đoạn có tiếng."
               : mode === "speech"
                 ? `Giọng nói giới hạn ±${pitchLimit}: dịch xa hơn nghe méo thanh điệu.`
-                : "Nam→nữ thường +12, nữ→nam thường −12."}
+                : "Nam→nữ thường +12, nữ→nam thường −12. Bội số của 12 là một quãng tám, giữ đúng key với nhạc nền; các giá trị khác sẽ lệch."}
           </span>
         </div>
 

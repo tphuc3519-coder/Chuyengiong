@@ -46,6 +46,23 @@ OUTPUT = "output.mp3"
 # 30 minutes of wall clock leaves room for a cold start on both models.
 PIPELINE_TIMEOUT = 1800
 
+# Which modes measure a shift when the client does not name one.
+#
+# Not `singing`, and this is the whole reason the tuple exists. A song's vocal
+# is converted, shifted, and then mixed back over an instrumental that nothing
+# in this pipeline transposes — so any shift that is not a whole octave leaves
+# the singer in a different key from the backing track, which is what "lệch
+# tone" means and it is not subtle. The measurement makes it worse: it compares
+# the singer's median F0 against the reference, and the reference is somebody
+# *speaking*, so the distance between them is a musically arbitrary number that
+# lands on a multiple of twelve only by accident.
+#
+# Speech has neither problem — nothing is mixed under it, and moving a talker
+# into the target's natural range is the point. So it keeps auto-detect, and a
+# song keeps the key it was written in. The slider still moves either way, for
+# anyone who wants an octave.
+AUTO_DETECT_MODES = ("speech",)
+
 # Job records are read by a browser that is polling; keep failure text short
 # enough to render and free of stack traces.
 MAX_ERROR_CHARS = 400
@@ -152,6 +169,11 @@ def _resolve_shift(job_id: str, params: dict, source: bytes, reference: bytes, m
     """
     if params["semitone_shift"] is not None:
         return params["semitone_shift"]
+
+    if mode not in AUTO_DETECT_MODES:
+        params["semitone_shift"] = 0
+        jobs.record_params(job_id, {"semitone_shift": 0})
+        return 0
 
     from .pitch import suggest_semitone_shift
 

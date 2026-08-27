@@ -96,7 +96,7 @@ export default function TermsPage() {
         <h2>6. Giới hạn</h2>
         <ul>
           <li>file nguồn tối đa 15 phút;</li>
-          <li>giọng mẫu 5–30 giây;</li>
+          <li>giọng mẫu từ 5 giây, đoạn dài hơn được cắt lấy phần rõ nhất;</li>
           <li>
             dịch vụ ở giai đoạn thử nghiệm, có thể dừng hoặc lỗi bất cứ lúc nào, không bảo hành.
           </li>
