@@ -15,7 +15,12 @@ import numpy as np
 import pytest
 
 from modal_app import mixing
-from modal_app.audio_utils import decode_audio, encode_wav, encode_wav_channels
+from modal_app.audio_utils import (
+    decode_audio,
+    decode_wav_channels,
+    encode_wav,
+    encode_wav_channels,
+)
 
 SR = 44100
 
@@ -279,3 +284,45 @@ def _split(mp3: bytes) -> tuple[np.ndarray, np.ndarray]:
     ).stdout
     frames = np.frombuffer(raw, dtype="<f4").reshape(-1, 2)
     return frames[:, 0].copy(), frames[:, 1].copy()
+
+
+# --- what the watermark step is handed ------------------------------------
+
+
+def fmt_tag_and_rate(wav: bytes) -> tuple[int, int]:
+    """`(wFormatTag, sample_rate)` straight out of the header."""
+    at = wav.find(b"fmt ") + 8
+    return (
+        int.from_bytes(wav[at : at + 2], "little"),
+        int.from_bytes(wav[at + 4 : at + 8], "little"),
+    )
+
+
+@needs_ffmpeg
+def test_the_mix_handed_to_the_watermark_is_plain_pcm_at_the_vocals_rate():
+    """The bug this exists for: `loudnorm` runs at 192 kHz and passes that rate
+    on, which makes ffmpeg write a WAVE_FORMAT_EXTENSIBLE header. `wave` refuses
+    that outright, so the watermark step could not read its own input and every
+    song job died one stage from done with "unknown format: 65534"."""
+    seen: dict = {}
+
+    def watermark(wav: bytes) -> bytes:
+        seen["tag"], seen["rate"] = fmt_tag_and_rate(wav)
+        frames, rate = decode_wav_channels(wav)
+        seen["channels"] = frames.shape[1]
+        return encode_wav_channels(frames, rate)
+
+    mixing.mix(tone(1.0), stereo_tone(1.0), 0.0, watermark=watermark)
+    assert seen["tag"] == 1, "the watermark was handed something `wave` cannot read"
+    assert seen["rate"] == SR, "loudnorm's 192 kHz was passed on instead of the mix rate"
+    assert seen["channels"] == 2, "the stereo mix reached the watermark folded to mono"
+
+
+@needs_ffmpeg
+def test_the_mix_is_not_four_times_the_size_it_needs_to_be():
+    """The same 192 kHz, from the other side: it quadrupled every intermediate
+    wav and every sample the watermark model had to walk."""
+    captured: list[bytes] = []
+    mixing.mix(tone(1.0), stereo_tone(1.0), 0.0, watermark=lambda wav: captured.append(wav) or wav)
+    # 1s of 16-bit stereo at SR, plus a header.
+    assert len(captured[0]) < SR * 2 * 2 * 1.1
