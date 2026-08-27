@@ -179,7 +179,7 @@ async function watch(
   for (;;) {
     const elapsed = Date.now() - began;
     if (elapsed > POLL_TIMEOUT_MS) {
-      throw new ApiError(0, "Quá 15 phút mà chưa xong — có thể job đã hỏng, thử lại nhé.");
+      throw new ApiError(0, "Quá 30 phút mà chưa xong — job đã bị dừng, thử lại nhé.");
     }
     await sleep(pollDelay(elapsed), signal);
 
