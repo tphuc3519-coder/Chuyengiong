@@ -23,7 +23,7 @@ export const metadata: Metadata = {
   description: "Quy tắc sử dụng, cách xử lý file, và giới hạn của dịch vụ chuyển giọng.",
 };
 
-const UPDATED = "26/08/2026";
+const UPDATED = "01/09/2026";
 
 export default function TermsPage() {
   const contact = contactEmail();
@@ -41,6 +41,12 @@ export default function TermsPage() {
           Bạn đưa vào một file âm thanh và một giọng mẫu; hệ thống trả về bản đã đổi sang giọng mẫu
           đó. Với bài hát, nhạc nền được tách ra rồi ghép lại nguyên vẹn. Không có mô hình nào được
           huấn luyện trên file của bạn.
+        </p>
+        <p>
+          Ở chế độ <strong>Văn bản</strong>, thay vì file âm thanh bạn nhập chữ: máy đọc đoạn đó
+          bằng một giọng tổng hợp rồi đổi sang giọng mẫu của bạn, qua đúng bước chuyển giọng ở trên.
+          Nghĩa là bạn có thể tạo ra một bản ghi trong đó giọng mẫu nói những câu người đó chưa từng
+          nói — mục 2 áp dụng đầy đủ cho chế độ này, và đây là chỗ nó quan trọng nhất.
         </p>
 
         <h2>2. Bạn cam kết điều gì khi bấm chuyển giọng</h2>
@@ -76,9 +82,9 @@ export default function TermsPage() {
 
         <h2>4. File của bạn ở lại bao lâu</h2>
         <p>
-          File nguồn, giọng mẫu và kết quả bị xoá khỏi máy chủ sau 6 giờ, bằng một tác vụ chạy tự
-          động chứ không phải khi có người nhớ ra. Không có tài khoản, không có lịch sử, không có
-          cách nào lấy lại một job đã hết hạn — tải về trước khi đóng tab.
+          File nguồn, văn bản bạn nhập, giọng mẫu và kết quả bị xoá khỏi máy chủ sau 6 giờ, bằng một
+          tác vụ chạy tự động chứ không phải khi có người nhớ ra. Không có tài khoản, không có lịch
+          sử, không có cách nào lấy lại một job đã hết hạn — tải về trước khi đóng tab.
         </p>
         <p>
           Nhật ký hệ thống chỉ lưu mã job, thời điểm, trạng thái và kích thước file, để trả lời được
@@ -96,6 +102,7 @@ export default function TermsPage() {
         <h2>6. Giới hạn</h2>
         <ul>
           <li>file nguồn tối đa 15 phút;</li>
+          <li>văn bản tối đa 2000 ký tự, và chỉ ở những ngôn ngữ có trong danh sách chọn;</li>
           <li>giọng mẫu từ 5 giây, đoạn dài hơn được cắt lấy phần rõ nhất;</li>
           <li>
             dịch vụ ở giai đoạn thử nghiệm, có thể dừng hoặc lỗi bất cứ lúc nào, không bảo hành.

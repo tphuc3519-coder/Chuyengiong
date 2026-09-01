@@ -15,7 +15,14 @@
 
 import type { Mode, Params } from "./params";
 
-export type Status = "queued" | "separating" | "converting" | "mixing" | "done" | "failed";
+export type Status =
+  | "queued"
+  | "separating"
+  | "synthesizing"
+  | "converting"
+  | "mixing"
+  | "done"
+  | "failed";
 
 export type JobRecord = {
   id: string;
@@ -137,7 +144,9 @@ function detail(body: string, fallback: string): string {
 export type SubmitInput = {
   mode: Mode;
   params: Params;
-  source: File;
+  /** The file to convert, or null on `tts` — there `text` is the input. */
+  source: File | null;
+  text?: string;
   reference: File | Blob;
   referenceName: string;
   consent: boolean;
@@ -147,7 +156,15 @@ export type SubmitInput = {
 
 export function submit(input: SubmitInput): Promise<SubmitResult> {
   const form = new FormData();
-  form.set("input", input.source, input.source.name);
+  // One of the two, never both: `mode` is what decides which the backend reads,
+  // and sending the other alongside it would only make a mismatch possible.
+  if (input.mode === "tts") {
+    form.set("text", input.text ?? "");
+    form.set("language", input.params.language);
+    form.set("speaking_rate", String(input.params.speakingRate));
+  } else if (input.source) {
+    form.set("input", input.source, input.source.name);
+  }
   form.set("reference", input.reference, input.referenceName);
   form.set("mode", input.mode);
   // Omitted, not sent as 0: an absent field is how the backend is told to
@@ -270,6 +287,7 @@ export function pollDelay(elapsedMs: number): number {
 export const STATUS_LABEL: Record<Status, string> = {
   queued: "Đang xếp hàng",
   separating: "Đang tách nhạc nền",
+  synthesizing: "Đang đọc văn bản",
   converting: "Đang đổi giọng",
   mixing: "Đang ghép lại",
   done: "Xong",

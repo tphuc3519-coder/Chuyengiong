@@ -45,8 +45,10 @@ CLEANUP_PERIOD_HOURS = 6
 
 # uuid4().hex — no dashes, so nothing in a job id can ever be a path separator.
 _JOB_ID_RE = re.compile(r"[0-9a-f]{32}")
-# The artifact names the pipeline writes, and nothing else.
-_NAME_RE = re.compile(r"[a-z0-9_]+\.(wav|mp3|json)")
+# The artifact names the pipeline writes, and nothing else. `txt` is on the
+# list for one file: the `tts` branch's `input.txt`, which is the user's text
+# and belongs on the Volume with the audio so the same TTL sweep takes it away.
+_NAME_RE = re.compile(r"[a-z0-9_]+\.(wav|mp3|json|txt)")
 
 
 class StorageError(ValueError):

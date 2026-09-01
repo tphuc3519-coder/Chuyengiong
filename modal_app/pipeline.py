@@ -3,6 +3,7 @@
     song:    input ──► separate ──► vocal ──► convert ──► mix ──► output.mp3
                             └────► instrumental ───────────┘
     speech:  input ─────────────────────────► convert ──► encode ──► output.mp3
+    tts:     input.txt ──► synthesize ──────► convert ──► encode ──► output.mp3
 
 These functions run on the small CPU image and do no audio work themselves:
 separation and conversion happen in their own GPU containers, called with
@@ -30,15 +31,21 @@ from .app import DATA_DIR, api_image, app, data_vol
 from .audio_utils import clamp_diffusion_steps, clamp_semitone_shift
 from .mixing import clamp_gain_db
 from .separation import DEFAULT_SEPARATION_MODEL, check_model, safe_ext
+from .tts import DEFAULT_LANGUAGE, check_language, clamp_speaking_rate
 
 # Artifact names on the Volume, matching the layout in `storage`. `input.mp3`
 # is a label, not a claim about the container: the upload keeps whatever format
 # it arrived in and `params["source_ext"]` carries the real extension through to
 # the separator, which picks its decoder by file name.
 INPUT = "input.mp3"
+# The `tts` branch's input, in place of `input.mp3`: UTF-8 text, on the Volume
+# rather than in the job record so the TTL sweep expires it with the audio.
+TEXT = "input.txt"
 REFERENCE = "reference.wav"
 VOCAL = "vocal.wav"
 INSTRUMENTAL = "instrumental.wav"
+# What the synthesiser produced, before it has anybody's voice.
+SPOKEN = "spoken.wav"
 CONVERTED = "converted.wav"
 OUTPUT = "output.mp3"
 
@@ -61,6 +68,11 @@ PIPELINE_TIMEOUT = 1800
 # into the target's natural range is the point. So it keeps auto-detect, and a
 # song keeps the key it was written in. The slider still moves either way, for
 # anyone who wants an octave.
+#
+# These are conversion modes, not job modes, which is why `tts` is not listed
+# and still gets measured: it converts as `speech`, and it needs the
+# measurement more than an upload does — the synthetic voice has one register
+# per language and the target is as likely to be an octave off it as not.
 AUTO_DETECT_MODES = ("speech",)
 
 # Job records are read by a browser that is polling; keep failure text short
@@ -76,10 +88,11 @@ WATERMARK_PROGRESS = 85
 def clean_params(mode: str, raw: dict | None = None) -> dict:
     """Validate and clamp everything `/submit` accepts. Pure, so tests cover it.
 
-    Raises `jobs.JobError` for an unusable mode and `SeparationError` for an
-    unknown separation model; every other field is clamped rather than
-    rejected, because a slider that arrives out of range is a client bug, not
-    something worth failing a paid GPU job over.
+    Raises `jobs.JobError` for an unusable mode, `SeparationError` for an
+    unknown separation model and `TtsError` for a language we do not speak;
+    every other field is clamped rather than rejected, because a slider that
+    arrives out of range is a client bug, not something worth failing a paid
+    GPU job over.
     """
     raw = dict(raw or {})
     jobs.check_mode(mode)
@@ -102,6 +115,14 @@ def clean_params(mode: str, raw: dict | None = None) -> dict:
         params["separation_model"] = check_model(
             raw.get("separation_model") or DEFAULT_SEPARATION_MODEL
         )
+    if mode == "tts":
+        # The language is refused rather than defaulted when it is unknown: a
+        # job that silently reads Vietnamese text with the English checkpoint
+        # produces a confident recording of nonsense, which is worse than an
+        # error. `source_ext` means nothing on this branch — there is no file.
+        params["language"] = check_language(raw.get("language") or DEFAULT_LANGUAGE)
+        params["speaking_rate"] = clamp_speaking_rate(raw.get("speaking_rate"))
+        params.pop("source_ext", None)
     return params
 
 
@@ -130,6 +151,9 @@ def _finished(
         shift=params.get("semitone_shift"),
         steps=params.get("diffusion_steps"),
         model=params.get("separation_model"),
+        # The language, never the text: what was said is the user's, the same
+        # way the audio is (plan §8 item 5).
+        language=params.get("language"),
         watermark=params.get("watermark"),
         reason=type(exc).__name__ if exc is not None else None,
     )
@@ -310,7 +334,72 @@ def run_speech_pipeline(job_id: str, params: dict) -> str:
         raise
 
 
+@app.function(image=api_image, volumes={DATA_DIR: data_vol}, timeout=PIPELINE_TIMEOUT, retries=0)
+def run_tts_pipeline(job_id: str, params: dict) -> str:
+    """synthesize → convert → encode. `queued → synthesizing → converting → done`.
+
+    The second half is `run_speech_pipeline` verbatim, and deliberately so: once
+    the text is a wav there is nothing about it that makes it different from a
+    recording somebody uploaded, and the conversion, the pitch measurement, the
+    level and the watermark are all better for being the same code.
+    """
+    from .conversion import VoiceConverter
+    from .mixing import to_mp3
+    from .tts import Synthesizer
+
+    started = time.monotonic()
+    data_vol.reload()
+    try:
+        jobs.update(job_id, jobs.SYNTHESIZING)
+        spoken = _done_already(job_id, SPOKEN)
+        if spoken is None:
+            text = storage.get(job_id, TEXT).decode("utf-8")
+            spoken = Synthesizer(language=params["language"]).synthesize.remote(
+                text=text,
+                speaking_rate=params["speaking_rate"],
+            )
+            storage.put(job_id, SPOKEN, spoken)
+            data_vol.commit()
+
+        jobs.update(job_id, jobs.CONVERTING)
+        converted = _done_already(job_id, CONVERTED)
+        if converted is None:
+            reference = storage.get(job_id, REFERENCE)
+            # Measured on the synthesised voice, exactly as the speech branch
+            # measures an uploaded one: the MMS speaker has one register per
+            # language and it is nobody's in particular.
+            shift = _resolve_shift(job_id, params, spoken, reference, "speech")
+            converted = VoiceConverter(mode="speech").convert.remote(
+                source_wav=spoken,
+                reference_wav=reference,
+                semitone_shift=shift,
+                diffusion_steps=params["diffusion_steps"],
+            )
+            storage.put(job_id, CONVERTED, converted)
+        if not storage.exists(job_id, OUTPUT):
+            storage.put(job_id, OUTPUT, to_mp3(converted, watermark=_watermark(job_id, params)))
+        data_vol.commit()
+
+        jobs.update(job_id, jobs.DONE)
+        _finished(job_id, "tts", params, started)
+        return job_id
+    except Exception as exc:
+        jobs.fail(job_id, _error_text(exc))
+        data_vol.commit()
+        _finished(job_id, "tts", params, started, exc)
+        raise
+
+
+# One branch per job mode. A dict rather than a chain of conditionals because
+# `jobs.JOB_MODES` and this have to stay the same length, and a missing key is
+# a KeyError here instead of a job quietly running the wrong pipeline.
+PIPELINES = {
+    "song": run_song_pipeline,
+    "speech": run_speech_pipeline,
+    "tts": run_tts_pipeline,
+}
+
+
 def spawn(mode: str, job_id: str, params: dict) -> None:
     """Start the branch for `mode` and return without waiting for it."""
-    pipeline = run_song_pipeline if jobs.check_mode(mode) == "song" else run_speech_pipeline
-    pipeline.spawn(job_id, params)
+    PIPELINES[jobs.check_mode(mode)].spawn(job_id, params)

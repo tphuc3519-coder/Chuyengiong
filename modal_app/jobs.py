@@ -1,12 +1,14 @@
 """Job state machine, stored in `modal.Dict`.
 
-    queued → separating → converting → mixing → done
-                                             ↘ failed
+    queued → separating ⎫
+             synthesizing ⎬→ converting → mixing → done
+                          ⎭                     ↘ failed
 
 Transitions may skip forward but never go back: the `speech` branch has no
 separation and no mixing, so it runs `queued → converting → done` through the
-same machine. Anything that moves backwards is a bug in the pipeline, and this
-module raises rather than quietly recording it.
+same machine, and `tts` runs `queued → synthesizing → converting → done`.
+Anything that moves backwards is a bug in the pipeline, and this module raises
+rather than quietly recording it.
 
 Every function takes an optional `store`, which is why the tests can drive the
 whole machine with a plain dict and no Modal credentials. The default is the
@@ -27,14 +29,17 @@ from .app import job_dict
 
 QUEUED = "queued"
 SEPARATING = "separating"
+SYNTHESIZING = "synthesizing"
 CONVERTING = "converting"
 MIXING = "mixing"
 DONE = "done"
 FAILED = "failed"
 
-# Forward order of the machine. `failed` is not in here: it is reachable from
-# any non-terminal state and is compared against separately.
-ORDER = (QUEUED, SEPARATING, CONVERTING, MIXING, DONE)
+# Forward order of the machine, by the progress each state carries rather than
+# by any single path through it — `separating` and `synthesizing` are the two
+# branches' preparation steps and no job ever sees both. `failed` is not in
+# here: it is reachable from any non-terminal state and is compared separately.
+ORDER = (QUEUED, SEPARATING, SYNTHESIZING, CONVERTING, MIXING, DONE)
 STATUSES = (*ORDER, FAILED)
 TERMINAL = frozenset({DONE, FAILED})
 
@@ -42,13 +47,18 @@ TERMINAL = frozenset({DONE, FAILED})
 # numbers (§4 lists the value each step ends on, §5's pipeline the value it
 # starts on); these are §5's, because that is the code that calls `update`.
 # They only exist so the bar keeps moving — do not read them as a real estimate.
-PROGRESS = {QUEUED: 0, SEPARATING: 5, CONVERTING: 30, MIXING: 75, DONE: 100}
+PROGRESS = {QUEUED: 0, SEPARATING: 5, SYNTHESIZING: 10, CONVERTING: 30, MIXING: 75, DONE: 100}
 
 # The user-facing job modes, which are *not* the conversion modes: a `song` job
 # separates stems and then converts with the singing checkpoint. Phase 3 maps
 # across with this rather than passing "song" into `VoiceConverter`.
-JOB_MODES = ("song", "speech")
-CONVERSION_MODE = {"song": "singing", "speech": "speech"}
+#
+# `tts` shares `speech`'s checkpoint because that is exactly what it is by the
+# time it gets there: the synthesiser has already turned the text into a
+# recording of somebody talking, and converting it is the same job as
+# converting one the user uploaded.
+JOB_MODES = ("song", "speech", "tts")
+CONVERSION_MODE = {"song": "singing", "speech": "speech", "tts": "speech"}
 
 
 class JobError(RuntimeError):

@@ -128,6 +128,77 @@ def test_an_empty_upload_is_refused(client, started):
     assert started == []
 
 
+def test_a_missing_input_file_is_a_400_not_a_422(client, started):
+    """Only `tts` may leave it out, and a client that forgets it on the other
+    two should be told what is missing rather than handed FastAPI's schema."""
+    form = upload()
+    del form["files"]["input"]
+    response = client.post("/submit", **form)
+    assert response.status_code == 400
+    assert "input" in response.json()["detail"]
+    assert started == []
+
+
+# --- submit, the text branch ----------------------------------------------
+
+
+def speak(**form):
+    """A minimal valid `tts` request: text instead of a file."""
+    data = {"mode": "tts", "consent": "true", "text": "Xin chào các bạn.", **form}
+    return {"data": data, "files": {"reference": ("voice.wav", b"fake-voice", "audio/wav")}}
+
+
+def test_tts_starts_a_job_from_text_with_no_file_at_all(client, started):
+    response = client.post("/submit", **speak())
+    assert response.status_code == 200
+    assert response.json()["mode"] == "tts"
+    # The text is what the job starts from, and it reaches storage as UTF-8.
+    assert started[0]["source"] == "Xin chào các bạn.".encode()
+    assert started[0]["reference"] == b"fake-voice"
+
+
+def test_tts_without_text_is_a_400(client, started):
+    response = client.post("/submit", **speak(text="   "))
+    assert response.status_code == 400
+    assert started == []
+
+
+def test_text_past_the_limit_is_refused_before_anything_starts(client, started):
+    from modal_app.tts import MAX_TEXT_CHARS
+
+    response = client.post("/submit", **speak(text="a" * (MAX_TEXT_CHARS + 1)))
+    assert response.status_code == 400
+    assert started == []
+
+
+def test_a_language_we_do_not_speak_is_a_400_not_a_500(client, started):
+    """`TtsError` is a ValueError, but so is a lot of things — it is caught by
+    name for the same reason `SeparationError` is."""
+    response = client.post("/submit", **speak(language="klingon"))
+    assert response.status_code == 400
+    assert started == []
+
+
+def test_tts_carries_its_own_parameters_to_the_pipeline(client, started):
+    client.post("/submit", **speak(language="eng", speaking_rate="1.4"))
+    assert started[0]["params"]["language"] == "eng"
+    assert started[0]["params"]["speaking_rate"] == pytest.approx(1.4)
+
+
+def test_tts_still_needs_consent(client, started):
+    """It is the branch where somebody puts words in another person's mouth, so
+    if anything the gate matters more here."""
+    assert client.post("/submit", **speak(consent="false")).status_code == 400
+    assert started == []
+
+
+def test_tts_still_needs_a_reference_voice(client, started):
+    form = speak()
+    form["files"] = {}
+    assert client.post("/submit", **form).status_code == 422
+    assert started == []
+
+
 # --- status ---------------------------------------------------------------
 
 

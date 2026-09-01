@@ -1,7 +1,7 @@
 """FastAPI web endpoints, served from Modal as a single ASGI app.
 
     GET  /health
-    POST /submit            multipart: input, reference, mode, params, consent
+    POST /submit            multipart: input | text, reference, mode, params, consent
     GET  /status/{job_id}
     GET  /download/{job_id}
 
@@ -11,7 +11,8 @@ Four things this layer owns, and nothing else does:
 
 * **Size limits.** Uploads are read in chunks and cut off at the cap, so a
   client cannot make the container buffer an arbitrary file to find out it is
-  too big. Duration limits belong further down, where the audio is decoded.
+  too big. Duration limits belong further down, where the audio is decoded, and
+  the `tts` branch's text length belongs to `tts.check_text`.
 * **The consent gate.** A checkbox the frontend enforces on its own is not a
   gate. `/submit` refuses without it (plan §8, item 1).
 * **The rate limit.** Same reason: the browser uploads straight here, so a cap
@@ -35,6 +36,7 @@ from . import audit, jobs, pipeline, ratelimit, storage
 from .app import APP_NAME, DATA_DIR, api_image, app, config_secret, data_vol
 from .audio_utils import AudioError
 from .separation import DEFAULT_SEPARATION_MODEL, SeparationError, safe_ext
+from .tts import DEFAULT_LANGUAGE, DEFAULT_SPEAKING_RATE, TtsError, check_text
 
 # 60 MB is ~40 minutes of 192k mp3 — well past the 15 minute duration limit, so
 # anything larger is a mistake rather than a long song.
@@ -111,9 +113,14 @@ def _start_job(mode: str, params: dict, source: bytes, reference: bytes, client:
     Files first, record second, spawn last: every state in between is one the
     pipeline can survive, whereas a job that starts before its input is on the
     Volume cannot.
+
+    `source` is the uploaded audio, or on the `tts` branch the UTF-8 text. It
+    goes to the Volume either way, and for the same reason: the sweep that
+    expires a job's audio after six hours has to take what the user wrote with
+    it, and a job record is not where that belongs.
     """
     job_id = storage.new_job_id()
-    storage.put(job_id, pipeline.INPUT, source)
+    storage.put(job_id, pipeline.TEXT if mode == "tts" else pipeline.INPUT, source)
     storage.put(job_id, pipeline.REFERENCE, reference)
     data_vol.commit()
 
@@ -137,8 +144,14 @@ def _start_job(mode: str, params: dict, source: bytes, reference: bytes, client:
 @web.post("/submit")
 async def submit(
     request: Request,
-    source: Annotated[UploadFile, File(alias="input")],
     reference: Annotated[UploadFile, File()],
+    # Optional because `tts` has no file to send: that branch reads `text`
+    # instead, and which of the two is required is decided by `mode` below
+    # rather than by the signature.
+    source: Annotated[UploadFile | None, File(alias="input")] = None,
+    text: Annotated[str, Form()] = "",
+    language: Annotated[str, Form()] = DEFAULT_LANGUAGE,
+    speaking_rate: Annotated[float, Form()] = DEFAULT_SPEAKING_RATE,
     mode: Annotated[str, Form()] = "song",
     # Absent means auto-detect (plan §7), which is not the same as 0 — that is
     # a client explicitly asking for no shift. The pipeline measures the vocal
@@ -149,7 +162,13 @@ async def submit(
     separation_model: Annotated[str, Form()] = DEFAULT_SEPARATION_MODEL,
     consent: Annotated[bool, Form()] = False,
 ) -> dict:
-    """Start a conversion. Returns as soon as the job is queued."""
+    """Start a job. Returns as soon as it is queued.
+
+    `mode` decides what the job starts from: `song` and `speech` take the
+    uploaded `input` file, `tts` takes `text` and reads it out in the reference
+    voice. `reference` is required either way — it is the voice, which is the
+    whole product.
+    """
     client = ratelimit.client_key(
         ratelimit.address_from_headers(
             request.headers, request.client.host if request.client else None
@@ -170,14 +189,25 @@ async def submit(
                 "diffusion_steps": diffusion_steps,
                 "vocal_gain_db": vocal_gain_db,
                 "separation_model": separation_model,
-                "source_ext": safe_ext(source.filename),
+                "source_ext": safe_ext(source.filename if source else None),
+                "language": language,
+                "speaking_rate": speaking_rate,
             },
         )
-    except (jobs.JobError, SeparationError, AudioError, ValueError) as exc:
+        # Text and audio are the same thing to everything downstream — the
+        # bytes a job starts from — so they are validated in the same place and
+        # answered with the same 400.
+        text_bytes = check_text(text).encode("utf-8") if mode == "tts" else None
+    except (jobs.JobError, SeparationError, AudioError, TtsError, ValueError) as exc:
         # Every one of these is something the client sent, not a fault here.
         raise HTTPException(400, str(exc)) from exc
 
-    source_bytes = await _read_upload(source, MAX_INPUT_BYTES, "input")
+    if text_bytes is not None:
+        source_bytes = text_bytes
+    elif source is None:
+        raise HTTPException(400, "input file is required for this mode")
+    else:
+        source_bytes = await _read_upload(source, MAX_INPUT_BYTES, "input")
     reference_bytes = await _read_upload(reference, MAX_REFERENCE_BYTES, "reference")
 
     job_id = _start_job(mode, params, source_bytes, reference_bytes, client)
@@ -189,8 +219,11 @@ async def submit(
         mode=mode,
         client=client,
         consent=consent,
+        # On the `tts` branch this is how long the text was, never what it
+        # said — the same rule the audio has been under all along.
         input_bytes=len(source_bytes),
         reference_bytes=len(reference_bytes),
+        language=params.get("language"),
     )
     return {
         "job_id": job_id,

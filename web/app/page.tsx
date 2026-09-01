@@ -10,6 +10,7 @@ import { ModeSelect } from "./components/ModeSelect";
 import { Progress } from "./components/Progress";
 import { ReferencePicker } from "./components/ReferencePicker";
 import { Result } from "./components/Result";
+import { TextInput } from "./components/TextInput";
 import {
   AUDIO_ACCEPT,
   MAX_INPUT_BYTES,
@@ -29,11 +30,17 @@ import { useConversion } from "@/lib/useConversion";
  * One page, no routing: every step is visible at once so nothing is hidden
  * behind a "next" button on a phone screen, and the run replaces the form in
  * place rather than navigating away from it.
+ *
+ * Step 2 is the one place the three modes differ: `song` and `speech` take a
+ * file, `tts` takes text. Everything after it — the voice sample, the tuning,
+ * the gate, the run — is the same for all three, which is the point of putting
+ * text in as a third *source* rather than as a second app.
  */
 export default function Page() {
   const [mode, setMode] = useState<Mode>("song");
   const [params, setParams] = useState<Params>(() => defaultParams("song"));
   const [source, setSource] = useState<File | null>(null);
+  const [text, setText] = useState("");
   const [reference, setReference] = useState<File | null>(null);
   const [consent, setConsent] = useState(false);
 
@@ -42,7 +49,8 @@ export default function Page() {
 
   const { state, start, resume, reset } = useConversion();
   const busy = state.phase === "uploading" || state.phase === "running";
-  const ready = Boolean(source && reference && consent) && !busy;
+  const hasSource = mode === "tts" ? text.trim().length > 0 : source !== null;
+  const ready = hasSource && reference !== null && consent && !busy;
 
   // `/submit` reports what is left of the hourly allowance, and `reset` wipes
   // the run state — so keep it here, where it survives into the next attempt.
@@ -63,11 +71,14 @@ export default function Page() {
   }
 
   function convert() {
-    if (!source || !reference) return;
+    if (!ready || !reference) return;
     void start({
       mode,
       params,
-      source,
+      // `tts` sends the text and no file; the other two send the file and the
+      // backend never reads `text`.
+      source: mode === "tts" ? null : source,
+      text,
       reference,
       referenceName: reference.name || "reference.wav",
       consent,
@@ -79,8 +90,8 @@ export default function Page() {
       <header className="masthead">
         <h1>Chuyển giọng</h1>
         <p>
-          Đưa vào một bài hát hoặc đoạn thoại cùng một giọng mẫu — nhận về bản đã đổi giọng, nhạc
-          nền giữ nguyên.
+          Đưa vào một bài hát, một đoạn thoại, hoặc chỉ một đoạn văn bản — cùng với giọng mẫu. Nhận
+          về bản hát hoặc đọc bằng đúng giọng đó, nhạc nền giữ nguyên.
         </p>
       </header>
 
@@ -125,15 +136,24 @@ export default function Page() {
           </fieldset>
 
           <fieldset className="step">
-            <legend>2 · File nguồn</legend>
-            <FileDrop
-              file={source}
-              onFile={setSource}
-              accept={AUDIO_ACCEPT}
-              maxBytes={MAX_INPUT_BYTES}
-              label={mode === "song" ? "Bài hát" : "Đoạn thoại"}
-              hint={`Kéo thả hoặc bấm để chọn · tối đa ${SOURCE_MAX_SEC / 60} phút`}
-            />
+            <legend>2 · {mode === "tts" ? "Văn bản" : "File nguồn"}</legend>
+            {mode === "tts" ? (
+              <TextInput
+                text={text}
+                onText={setText}
+                language={params.language}
+                onLanguage={(language) => setParams((current) => ({ ...current, language }))}
+              />
+            ) : (
+              <FileDrop
+                file={source}
+                onFile={setSource}
+                accept={AUDIO_ACCEPT}
+                maxBytes={MAX_INPUT_BYTES}
+                label={mode === "song" ? "Bài hát" : "Đoạn thoại"}
+                hint={`Kéo thả hoặc bấm để chọn · tối đa ${SOURCE_MAX_SEC / 60} phút`}
+              />
+            )}
           </fieldset>
 
           <fieldset className="step">
@@ -190,8 +210,10 @@ export default function Page() {
           </button>
           {!ready && (
             <p className="field-note">
-              {!source
-                ? "Chọn file nguồn để tiếp tục."
+              {!hasSource
+                ? mode === "tts"
+                  ? "Gõ văn bản cần đọc để tiếp tục."
+                  : "Chọn file nguồn để tiếp tục."
                 : !reference
                   ? "Thêm giọng mẫu — tải lên, ghi âm, hoặc chọn giọng có sẵn."
                   : "Tick ô đồng thuận để tiếp tục."}

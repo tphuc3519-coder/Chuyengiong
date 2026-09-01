@@ -17,8 +17,11 @@ def test_deploy_registers_everything_the_pipeline_needs():
         "cleanup",
         "run_song_pipeline",
         "run_speech_pipeline",
+        "run_tts_pipeline",
     } <= set(app.registered_functions)
-    assert {"VoiceConverter", "Separator", "Watermarker"} <= set(app.registered_classes)
+    assert {"VoiceConverter", "Separator", "Synthesizer", "Watermarker"} <= set(
+        app.registered_classes
+    )
 
 
 def test_the_cleanup_cron_sweeps_at_least_as_often_as_the_ttl():
