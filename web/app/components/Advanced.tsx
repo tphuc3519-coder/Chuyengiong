@@ -7,7 +7,10 @@ import {
   DIFFUSION_STEPS_MIN,
   MAX_SEMITONE_SHIFT,
   MAX_VOCAL_GAIN_DB,
+  SPEAKING_RATE_MAX,
+  SPEAKING_RATE_MIN,
   clamp,
+  formatRate,
   formatSemitones,
   type Mode,
   type Params,
@@ -41,9 +44,10 @@ export function Advanced({
   const pitchLimit = MAX_SEMITONE_SHIFT[mode];
   const auto = params.semitoneShift === null;
   // What "no explicit shift" means differs by mode, because the backend only
-  // measures one for speech (`AUTO_DETECT_MODES` in `pipeline.py`). A song's
-  // vocal is mixed back over an instrumental nothing transposes, so leaving the
-  // key alone is the answer there rather than a measurement.
+  // measures one for speech (`AUTO_DETECT_MODES` in `pipeline.py`, which `tts`
+  // reaches by converting as speech). A song's vocal is mixed back over an
+  // instrumental nothing transposes, so leaving the key alone is the answer
+  // there rather than a measurement.
   const keepsKey = mode === "song";
 
   return (
@@ -60,6 +64,30 @@ export function Advanced({
       </button>
 
       <div id={panelId} hidden={!open} className="advanced-panel">
+        {mode === "tts" && (
+          <label className="slider">
+            <span className="slider-label">
+              Tốc độ đọc
+              <output>{formatRate(params.speakingRate)}</output>
+            </span>
+            <input
+              type="range"
+              min={SPEAKING_RATE_MIN}
+              max={SPEAKING_RATE_MAX}
+              step={0.05}
+              value={params.speakingRate}
+              disabled={disabled}
+              onChange={(event) =>
+                onChange({ ...params, speakingRate: Number(event.target.value) })
+              }
+            />
+            <span className="slider-hint">
+              Áp dụng lúc đọc văn bản, trước khi đổi giọng — nên nhịp nói là của bản đọc này, không
+              phải của giọng mẫu.
+            </span>
+          </label>
+        )}
+
         <div className="slider">
           <span className="slider-label">
             Dịch cao độ
@@ -113,9 +141,9 @@ export function Advanced({
               ? keepsKey
                 ? "Nhạc nền không được dịch theo, nên một lượng dịch lẻ sẽ đặt giọng vào tông khác bản phối. Để nguyên là an toàn."
                 : "Đo F0 trung vị của giọng trong bài và của giọng mẫu rồi lấy chênh lệch. Chỉ tính trên đoạn có tiếng."
-              : mode === "speech"
-                ? `Giọng nói giới hạn ±${pitchLimit}: dịch xa hơn nghe méo thanh điệu.`
-                : "Nam→nữ thường +12, nữ→nam thường −12. Bội số của 12 là một quãng tám, giữ đúng key với nhạc nền; các giá trị khác sẽ lệch."}
+              : keepsKey
+                ? "Nam→nữ thường +12, nữ→nam thường −12. Bội số của 12 là một quãng tám, giữ đúng key với nhạc nền; các giá trị khác sẽ lệch."
+                : `Giọng nói giới hạn ±${pitchLimit}: dịch xa hơn nghe méo thanh điệu.`}
           </span>
         </div>
 

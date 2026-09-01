@@ -1,7 +1,7 @@
 # Chuyengiong
 
-Voice conversion web app: đưa vào một bài hát (hoặc đoạn thoại) + một giọng mẫu,
-nhận về bản đã đổi sang giọng đó, nhạc nền giữ nguyên.
+Voice conversion web app: đưa vào một bài hát (hoặc đoạn thoại, hoặc một đoạn
+văn bản) + một giọng mẫu, nhận về bản đã đổi sang giọng đó, nhạc nền giữ nguyên.
 
 Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/implementation-plan.md).
 
@@ -17,6 +17,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 5 | Pitch auto-detect | 🟡 code xong, acceptance §7 pass bằng tone tổng hợp |
 | 6 | Consent gate & an toàn | 🟡 code xong, chờ verify watermark trên hạ tầng thật |
 | 7 | Audio watermark (§8 "cân nhắc thêm") | 🟡 code xong, chờ chạy checkpoint thật |
+| 8 | Text to speech theo giọng mẫu | 🟡 code xong, chờ nghe thật trên container |
 
 ## Cấu trúc
 
@@ -27,6 +28,7 @@ modal_app/
 ├── audio_utils.py  # chunk theo silence, crossfade, validate — numpy thuần, test được
 ├── separation.py   # tách stem trên GPU: Separator (@app.cls) — port từ tachnhac
 ├── conversion.py   # Seed-VC trên GPU: VoiceConverter (@app.cls)
+├── tts.py          # MMS-TTS trên CPU: Synthesizer (@app.cls) — văn bản → wav
 ├── mixing.py       # ffmpeg: mix vocal + nhạc nền, encode mp3
 ├── pipeline.py     # orchestration: spawn + nối các bước, cập nhật job state
 ├── storage.py      # file trên Volume + cron dọn rác
@@ -151,17 +153,21 @@ upstream request ở commit đã pin, không phải thứ ta tự đặt.
 ## Phase 2 — Storage & job state
 
 `storage.py` giữ file người dùng trên Volume `vc-data`, layout đúng như plan:
-`/data/{job_id}/{input,reference,vocal,instrumental,converted,output}.{wav,mp3}`.
+`/data/{job_id}/{input,reference,vocal,instrumental,spoken,converted,output}.{wav,mp3}`,
+cộng thêm `input.txt` cho nhánh `tts`.
 `jobs.py` giữ trạng thái job trong `modal.Dict` `vc-jobs`:
 
 ```
-queued → separating → converting → mixing → done
-                                         ↘ failed
+queued → separating   ⎫
+         synthesizing ⎬→ converting → mixing → done
+                      ⎭                     ↘ failed
 ```
 
 Chuyển trạng thái được phép **nhảy tới** nhưng không được lùi — nhánh `speech`
 không có separation và mixing nên chạy `queued → converting → done` qua đúng máy
-trạng thái đó. `progress` không bao giờ giảm.
+trạng thái đó, còn `tts` chạy `queued → synthesizing → converting → done`.
+`separating` và `synthesizing` là bước chuẩn bị của hai nhánh khác nhau, không
+job nào đi qua cả hai. `progress` không bao giờ giảm.
 
 Bốn chỗ đáng chú ý:
 
@@ -205,6 +211,7 @@ Chạy trên CPU, tốn vài giây GPU-free. In ra từng check kèm `ok`/`FAIL`
 song:    input ──► separate ──► vocal ──► convert ──► mix ──► output.mp3
                         └────► instrumental ───────────┘
 speech:  input ─────────────────────────► convert ──► encode ──► output.mp3
+tts:     input.txt ──► synthesize ──────► convert ──► encode ──► output.mp3
 ```
 
 `pipeline.py` chạy trên image CPU nhỏ, tự nó không xử lý audio: separation và
@@ -252,7 +259,7 @@ quyết định bản mix nghe đúng hay sai:
 ### API
 
 ```
-POST /submit          multipart: input, reference, mode, consent, params  →  {job_id}
+POST /submit    multipart: input | text, reference, mode, consent, params  →  {job_id}
 GET  /status/{id}                                    →  {status, progress, error, ...}
 GET  /download/{id}                                  →  audio/mpeg
 ```
@@ -265,6 +272,11 @@ curl -sS -X POST "$BASE/submit" \
   -F "mode=song" -F "consent=true" -F "semitone_shift=0"
 # {"job_id":"...","status":"queued","mode":"song"}
 
+# Mode `tts` gửi chữ thay cho file — `input` khi đó không cần có (Phase 8):
+curl -sS -X POST "$BASE/submit" \
+  -F "text=Xin chào, đây là giọng của tôi." -F "reference=@voice.wav" \
+  -F "mode=tts" -F "language=vie" -F "consent=true"
+
 curl -sS "$BASE/status/$JOB_ID"
 curl -sS -o output.mp3 "$BASE/download/$JOB_ID"
 ```
@@ -275,10 +287,11 @@ file rỗng.
 
 ### Sáu chỗ khác plan, cố ý
 
-1. **Hai hàm pipeline, không phải một.** `run_song_pipeline` và
-   `run_speech_pipeline`. Nhánh `speech` chạy `queued → converting → done` đúng
-   như docstring của `jobs.py`: không separation, không mix, bước encode mp3 nằm
-   trong `converting` vì nó chỉ tốn một giây.
+1. **Hai hàm pipeline, không phải một** (Phase 8 thêm cái thứ ba,
+   `run_tts_pipeline`). `run_song_pipeline` và `run_speech_pipeline`. Nhánh
+   `speech` chạy `queued → converting → done` đúng như docstring của `jobs.py`:
+   không separation, không mix, bước encode mp3 nằm trong `converting` vì nó chỉ
+   tốn một giây.
 2. **`Separator` là `@app.cls`, không phải `@app.function`.** Cùng lý do với
    `VoiceConverter`: load checkpoint một lần trong `@modal.enter()` rồi giữ
    container ấm 5 phút.
@@ -683,3 +696,84 @@ build, nên checkpoint chưa từng được nạp. API đã đọc từ source 
 - [ ] file **không** phải của ta → `ours: false` (kiểm tra dương tính giả)
 - [ ] đo thời gian thật của bước này trên bài 3 phút và 8 phút
 - [ ] checkpoint chỉ tải một lần: container thứ hai không tải lại (Volume chạy đúng)
+
+## Phase 8 — Text to speech theo giọng mẫu
+
+Mode thứ ba, `tts`: thay vì file nguồn thì gõ chữ, và nhận về bản đọc bằng
+giọng mẫu.
+
+```
+tts:  input.txt ──► Synthesizer ──► spoken.wav ──► VoiceConverter ──► output.mp3
+```
+
+Điểm chính của thiết kế: **không có model cloning thứ hai**. Bước đọc chữ chỉ
+tạo ra một bản thu bằng giọng tổng hợp sẵn có của MMS; cái làm nó thành giọng
+của người dùng vẫn là Seed-VC ở nhánh `speech`, y nguyên code đang chạy. Nhờ
+vậy pitch auto-detect, chuẩn hoá độ ồn, watermark, consent gate, TTL — tất cả
+là code cũ chứ không phải bản sao thứ hai của chúng.
+
+### Vì sao MMS-TTS chứ không phải một TTS zero-shot
+
+`facebook/mms-tts-<iso639-3>` là checkpoint VITS chạy thẳng bằng `transformers`:
+~145 MB, không cần vocoder rời, không cần phonemizer, và có tiếng Việt tử tế.
+Một TTS zero-shot (XTTS, F5) sẽ làm lại đúng việc mà bước sau đã làm — clone
+timbre — bằng một bộ weight nữa, một GPU nữa, và khả năng phủ ngôn ngữ kém hơn
+Whisper-small mà Seed-VC đang dùng.
+
+`Synthesizer` chạy **CPU**, không GPU: VITS đọc một câu nhanh hơn thời gian
+thực trên vài core, nên GPU sẽ dành phần lớn thời gian để cold start. GPU trong
+pipeline này thuộc về bước chuyển giọng.
+
+### Ngôn ngữ: chỉ chữ Latin, và đó là một cái gate chứ không phải một danh sách
+
+MMS phủ ~1100 ngôn ngữ nhưng thứ ngoài chữ Latin phải romanise bằng `uroman`
+trước, và checkpoint nhận chữ chưa romanise thì trả về **im lặng chứ không phải
+lỗi**. Nên `LANGUAGES` chỉ liệt kê những thứ đọc được nguyên văn (vie, eng, ind,
+fra, spa, deu, por, ita), backend từ chối ngôn ngữ không có trong đó, và
+`Synthesizer.load` còn kiểm tra `tokenizer.is_uroman` một lần nữa. Thêm ngôn ngữ
+= thêm vào dict rồi chạy smoke test, không phải hy vọng.
+
+Ngôn ngữ sai cũng bị từ chối chứ không rơi về mặc định: đọc tiếng Việt bằng
+checkpoint tiếng Anh cho ra một bản thu trôi chảy của thứ vô nghĩa, tệ hơn lỗi.
+
+### Số và ký hiệu không được đọc
+
+Tokenizer của MMS làm việc trên ký tự, theo một bảng từ vựng chỉ có chữ cái và
+dấu câu. Chữ số không nằm trong đó và bị **bỏ đi không kêu một tiếng** — "25
+tuổi" đọc thành "tuổi". Hai chỗ xử lý:
+
+- `check_text` từ chối đoạn không có lấy một chữ cái, để một dòng toàn số không
+  trở thành job chạy thành công và cho ra file im lặng;
+- form nhập nói thẳng ra điều đó, ngay cạnh ô gõ chữ.
+
+Cố ý **không** tự đọc số hộ: "25" đúng ra là "hai mươi lăm", không phải "hai
+năm", và ngữ pháp số theo từng ngôn ngữ là một việc lớn hơn nó trông nhiều.
+
+### Ba chỗ đáng chú ý
+
+1. **Cắt câu trước khi đọc.** VITS dự đoán độ dài cho từng token và sai số cộng
+   dồn, nên một đoạn dài đưa vào nguyên khối sẽ trôi nhịp dần. `split_text` cắt
+   ở ranh giới câu, rồi cắt tiếp ở mệnh đề nếu vẫn quá 200 ký tự, và nối lại
+   với 0.25s im lặng — đúng chỗ dấu chấm vốn đã là chỗ nghỉ.
+2. **Văn bản nằm trên Volume (`input.txt`), không nằm trong job record.** Cùng
+   một lý do với audio: cron dọn rác 6 giờ xoá cả thư mục job, nên cái người
+   dùng viết ra biến mất cùng lúc với file họ tải lên. Audit log ghi độ dài và
+   ngôn ngữ, không bao giờ ghi nội dung.
+3. **Pitch vẫn auto-detect.** Giọng tổng hợp của MMS chỉ có một quãng giọng cho
+   mỗi ngôn ngữ, và giọng mẫu có thể cách nó cả quãng tám — nên `tts` đi qua
+   đúng `_resolve_shift` mà nhánh `speech` dùng, đo trên `spoken.wav`.
+
+### Còn phải verify bằng hạ tầng thật
+
+Test trong CI phủ phần thuần logic — validate, cắt câu, clamp tốc độ, tham số
+job, và việc `/submit` nhận text thay cho file. Bản thân checkpoint thì chưa
+từng được nạp ở đây (`huggingface.co` không tới được từ máy viết code):
+
+- [ ] `modal run -m modal_app.tts --text "Xin chào, đây là một câu thử."` → nghe được
+- [ ] tiếng Việt có dấu đọc đúng thanh điệu, không nuốt dấu
+- [ ] chạy end-to-end với giọng mẫu thật: bản ra nghe giống giọng mẫu chứ không
+      phải giọng MMS pha
+- [ ] đoạn 2000 ký tự: mối nối giữa các câu không cụt, nhịp không trôi
+- [ ] tốc độ đọc 0.5× và 2× vẫn hiểu được sau khi qua Seed-VC
+- [ ] container thứ hai không tải lại weights (HF_HOME trên Volume chạy đúng)
+- [ ] đo thời gian thật của bước synthesize trên CPU, để biết `cpu=4` là đủ hay thừa

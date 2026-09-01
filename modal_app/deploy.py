@@ -17,6 +17,7 @@ from . import (  # noqa: F401  (registration)
     pipeline,
     separation,
     storage,
+    tts,
     watermark,
 )
 from .app import app

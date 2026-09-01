@@ -7,19 +7,24 @@
  * when a number moves there, move it here too.
  */
 
-export type Mode = "song" | "speech";
+export type Mode = "song" | "speech" | "tts";
 
 export const MODES: { id: Mode; label: string; hint: string }[] = [
   { id: "song", label: "Bài hát", hint: "Tách nhạc nền, đổi giọng, ghép lại" },
   { id: "speech", label: "Giọng nói", hint: "Đổi giọng trực tiếp, nhanh hơn" },
+  { id: "tts", label: "Văn bản", hint: "Gõ chữ, đọc lên bằng giọng mẫu" },
 ];
 
-/** Plan §3: ±8 for speech, because a big shift on a tonal language distorts it. */
-export const MAX_SEMITONE_SHIFT: Record<Mode, number> = { song: 12, speech: 8 };
+/**
+ * Plan §3: ±8 for speech, because a big shift on a tonal language distorts it.
+ * `tts` is speech by the time the pitch is applied — the text has already been
+ * read out loud — so it lives under the same limit.
+ */
+export const MAX_SEMITONE_SHIFT: Record<Mode, number> = { song: 12, speech: 8, tts: 8 };
 
 export const DIFFUSION_STEPS_MIN = 10;
 export const DIFFUSION_STEPS_MAX = 100;
-export const DEFAULT_DIFFUSION_STEPS: Record<Mode, number> = { song: 50, speech: 25 };
+export const DEFAULT_DIFFUSION_STEPS: Record<Mode, number> = { song: 50, speech: 25, tts: 25 };
 
 export const MAX_VOCAL_GAIN_DB = 12;
 
@@ -70,6 +75,34 @@ export const AUDIO_ACCEPT = [
   ".wma",
 ].join(",");
 
+/**
+ * The `tts` branch, mirrored from `modal_app/tts.py`.
+ *
+ * The list is short because it is the list of MMS-TTS checkpoints that read
+ * their language as it is written. Everything outside a Latin script needs the
+ * text romanised first, and a checkpoint handed unromanised text returns
+ * silence rather than an error — so the backend refuses what is not here, and
+ * this offers nothing it would refuse.
+ */
+export const LANGUAGES: { id: string; label: string }[] = [
+  { id: "vie", label: "Tiếng Việt" },
+  { id: "eng", label: "English" },
+  { id: "ind", label: "Bahasa Indonesia" },
+  { id: "fra", label: "Français" },
+  { id: "spa", label: "Español" },
+  { id: "deu", label: "Deutsch" },
+  { id: "por", label: "Português" },
+  { id: "ita", label: "Italiano" },
+];
+export const DEFAULT_LANGUAGE = "vie";
+
+/** ~2 to 3 minutes of speech; past that the conversion is the expensive half. */
+export const MAX_TEXT_CHARS = 2000;
+
+export const SPEAKING_RATE_MIN = 0.5;
+export const SPEAKING_RATE_MAX = 2;
+export const DEFAULT_SPEAKING_RATE = 1;
+
 export type Params = {
   /**
    * null = auto-detect (plan §7). Not the same as 0, which is a deliberate
@@ -79,10 +112,19 @@ export type Params = {
   semitoneShift: number | null;
   diffusionSteps: number;
   vocalGainDb: number;
+  /** `tts` only, ignored by the other two branches. */
+  language: string;
+  speakingRate: number;
 };
 
 export function defaultParams(mode: Mode): Params {
-  return { semitoneShift: null, diffusionSteps: DEFAULT_DIFFUSION_STEPS[mode], vocalGainDb: 0 };
+  return {
+    semitoneShift: null,
+    diffusionSteps: DEFAULT_DIFFUSION_STEPS[mode],
+    vocalGainDb: 0,
+    language: DEFAULT_LANGUAGE,
+    speakingRate: DEFAULT_SPEAKING_RATE,
+  };
 }
 
 export function clamp(value: number, min: number, max: number): number {
@@ -107,6 +149,11 @@ export function forMode(params: Params, next: Mode, previous: Mode): Params {
       params.semitoneShift === null ? null : clamp(params.semitoneShift, -limit, limit),
     diffusionSteps: untouched ? DEFAULT_DIFFUSION_STEPS[next] : params.diffusionSteps,
   };
+}
+
+/** `1,0×` — the speaking rate as the slider labels it. */
+export function formatRate(rate: number): string {
+  return `${rate.toFixed(2).replace(/0$/, "").replace(".", ",")}×`;
 }
 
 /** `+3` / `−2` / `0`, with a real minus sign. */

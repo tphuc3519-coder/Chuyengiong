@@ -46,6 +46,22 @@ chứ không hardcode vào client bundle — nên nó được phục vụ **lú
 bị nhúng thẳng vào bundle lúc build. Hệ quả tiện: cùng một build chạy được cho cả
 preview lẫn production.
 
+## Chế độ "Văn bản"
+
+`app/components/TextInput.tsx`. Mode thứ ba (`tts`) gõ chữ thay cho chọn file —
+bước 2 của form đổi, phần còn lại giữ nguyên, vì backend đọc chữ ra rồi mới đưa
+qua đúng bước chuyển giọng của mode `speech`.
+
+Chọn ngôn ngữ nằm ngay cạnh ô gõ chứ không nằm trong "Tinh chỉnh": checkpoint
+đọc tiếng Việt không đọc được tiếng Đức, nên chọn sai không phải là chỉnh cho
+hay hơn mà là ra một bản đọc trôi chảy của thứ vô nghĩa. `LANGUAGES` trong
+`lib/params.ts` là bản sao của `modal_app/tts.py` — thêm ngôn ngữ thì sửa cả hai,
+và backend là bên từ chối.
+
+Ô gõ nói thẳng rằng số và ký hiệu sẽ bị bỏ qua khi đọc. Đó không phải lời khuyên
+phong cách: model tokenise theo ký tự trên một bảng từ vựng không có chữ số, nên
+"25 tuổi" đọc thành "tuổi".
+
 ## Ghi âm trong trình duyệt
 
 `app/components/Recorder.tsx`. Thiết bị test chính là iOS Safari, và nó quyết
