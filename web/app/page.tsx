@@ -17,6 +17,7 @@ import {
   SOURCE_MAX_SEC,
   defaultParams,
   forMode,
+  maxCharsFor,
   type Mode,
   type Params,
 } from "@/lib/params";
@@ -49,8 +50,13 @@ export default function Page() {
 
   const { state, start, resume, reset } = useConversion();
   const busy = state.phase === "uploading" || state.phase === "running";
+  // Over the limit is its own state, not "no source": the words are there and
+  // the fix is to cut some, which is a different sentence from "write
+  // something". Switching to a language with a shorter limit is how a finished
+  // paragraph lands here.
+  const tooLong = mode === "tts" && text.length > maxCharsFor(params.language);
   const hasSource = mode === "tts" ? text.trim().length > 0 : source !== null;
-  const ready = hasSource && reference !== null && consent && !busy;
+  const ready = hasSource && !tooLong && reference !== null && consent && !busy;
 
   // `/submit` reports what is left of the hourly allowance, and `reset` wipes
   // the run state — so keep it here, where it survives into the next attempt.
@@ -214,9 +220,11 @@ export default function Page() {
                 ? mode === "tts"
                   ? "Gõ văn bản cần đọc để tiếp tục."
                   : "Chọn file nguồn để tiếp tục."
-                : !reference
-                  ? "Thêm giọng mẫu — tải lên, ghi âm, hoặc chọn giọng có sẵn."
-                  : "Tick ô đồng thuận để tiếp tục."}
+                : tooLong
+                  ? `Văn bản dài quá giới hạn của ngôn ngữ đang chọn (${maxCharsFor(params.language)} ký tự) — cắt bớt để tiếp tục.`
+                  : !reference
+                    ? "Thêm giọng mẫu — tải lên, ghi âm, hoặc chọn giọng có sẵn."
+                    : "Tick ô đồng thuận để tiếp tục."}
             </p>
           )}
         </form>

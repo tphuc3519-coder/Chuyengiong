@@ -34,6 +34,73 @@ def test_the_model_id_is_the_mms_checkpoint_for_the_language():
     assert tts.model_id("vie") == "facebook/mms-tts-vie"
 
 
+# --- Japanese -------------------------------------------------------------
+#
+# It is the one language that does not read through MMS, because MMS reads a
+# non-Latin script by romanising it with `uroman` first and uroman renders
+# Japanese kanji in Mandarin: 今日 ("kyou") comes out "jinri", 田中 ("tanaka")
+# comes out "tianzhong". That is the text `facebook/mms-tts-jpn` was trained
+# on, so no romanisation on our side rescues it. Kokoro's `misaki[ja]` front
+# end is a dictionary-and-morphology G2P and reads both correctly.
+
+
+def test_japanese_is_offered_and_does_not_read_through_mms():
+    spec = tts.spec_for("jpn")
+    assert spec.engine == tts.KOKORO
+    assert spec.label == "日本語"
+
+
+def test_asking_mms_for_japanese_is_an_error_not_a_silent_wrong_reading():
+    with pytest.raises(tts.TtsError, match="kokoro"):
+        tts.model_id("jpn")
+
+
+def test_a_kokoro_language_carries_what_kokoro_needs():
+    for code, spec in tts.LANGUAGES.items():
+        if spec.engine != tts.KOKORO:
+            continue
+        assert spec.kokoro_code, code
+        assert spec.voice, code
+
+
+def test_japanese_splits_on_punctuation_that_carries_no_space():
+    """Japanese writes 「です。」 and starts the next sentence immediately, so a
+    splitter that needs whitespace after a full stop never fires."""
+    assert tts.split_text("今日はいい天気ですね。私の名前は田中です。") == [
+        "今日はいい天気ですね。",
+        "私の名前は田中です。",
+    ]
+
+
+def test_japanese_breaks_a_long_sentence_at_the_ideographic_comma():
+    text = "こんにちは、" + "あ" * 40
+    segments = tts.split_text(text, max_chars=20)
+    assert segments[0] == "こんにちは、"
+    assert all(len(segment) <= 20 for segment in segments)
+
+
+def test_japanese_gets_a_shorter_limit_because_a_character_says_more():
+    """700 Japanese characters and 2000 Latin ones are the same two or three
+    minutes of speech; the cap is on the recording, not on the typing."""
+    assert tts.spec_for("jpn").max_chars < tts.spec_for("vie").max_chars
+    assert tts.check_text("あ" * 700, "jpn")
+    with pytest.raises(tts.TtsError):
+        tts.check_text("あ" * 701, "jpn")
+    # The same length is fine in a language that spends characters faster.
+    assert tts.check_text("a" * 701, "vie")
+
+
+def test_kana_and_kanji_count_as_words_to_read():
+    """The "no letters" gate is about digits and symbols, and `str.isalpha` is
+    true for both scripts — so Japanese passes it as written."""
+    assert tts.check_text("こんにちは。", "jpn")
+    assert tts.check_text("東京", "jpn")
+
+
+def test_japanese_segments_stay_well_under_the_kokoro_truncation_point():
+    assert tts.spec_for("jpn").segment_max_chars < tts.KOKORO_MAX_PHONEMES / 3
+
+
 # --- the text -------------------------------------------------------------
 
 

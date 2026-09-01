@@ -58,6 +58,12 @@ hay hơn mà là ra một bản đọc trôi chảy của thứ vô nghĩa. `LAN
 `lib/params.ts` là bản sao của `modal_app/tts.py` — thêm ngôn ngữ thì sửa cả hai,
 và backend là bên từ chối.
 
+`maxChars` khác nhau theo ngôn ngữ vì ký tự không phải đơn vị của lời nói: 2000
+ký tự tiếng Việt và 700 ký tự tiếng Nhật là cùng khoảng 2–3 phút audio. Đổi
+ngôn ngữ có thể làm đoạn đang gõ vượt giới hạn mới — `maxLength` không lấy chữ
+về được, nên bộ đếm chuyển sang "thừa N ký tự" và nút chuyển giọng khoá lại cho
+tới khi cắt bớt.
+
 Ô gõ nói thẳng rằng số và ký hiệu sẽ bị bỏ qua khi đọc. Đó không phải lời khuyên
 phong cách: model tokenise theo ký tự trên một bảng từ vựng không có chữ số, nên
 "25 tuổi" đọc thành "tuổi".
