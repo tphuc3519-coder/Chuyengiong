@@ -911,10 +911,17 @@ viết ra được thành luật:
   Nó được đặt **cân đối quanh 0** — câu đầu cao hơn nửa quãng, câu cuối thấp hơn
   nửa quãng — để F0 trung vị của cả file không đổi, vì `pipeline._resolve_shift`
   đo đúng con số đó để quyết định dịch giọng.
-- **Câu hỏi lên giọng, câu kể xuống giọng.** Câu kể xuống là phần đuôi của
-  declination; câu hỏi lên là một đoạn vuốt lên trong 0.35 giây cuối. Tiếng Nhật
-  hỏi bằng か cuối câu và thường không có dấu hỏi (「そうですか。」), nên chỗ đó
-  cũng được đọc là câu hỏi.
+- **Câu hỏi đọc cao hơn, câu kể xuống giọng.** Câu kể xuống là phần đuôi của
+  declination. Câu hỏi thì *cả câu* cao hơn chứ không phải vuốt lên ở cuối —
+  vuốt cuối câu mới đúng là cách người ta hỏi, nhưng vẽ một đường cong bên
+  trong một câu thì chỉ có phase vocoder làm được, và đó đúng là thứ đã làm
+  hỏng tiếng Nhật (xem mục dưới). F0 trung bình của câu hỏi vốn cũng cao hơn,
+  nên đây vẫn là một dấu hiệu thật, chỉ là nhẹ hơn. Tiếng Nhật hỏi bằng か cuối
+  câu và thường không có dấu hỏi (「そうですか。」), nên chỗ đó cũng được đọc là
+  câu hỏi — nhưng **chỉ ở chỗ câu thật sự kết thúc**: か là âm tiết bình thường
+  trong từ bình thường (しずか, なんとか, たしか), mà tiếng Nhật không có dấu
+  cách nên `_wrap` cắt câu dài ở một ký tự bất kỳ, và một mẩu cắt ra kết thúc
+  bằng か thì rất dễ gặp.
 - **Cảm xúc là năm thứ đi cùng nhau**: tốc độ, cao độ trung bình, biên độ lên
   xuống, độ to, và độ dài khoảng lặng. Các nghiên cứu acoustic về giọng cảm xúc
   thống nhất với nhau về *hướng* của cả năm — vui/giận thì F0 cao hơn, biên độ
@@ -928,7 +935,7 @@ viết ra được thành luật:
 |---|---|
 | MMS (VITS) | `speaking_rate`, `noise_scale`, `noise_scale_duration` |
 | Kokoro | `speed` |
-| Sau khi tổng hợp | gain, dịch cao độ, vuốt cao độ cuối câu (librosa) |
+| Sau khi tổng hợp | gain, và dịch cao độ bằng **resample** |
 
 `noise_scale` là mức cho phép prior dao động — tức cao độ và năng lượng của bản
 đọc — còn `noise_scale_duration` là cùng thứ đó cho bộ dự đoán độ dài, tức nhịp.
@@ -937,6 +944,44 @@ không ghi đè bằng một hằng số: mặc định khác nhau theo từng c
 
 Ba thuộc tính đó được đọc lúc forward, nên đặt lại cho **từng câu** không tốn gì
 thêm — một đoạn văn vẫn đúng bằng số lần gọi model như trước.
+
+Lưu ý cái rate nào đi vào engine: `Beat.synth_rate`, **không phải** `Beat.rate`.
+Dịch cao độ ở đây làm bằng resample nên nó đổi luôn độ dài; engine được yêu cầu
+đọc chậm đi đúng bằng phần mà resample sẽ tăng lên, và câu ra đúng nhịp cần
+nghe. Đưa nhầm `rate` vào thì mọi câu có dịch cao độ đều sai độ dài.
+
+### Vì sao không dùng phase vocoder — bài học phải trả bằng tiếng Nhật
+
+Bản đầu của module này dịch cao độ bằng `librosa.effects.pitch_shift`, tức
+time-stretch bằng phase vocoder rồi resample lại cho đúng độ dài. **Nó đọc sai
+tiếng Nhật.**
+
+Phase vocoder phân tích theo cửa sổ — mặc định của librosa là 2048 mẫu, tức
+**85 ms** ở 24 kHz của Kokoro — và bôi nhoè mọi thứ ngắn hơn một cửa sổ. Tiếng
+Nhật đặt nghĩa đúng vào cỡ đó: っ là một quãng lặng, ー là nguyên âm kéo dài, ん
+là một mora riêng, và きて với きって khác nhau ở độ dài một khoảng lặng. Đo
+được:
+
+| | quãng lặng 80 ms |
+|---|---|
+| gốc | 80.0 ms |
+| qua phase vocoder (0.6 nửa cung) | **36.9 ms** |
+| qua resample (0.6 nửa cung) | 77.3 ms (đúng bằng 80 ÷ 2^(0.6/12)) |
+
+Và nó chạy trên **mọi câu**, để đổi cao độ chưa tới một nửa cung — thứ mà không
+có thì cũng chẳng ai nhận ra. Câu hỏi còn tệ hơn: bốn lượt vocoder chồng lên
+0.35 giây cuối, đúng chỗ trọng âm cuối câu nằm.
+
+Resample không có cửa sổ và không phân tích gì cả. Nó là đổi tốc độ băng: mọi
+tỉ lệ trong tín hiệu giữ nguyên chính xác, nên đường thanh điệu tiếng Việt,
+đường trọng âm cao độ tiếng Nhật và một phụ âm đôi đều sống sót. Đổi lại nó
+đổi độ dài (đã trả bằng `synth_rate`) và dịch formant theo cao độ — lý do
+`MAX_SENTENCE_PITCH_ST` để nhỏ, và cũng là lý do nó ít quan trọng ở đây: Seed-VC
+thay timbre ngay bước sau.
+
+Cái mất: không vẽ được đường cong cao độ *bên trong* một câu nữa, nên vuốt cuối
+câu hỏi thành cả câu đọc cao hơn. Đó là đánh đổi có ý thức — dấu hiệu yếu hơn,
+nhưng không phá chữ.
 
 ### Hai giới hạn cố ý
 
@@ -952,9 +997,11 @@ dấu phẩy là dấu câu chứ không phải tâm trạng, nên nó sống s�
 
 `tests/test_prosody.py` phủ toàn bộ phần ra quyết định — nó là Python thuần trên
 một danh sách câu, chạy được trong CI không cần checkpoint, không cần container.
-Phần DSP (`shape`) chỉ test đường gain; phase vocoder làm gì với sóng thì không
-phải thứ unit test khẳng định được, nhưng đường lui khi máy không có librosa thì
-có.
+Phần DSP có test thật nhưng cần librosa (nằm trong `base_image`, không nằm
+trong `requirements.txt`) nên CI skip: cao độ dịch đúng số nửa cung đã yêu cầu,
+độ dài đổi đúng bằng phần `synth_rate` trả lại, và quãng lặng 80 ms vẫn là
+quãng lặng — kèm luôn phép đo cho thấy phase vocoder không giữ được nó, để
+không ai đưa nó trở lại.
 
 ### Còn phải verify bằng tai
 
@@ -964,10 +1011,18 @@ có.
 - [ ] cùng đoạn văn qua cả năm style: nghe ra khác nhau, và không style nào
       nghe như đang diễn
 - [ ] `--expressiveness 0` → đúng bằng bản đọc Phase 8 (trừ ngắt nghỉ theo dấu câu)
-- [ ] chỗ vuốt cao độ cuối câu hỏi không có tiếng "cụp" ở mối nối bốn bậc
+- [ ] **tiếng Nhật đọc đúng chữ** — đây là mục quan trọng nhất của phase này,
+      vì bản đầu đã sai đúng chỗ đó: っ và ー còn nguyên độ dài, きって không
+      thành きて
 - [ ] tiếng Việt: dịch cao độ theo câu không làm méo thanh điệu (đây là lý do
       các con số đều dưới 1.5 nửa cung)
-- [ ] `そうですか。` được đọc như câu hỏi
+- [ ] `そうですか。` được đọc như câu hỏi, còn một mẩu cắt ra kết thúc bằng か
+      (「きょうはとてもしずか」) thì không
+- [ ] độ dài câu vẫn đúng sau khi resample — nếu nghe nhanh/chậm bất thường ở
+      câu có dịch cao độ thì `synth_rate` bị đưa nhầm chiều
+- [ ] khoảng lặng sau `。` (0.40s) cộng với khoảng lặng Kokoro tự sinh ra từ dấu
+      câu có bị thành lê thê không — chưa kiểm chứng được ở đây vì `misaki[ja]`
+      không cài được trên máy viết code
 - [ ] sau Seed-VC, ngữ điệu còn giữ được — nếu conversion nuốt mất phần lên
       xuống thì phải đo lại xem nên đẩy biên độ lên bao nhiêu
 - [ ] đo thêm thời gian CPU: mỗi câu thêm một lần pitch_shift, câu hỏi thêm bốn

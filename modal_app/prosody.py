@@ -29,11 +29,14 @@ mechanical enough to be written down:
   measurement `pipeline._resolve_shift` runs afterwards reads what it always
   read.
 
-* **A question rises, a statement falls.** The fall is the tail of the
-  declination; the rise is a short glide over the last third of a second, which
-  is the one piece of intonation a listener notices immediately when it is
-  missing. Yes/no question intonation being marked by a rising ending, and a
-  declarative by a falling one, is about as settled as prosody gets.
+* **A question is read higher, a statement falls.** The fall is the tail of
+  the declination. The rise is the whole question sitting above its neighbours
+  rather than a glide at the end of it: a final glide is the better imitation —
+  yes/no questions being marked by a rising ending is about as settled as
+  prosody gets — but drawing one means bending the pitch inside an utterance,
+  and the only tool for that is a phase vocoder. See `_transpose` for what that
+  did to Japanese. Overall F0 does go up on a question, so this is a real cue,
+  just a quieter one.
 
 * **Emotion is rate, pitch, range, loudness and pause length together.** The
   acoustic literature is consistent about the direction of each: happiness and
@@ -88,7 +91,7 @@ class Emotion:
     pitch: float = 0.0
     gain_db: float = 0.0
     # Multiplier on every per-sentence pitch move: declination, the question
-    # rise, the final fall.
+    # lift, the final fall.
     pitch_range: float = 1.0
     # Multiplier on every pause.
     pause: float = 1.0
@@ -238,16 +241,30 @@ _EXCLAMATION_MARKS = ("!", "！")
 _SENTENCE_MARKS = (".", "。")
 _ELLIPSIS = ("…", "...", "。。。")
 # Japanese asks a question with a final か and often no question mark at all —
-# 「そうですか。」 is a question and ends in a full stop. Only the sentence-final
-# position is read, so the か that means "or" in the middle of one is untouched.
+# 「そうですか。」 is a question and ends in a full stop.
+#
+# Only ever read at a position where a sentence actually ends, and that
+# condition is the whole point of it. か is an ordinary syllable inside ordinary
+# words — しずか, たしか, なんとか, ほのか — and `_wrap` cuts a long Japanese
+# sentence at an arbitrary character because the script gives it no spaces to
+# cut at. Reading a fragment that merely stops after か as a question puts a
+# question's intonation in the middle of a statement, which is the sort of wrong
+# that a listener hears immediately.
 _JA_QUESTION_TAILS = ("か", "かな", "かい", "かしら")
 # Closing quotes and brackets sit outside the punctuation that classifies the
 # sentence: 「本当ですか?」 and "Really?" end in a question either way.
 _CLOSERS = "\"'”’」』）)]】》〉"
 
 
-def classify(segment: str) -> str:
-    """What kind of break the end of `segment` is. See `PAUSE_SEC`."""
+def classify(segment: str, sentence_end: bool = False) -> str:
+    """What kind of break the end of `segment` is. See `PAUSE_SEC`.
+
+    `sentence_end` says a sentence is known to end here even if nothing is
+    written down to say so — the caller passes it for the last segment of a
+    paragraph. It exists for Japanese: 「元気ですか」 typed without a full stop is
+    a question, and 「きょうはとてもしずか…」 cut mid-sentence by the length
+    budget is not, and the trailing か looks identical in both.
+    """
     text = segment.rstrip().rstrip(_CLOSERS).rstrip()
     if not text:
         return RUN_ON
@@ -263,7 +280,9 @@ def classify(segment: str) -> str:
         return QUESTION if stem.endswith(_JA_QUESTION_TAILS) else SENTENCE
     if text.endswith(_CLAUSE_MARKS):
         return CLAUSE
-    if text.endswith(_JA_QUESTION_TAILS):
+    # Nothing written down. A trailing か is the particle only where a sentence
+    # really ends; anywhere else it is a syllable inside a word.
+    if sentence_end and text.endswith(_JA_QUESTION_TAILS):
         return QUESTION
     return RUN_ON
 
@@ -275,11 +294,15 @@ def classify(segment: str) -> str:
 # is where it would have been. Declination is measured in far larger amounts
 # than this in real speech; the point here is that it is not zero.
 DECLINATION_ST = 1.2
-# The final rise on a question, over `RISE_SEC` at the end of the segment.
-QUESTION_RISE_ST = 2.2
-# …and the whole question sitting slightly higher, which is the other half of
-# how one is read.
-QUESTION_LIFT_ST = 0.4
+# A question read higher than the sentences around it.
+#
+# This used to be a rise over the last third of a second, which is the better
+# imitation of how a question is really read and is gone anyway — see
+# `_transpose` for why nothing here bends the pitch inside a segment any more.
+# A whole question sitting higher is the weaker cue of the two and the honest
+# one to keep: overall F0 does go up on a question, and it costs a listener
+# nothing because it rides the same clean transposition as everything else.
+QUESTION_LIFT_ST = 1.0
 QUESTION_RATE = 1.03
 EXCLAMATION_LIFT_ST = 0.6
 EXCLAMATION_GAIN_DB = 1.2
@@ -290,18 +313,17 @@ TRAILING_GAIN_DB = -1.5
 TRAILING_RATE = 0.90
 # The last statement of a paragraph falls further than declination alone.
 FINAL_FALL_ST = 0.35
-# Ceilings on what the two pitch numbers can reach once a wide style and a high
-# `expressiveness` have both multiplied them.
+# The ceiling on a sentence's pitch move, once a wide style and a high
+# `expressiveness` have both multiplied it.
 #
-# These exist for Vietnamese, and for every other tonal language this will read.
-# Transposing a whole sentence is safe — the tone contours move with it — but the
-# final rise is a contour of its own laid over the last syllable, and a large one
-# is the difference between asking a question and saying a different word. The
-# semitone shift the pipeline applies afterwards is capped at ±8 for the same
-# reason (`audio_utils.MAX_SEMITONE_SHIFT`); this is that argument at the scale
-# of one sentence.
+# Transposing a whole sentence is safe for a tonal or a pitch-accent language —
+# every ratio inside it is preserved, so Vietnamese tones and Japanese accent
+# contours move along with it rather than being flattened. What the cap is
+# actually for is the formants, which a resample moves with the pitch: past a
+# couple of semitones the speaker starts to sound like a different size of
+# person. The semitone shift the pipeline applies afterwards is capped at ±8 on
+# a related argument (`audio_utils.MAX_SEMITONE_SHIFT`).
 MAX_SENTENCE_PITCH_ST = 2.5
-MAX_RISE_ST = 3.5
 # …and is read slightly slower. Final lengthening, in the crudest form that
 # still counts as having it.
 FINAL_LENGTHENING = 0.96
@@ -311,21 +333,27 @@ FINAL_LENGTHENING = 0.96
 class Beat:
     """One segment and how to read it. Everything `plan` decides is here.
 
-    `rate` is absolute, ready for the engine. `pitch`, `gain_db` and `rise` are
-    applied to the audio afterwards by `shape`, because neither engine takes
-    them: MMS exposes duration and two noise scales and nothing else, and
-    Kokoro exposes speed. `variation` and `duration_variation` are multipliers
-    on the checkpoint's own `noise_scale` and `noise_scale_duration` rather than
-    values, since those defaults are per checkpoint and overwriting them with a
-    constant would be a change no style asked for.
+    `rate` is the pace a listener should hear. `synth_rate` is what the engine
+    is actually asked for, and the two differ because of how the pitch is
+    applied: `shape` transposes by resampling, which changes the length as well,
+    so the engine is asked to speak by exactly the reciprocal and the length
+    comes back. Feed `synth_rate` to the engine and `pitch` to `shape` and the
+    result runs at `rate` — feed `rate` to the engine and every sentence with a
+    pitch move comes out the wrong length.
+
+    `gain_db` is applied to the audio too. `variation` and `duration_variation`
+    are multipliers on the checkpoint's own `noise_scale` and
+    `noise_scale_duration` rather than values, since those defaults are per
+    checkpoint and overwriting them with a constant would be a change no style
+    asked for.
     """
 
     text: str
     kind: str
     rate: float = 1.0
+    synth_rate: float = 1.0
     pitch: float = 0.0
     gain_db: float = 0.0
-    rise: float = 0.0
     pause_sec: float = 0.0
     variation: float = 1.0
     duration_variation: float = 1.0
@@ -366,19 +394,19 @@ def plan(
         last_block = block_index == len(blocks) - 1
         count = len(block)
         for index, segment in enumerate(block):
-            kind = classify(segment)
             last_in_block = index == count - 1
+            # A paragraph ends where its last segment does, whether or not the
+            # writer put a full stop there. Japanese needs to be told.
+            kind = classify(segment, sentence_end=last_in_block)
             # Centred declination: +half a span at the top of the paragraph,
             # -half at the bottom, nothing at all in a one-sentence paragraph.
             span = index / (count - 1) if count > 1 else 0.5
             pitch = DECLINATION_ST * (0.5 - span)
             rate = 1.0
             gain_db = 0.0
-            rise = 0.0
 
             if kind == QUESTION:
                 pitch += QUESTION_LIFT_ST
-                rise = QUESTION_RISE_ST
                 rate *= QUESTION_RATE
             elif kind == EXCLAMATION:
                 pitch += EXCLAMATION_LIFT_ST
@@ -402,16 +430,20 @@ def plan(
             else:
                 pause = PAUSE_SEC[kind]
 
+            # The style's own offset moves the whole read; the sentence's
+            # move is what `pitch_range` widens or narrows.
+            moved = _cap(style_pitch + pitch * style_range, MAX_SENTENCE_PITCH_ST)
+            heard = speaking_rate * style_rate * _depth(depth, rate, 1.0)
             beats.append(
                 Beat(
                     text=segment,
                     kind=kind,
-                    rate=speaking_rate * style_rate * _depth(depth, rate, 1.0),
-                    # The style's own offset moves the whole read; the
-                    # sentence's move is what `pitch_range` widens or narrows.
-                    pitch=_cap(style_pitch + pitch * style_range, MAX_SENTENCE_PITCH_ST),
+                    rate=heard,
+                    # Asked for slower by exactly what the transposition will
+                    # speed it up by, so the sentence lands back on `heard`.
+                    synth_rate=heard / semitone_ratio(moved),
+                    pitch=moved,
                     gain_db=style_gain + _depth(depth, gain_db),
-                    rise=_cap(rise * style_range, MAX_RISE_ST),
                     pause_sec=pause * style_pause,
                     variation=variation,
                     duration_variation=duration_variation,
@@ -422,33 +454,48 @@ def plan(
 
 # --- applying it to the audio ---------------------------------------------
 
-# Below this a pitch move is not worth a phase vocoder pass — it is under the
+# Below this a pitch move is not worth resampling for — it is under the
 # just-noticeable difference for a shift of a whole utterance either way.
 MIN_AUDIBLE_ST = 0.15
-# The final rise happens over the last third of a second, which is roughly the
-# last stressed syllable and whatever follows it.
-RISE_SEC = 0.35
-# The glide as a staircase. Four steps of a 2.2 semitone rise is 0.55 apiece
-# across 350 ms, which reads as a glide rather than as four notes; a real
-# time-varying resample would need a vocoder of our own.
-RISE_STEPS = 4
-# Equal-power crossfade between the steps, through `audio_utils.crossfade_concat`
-# — the same join the converter's chunks already use.
-RISE_OVERLAP_SEC = 0.02
-# STFT window for the transposition. librosa's own default, and the floor
-# `_window` stops halving at: 256 samples is 16 ms at 16 kHz, which still holds
-# two periods of a 120 Hz voice.
-DEFAULT_WINDOW = 2048
-MIN_WINDOW = 256
 
 
-def _shift(audio, sample_rate: int, semitones: float):
-    """`audio` transposed, same length. Unchanged if librosa is not installed.
+def semitone_ratio(semitones: float) -> float:
+    """The frequency ratio `semitones` is, which is also the length ratio.
+
+    One number does both jobs because the transposition is a resample: raising
+    a sentence by `s` semitones multiplies its pitch by this and divides its
+    length by the same, which is what `Beat.synth_rate` exists to undo.
+    """
+    return 2.0 ** (semitones / 12.0)
+
+
+def _transpose(audio, sample_rate: int, semitones: float):
+    """`audio` transposed by resampling it. Unchanged if librosa is missing.
+
+    **A resample, and deliberately not a phase vocoder.** The obvious call here
+    is `librosa.effects.pitch_shift`, which time-stretches with a phase vocoder
+    and then resamples so the length comes out unchanged. It was the first thing
+    this module did and it was wrong, in a way that was worst for the language
+    with the least room for it:
+
+    a phase vocoder analyses in windows — librosa's default is 2048 samples,
+    which is 85 ms at Kokoro's 24 kHz — and it smears anything shorter than a
+    window across it. Japanese spends its meaning on exactly that scale. っ is a
+    stop of silence, ー is a held vowel, ん is a mora of its own, and the
+    difference between きて and きって is how long a gap is. Smear those and the
+    words change. It ran on every sentence, for a declination move of well under
+    a semitone that nobody would have noticed missing.
+
+    Resampling has no window and no analysis. It is a tape-speed change: every
+    ratio in the signal is preserved exactly, so a pitch-accent contour, a
+    Vietnamese tone and a geminate consonant all survive it intact. What it does
+    instead is change the length — which is why nothing calls this without
+    `Beat.synth_rate` having already paid for it — and shift the formants with
+    the pitch, which is why `MAX_SENTENCE_PITCH_ST` is small and why it matters
+    little here anyway: Seed-VC replaces the timbre one step later.
 
     librosa is in `base_image` and therefore in both synthesiser images. The
-    fallback is for the unit tests, which run on a bare CI box: everything in
-    `plan` is testable there, and a missing pitch move is the right way for the
-    part that is not to stay out of the way.
+    fallback is for the unit tests, which run on a bare CI box.
     """
     import numpy as np
 
@@ -456,58 +503,30 @@ def _shift(audio, sample_rate: int, semitones: float):
         import librosa
     except ImportError:  # pragma: no cover - librosa is present in the images
         return audio
-    shifted = librosa.effects.pitch_shift(
-        y=audio, sr=sample_rate, n_steps=float(semitones), n_fft=_window(len(audio))
-    )
-    return np.asarray(shifted, dtype=np.float32)
-
-
-def _window(length: int) -> int:
-    """The STFT window to transpose `length` samples with.
-
-    librosa's default is 2048, which is longer than a glide step (~90 ms, so
-    1400 samples at 16 kHz) and longer than a very short segment. A window
-    longer than the signal is padding rather than analysis, and librosa says so
-    on stderr every time. So halve it until it fits, with a floor low enough to
-    still hold a couple of periods of a low voice.
-    """
-    window = DEFAULT_WINDOW
-    while window > MIN_WINDOW and window > length:
-        window //= 2
-    return window
-
-
-def _glide(audio, sample_rate: int, semitones: float):
-    """The last `RISE_SEC` bent upward by `semitones`, in `RISE_STEPS` steps."""
-    import numpy as np
-
-    from .audio_utils import crossfade_concat
-
-    tail_len = int(RISE_SEC * sample_rate)
-    step = tail_len // RISE_STEPS
-    overlap = int(RISE_OVERLAP_SEC * sample_rate)
-    # Nothing to bend: a segment barely longer than the tail would have its
-    # whole self transposed, which is not a final rise.
-    if len(audio) < tail_len * 2 or step <= overlap * 2:
+    # Reading the samples as if they had been recorded slower and playing them
+    # at the original rate: pitch up by `ratio`, length down by it.
+    target = int(round(sample_rate / semitone_ratio(semitones)))
+    if target <= 0 or target == sample_rate:
         return audio
-
-    head, tail = audio[:-tail_len], audio[-tail_len:]
-    pieces = []
-    for i in range(RISE_STEPS):
-        start = i * step
-        stop = tail_len if i == RISE_STEPS - 1 else start + step
-        # Each piece but the first reaches back one overlap, which is the
-        # contract `crossfade_concat` reassembles from.
-        begin = start if i == 0 else start - overlap
-        pieces.append(_shift(tail[begin:stop], sample_rate, semitones * (i + 1) / RISE_STEPS))
-    return np.concatenate([head, crossfade_concat(pieces, sample_rate, RISE_OVERLAP_SEC)])
+    moved = librosa.resample(
+        np.asarray(audio, dtype=np.float32),
+        orig_sr=sample_rate,
+        target_sr=target,
+        res_type="soxr_hq",
+    )
+    return np.asarray(moved, dtype=np.float32)
 
 
 def shape(audio, sample_rate: int, beat: Beat):
     """One synthesised segment, read the way its `Beat` says.
 
-    Level, then the whole-segment transposition, then the final rise. Not
-    clipped: `tts._join` normalises the finished wav to a fixed peak, and
+    Level, then the transposition. Nothing here bends the pitch *inside* a
+    segment: a contour drawn over part of an utterance cannot be done by
+    resampling, and the only other way to draw one is the vocoder `_transpose`
+    exists to avoid. A question is read higher rather than rising at the end,
+    which is the weaker cue and the one that does not damage the words.
+
+    Not clipped: `tts._join` normalises the finished wav to a fixed peak, and
     clipping here would throw away the headroom it is about to use.
     """
     import numpy as np
@@ -516,7 +535,5 @@ def shape(audio, sample_rate: int, beat: Beat):
     if abs(beat.gain_db) > 0.01:
         shaped = shaped * np.float32(10.0 ** (beat.gain_db / 20.0))
     if abs(beat.pitch) >= MIN_AUDIBLE_ST:
-        shaped = _shift(shaped, sample_rate, beat.pitch)
-    if beat.rise >= MIN_AUDIBLE_ST:
-        shaped = _glide(shaped, sample_rate, beat.rise)
+        shaped = _transpose(shaped, sample_rate, beat.pitch)
     return shaped

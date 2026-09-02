@@ -46,12 +46,16 @@ One engine would have been better. Two is what the language needs.
 
 **Neither of them is read flat.** Both speak in one fixed speaker with no
 emotion conditioning, so what they are given instead is a plan: `prosody.py`
-turns the text into a `Beat` per sentence — pace, height, level, the length of
-the silence after it, and a rise at the end of a question — and this module
-spends it on whichever knobs its engine has. That plan is the difference
-between a page read out and a page got through, and it is the only part of the
-reading either engine could not have worked out from the sentence in front of
-it: it is handed one at a time and cannot see the paragraph.
+turns the text into a `Beat` per sentence — pace, height, level and the length
+of the silence after it — and this module spends it on whichever knobs its
+engine has. That plan is the difference between a page read out and a page got
+through, and it is the only part of the reading either engine could not have
+worked out from the sentence in front of it: it is handed one at a time and
+cannot see the paragraph.
+
+Note which rate goes to the engine. `Beat.synth_rate`, never `Beat.rate`: the
+pitch is applied by resampling the result, which changes its length as well,
+and `synth_rate` is the pace that comes out right once it has.
 
 **Numbers and symbols are not spoken.** MMS-TTS tokenises characters against a
 per-language vocabulary that holds letters and punctuation; a digit is not in
@@ -478,7 +482,14 @@ class Synthesizer:
             for i, beat in enumerate(beats, start=1):
                 # Per sentence, not per container: all three are plain
                 # attributes the forward pass reads, so nothing is reloaded.
-                self.model.speaking_rate = clamp_speaking_rate(beat.rate)
+                #
+                # `synth_rate`, not `rate`: the transposition `prosody.shape`
+                # applies afterwards is a resample, so it changes the length
+                # too, and this is the pace that comes out right once it has.
+                # Its own clamp is the outer limit — at the far end of the
+                # slider it can bite, and then the sentence keeps its pitch and
+                # loses a little of its timing, which is the right way round.
+                self.model.speaking_rate = clamp_speaking_rate(beat.synth_rate)
                 self.model.noise_scale = self.base_noise_scale * beat.variation
                 self.model.noise_scale_duration = (
                     self.base_noise_scale_duration * beat.duration_variation
@@ -587,10 +598,16 @@ class KokoroSynthesizer:
         """Text in, 16-bit PCM wav out at Kokoro's 24 kHz. Same contract as MMS.
 
         The same plan, with one knob fewer to spend it on: Kokoro takes a speed
-        and nothing else, so the pace is set per sentence here and the pitch,
-        the level and the final rise are all `prosody.shape`'s to apply. That is
-        the same division as MMS — `noise_scale` is the only thing MMS adds —
-        and the reading comes out the same shape either way.
+        and nothing else, so the pace is set per sentence here and the pitch and
+        the level are `prosody.shape`'s to apply. That is the same division as
+        MMS — `noise_scale` is the only thing MMS adds — and the reading comes
+        out the same shape either way.
+
+        This is the branch that had to be got right twice. Japanese spends its
+        meaning on mora length, and the first version of `prosody.shape`
+        transposed every sentence with a phase vocoder whose window was longer
+        than the distinctions involved; it read the words wrong. `_transpose`
+        carries the account of it.
         """
         import time
 
@@ -622,7 +639,10 @@ class KokoroSynthesizer:
                 for result in self.pipeline(
                     beat.text,
                     voice=self.spec.voice,
-                    speed=clamp_speaking_rate(beat.rate),
+                    # `synth_rate` for the same reason as MMS: the resample in
+                    # `prosody.shape` shortens what it raises, and this is what
+                    # pays for it.
+                    speed=clamp_speaking_rate(beat.synth_rate),
                     split_pattern=None,
                 )
                 if result.audio is not None
