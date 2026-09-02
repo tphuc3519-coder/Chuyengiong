@@ -517,7 +517,7 @@ def _transpose(audio, sample_rate: int, semitones: float):
     return np.asarray(moved, dtype=np.float32)
 
 
-def shape(audio, sample_rate: int, beat: Beat):
+def shape(audio, sample_rate: int, beat: Beat, engine_pitch: bool = False):
     """One synthesised segment, read the way its `Beat` says.
 
     Level, then the transposition. Nothing here bends the pitch *inside* a
@@ -525,6 +525,13 @@ def shape(audio, sample_rate: int, beat: Beat):
     resampling, and the only other way to draw one is the vocoder `_transpose`
     exists to avoid. A question is read higher rather than rising at the end,
     which is the weaker cue and the one that does not damage the words.
+
+    `engine_pitch` says the synthesiser already put the pitch where the beat
+    asked — Open JTalk takes `half_tone` in semitones and does it during
+    synthesis, which is better than anything done afterwards: no resample, no
+    formant shift, no length to pay back. Then all that is left here is the
+    level, and `Beat.rate` rather than `Beat.synth_rate` is what that engine
+    should have been given.
 
     Not clipped: `tts._join` normalises the finished wav to a fixed peak, and
     clipping here would throw away the headroom it is about to use.
@@ -534,6 +541,6 @@ def shape(audio, sample_rate: int, beat: Beat):
     shaped = np.asarray(audio, dtype=np.float32)
     if abs(beat.gain_db) > 0.01:
         shaped = shaped * np.float32(10.0 ** (beat.gain_db / 20.0))
-    if abs(beat.pitch) >= MIN_AUDIBLE_ST:
+    if not engine_pitch and abs(beat.pitch) >= MIN_AUDIBLE_ST:
         shaped = _transpose(shaped, sample_rate, beat.pitch)
     return shaped

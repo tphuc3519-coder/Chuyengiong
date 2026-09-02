@@ -8,6 +8,7 @@ TTL as the audio, and never in the audit log.
 """
 
 import importlib
+import types
 from unittest import mock
 
 import pytest
@@ -47,12 +48,21 @@ def test_the_model_id_is_the_mms_checkpoint_for_the_language():
 
 def test_japanese_is_offered_and_does_not_read_through_mms():
     spec = tts.spec_for("jpn")
-    assert spec.engine == tts.KOKORO
+    assert spec.engine != tts.MMS
     assert spec.label == "日本語"
 
 
+def test_japanese_reads_through_the_engine_that_knows_where_the_pitch_falls():
+    """箸 and 橋 are both `hashi`, 雨 and 飴 are both `ame`, and which word it is
+    is where the pitch falls. Open JTalk reads that out of a dictionary;
+    Kokoro-82M v1.0 has no id in its vocabulary for an accent mark, so it can
+    only guess. The HTS voice is much less natural and that is the trade: the
+    timbre is Seed-VC's a step later, the words are not."""
+    assert tts.spec_for("jpn").engine == tts.OPENJTALK
+
+
 def test_asking_mms_for_japanese_is_an_error_not_a_silent_wrong_reading():
-    with pytest.raises(tts.TtsError, match="kokoro"):
+    with pytest.raises(tts.TtsError, match=tts.OPENJTALK):
         tts.model_id("jpn")
 
 
@@ -279,6 +289,75 @@ def test_join_without_a_plan_still_reads_as_it_always_did():
     assert len(plain) == len(planned)
 
 
+# --- Japanese pitch accent ------------------------------------------------
+#
+# 箸 and 橋 are both `hashi`; 雨 and 飴 are both `ame`. Where the pitch falls is
+# what separates them, so getting it wrong is a different word rather than an
+# accent. `kokoro.KPipeline` builds `misaki.ja.JAG2P()`, whose default is the
+# first-generation front end — cutlet, which emits no accent marks at all.
+# The second one does, and whether it can be used is a question about the
+# checkpoint's vocabulary, so the code asks instead of assuming.
+
+
+def _probe_accent(vocab, misaki=None):
+    """`_use_accent_g2p` against a checkpoint whose vocab is `vocab`."""
+    import sys
+    from unittest import mock
+
+    fake = types.SimpleNamespace(
+        pipeline=types.SimpleNamespace(model=types.SimpleNamespace(vocab=vocab), g2p="cutlet")
+    )
+    # `None` in sys.modules makes `import misaki` raise ImportError, which is
+    # what a box without misaki[ja] does and what CI is.
+    modules = (
+        {"misaki": misaki, "misaki.ja": getattr(misaki, "ja", None)} if misaki else {"misaki": None}
+    )
+    with mock.patch.dict(sys.modules, modules):
+        used = tts.KokoroSynthesizer._use_accent_g2p(fake)
+    return used, fake.pipeline.g2p
+
+
+def test_the_accent_marks_are_the_ones_misaki_appends():
+    """`_` low, `-` mid, `^` the fall — one character per phoneme, appended to
+    the phoneme string as a parallel track."""
+    assert set(tts.ACCENT_MARKS) == {"_", "-", "^"}
+
+
+def test_a_checkpoint_with_no_id_for_the_marks_keeps_the_front_end_it_had():
+    """`KModel.forward` maps phonemes through `vocab` and silently drops what
+    it cannot find, so handing the pitch track to a checkpoint that was not
+    trained on it deletes the marks and reads what is left — and `j`, the
+    track's filler, is the IPA phoneme /j/. Quietly worse than not trying."""
+    used, g2p = _probe_accent({"a": 1, "i": 2, "j": 3})
+    assert used is False
+    assert g2p == "cutlet"
+
+
+def test_a_checkpoint_that_reads_the_marks_gets_the_accent_front_end():
+    accent_g2p = object()
+    misaki = types.ModuleType("misaki")
+    misaki.ja = types.SimpleNamespace(JAG2P=lambda version: accent_g2p)
+    vocab = {mark: i for i, mark in enumerate(tts.ACCENT_MARKS)}
+    used, g2p = _probe_accent(vocab, misaki=misaki)
+    assert used is True
+    assert g2p is accent_g2p
+
+
+def test_the_gate_never_stops_the_container_starting():
+    """A reading with no accent marks is the reading this shipped with. A
+    container that will not start is not."""
+    # No vocab to ask, and a vocab that says yes but no misaki to import.
+    assert _probe_accent(None) == (False, "cutlet")
+    assert _probe_accent({mark: 1 for mark in tts.ACCENT_MARKS}) == (False, "cutlet")
+
+
+def test_the_probe_sentence_is_ours_and_not_the_users():
+    """It is read to the log on every cold start so the G2P chain is visible in
+    a container's output. What the user wrote never goes there — the same rule
+    the audit log has been under all along."""
+    assert tts.ACCENT_PROBE and all(not ch.isascii() or ch == "。" for ch in tts.ACCENT_PROBE)
+
+
 def test_the_natural_reading_is_what_a_request_that_says_nothing_gets():
     """Every existing caller — and every form that predates the field — sends
     no style at all, and has to keep getting the reading it was getting."""
@@ -289,29 +368,57 @@ def test_the_natural_reading_is_what_a_request_that_says_nothing_gets():
     assert signature.parameters["expressiveness"].default == prosody.DEFAULT_EXPRESSIVENESS
 
 
-def test_the_seam_hands_both_engines_the_same_style():
+class _FakeEngine:
+    """Stands in for a `@app.cls` so the seam can be exercised without Modal."""
+
+    sent: dict = {}
+
+    def __init__(self, language):
+        type(self).sent = {"language": language}
+
+    @property
+    def synthesize(self):
+        return self
+
+    def remote(self, **kwargs):
+        type(self).sent.update(kwargs)
+        return b"wav"
+
+
+def test_the_seam_hands_every_engine_the_same_style():
     """Which model reads is `tts`'s business and the style is `prosody`'s, so
     the argument list cannot differ between them — a paragraph read in Japanese
     gets the same pauses as one read in Vietnamese."""
-    sent = {}
-
-    class Fake:
-        def __init__(self, language):
-            sent["language"] = language
-
-        @property
-        def synthesize(self):
-            return self
-
-        def remote(self, **kwargs):
-            sent.update(kwargs)
-            return b"wav"
-
-    for language, engine in (("vie", "Synthesizer"), ("jpn", "KokoroSynthesizer")):
-        with mock.patch.object(tts, engine, Fake):
+    for language in ("vie", "jpn"):
+        with mock.patch.dict(tts.ENGINES, dict.fromkeys(tts.ENGINES, _FakeEngine)):
             tts.synthesize(language, "Xin chào.", 1.0, emotion="warm", expressiveness=0.5)
-        assert sent["language"] == language
-        assert (sent["emotion"], sent["expressiveness"]) == ("warm", 0.5)
+        assert _FakeEngine.sent["language"] == language
+        assert (_FakeEngine.sent["emotion"], _FakeEngine.sent["expressiveness"]) == ("warm", 0.5)
+
+
+def test_every_engine_a_language_can_name_has_a_class_to_run_it():
+    assert {spec.engine for spec in tts.LANGUAGES.values()} <= set(tts.ENGINES)
+
+
+def test_the_smoke_test_can_force_the_other_engine_to_compare_it():
+    """The Japanese choice is a trade — dictionary accent against a much more
+    natural voice — and a trade wants ears rather than an argument. No request
+    can set this; only `modal run`."""
+    picked = []
+
+    class Recorder(_FakeEngine):
+        def __init__(self, language):
+            picked.append(language)
+            super().__init__(language)
+
+    for engine in ("", tts.KOKORO):
+        with mock.patch.dict(tts.ENGINES, {tts.OPENJTALK: Recorder, tts.KOKORO: Recorder}):
+            tts.synthesize("jpn", "こんにちは。", 1.0, engine=engine)
+    assert picked == ["jpn", "jpn"]
+
+    import inspect
+
+    assert "engine" not in inspect.signature(pipeline.clean_params).parameters
 
 
 # --- speaking rate --------------------------------------------------------

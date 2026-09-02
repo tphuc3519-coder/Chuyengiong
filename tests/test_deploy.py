@@ -24,8 +24,18 @@ def test_deploy_registers_everything_the_pipeline_needs():
         "Separator",
         "Synthesizer",
         "KokoroSynthesizer",
+        "OpenJTalkSynthesizer",
         "Watermarker",
     } <= set(app.registered_classes)
+
+
+def test_every_engine_a_language_reads_through_is_actually_deployed():
+    """A language pointing at a class the deploy never registered is a job that
+    fails on the first request rather than at deploy time."""
+    from modal_app import tts
+
+    for spec in tts.LANGUAGES.values():
+        assert tts.ENGINES[spec.engine].__name__ in set(app.registered_classes), spec.label
 
 
 def test_the_cleanup_cron_sweeps_at_least_as_often_as_the_ttl():
