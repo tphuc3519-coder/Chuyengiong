@@ -42,7 +42,10 @@ Japanese out of it. Hence a second engine for it, and only for it: Kokoro,
 whose Japanese front end (`misaki[ja]`) is a dictionary-and-morphology G2P
 that reads 今日 as `kʲoː` and 田中 as `tanaka`.
 
-One engine would have been better. Two is what the language needs.
+One engine would have been better. Japanese needed a second, and then a third:
+`ACCENT_MARKS` is the account of why. Reading Japanese without being able to
+say where the pitch falls is not an accent problem, it is a wrong-word problem,
+and `OpenJTalkSynthesizer` is the engine that does not have it.
 
 **Neither of them is read flat.** Both speak in one fixed speaker with no
 emotion conditioning, so what they are given instead is a plan: `prosody.py`
@@ -90,6 +93,7 @@ SEGMENT_MAX_CHARS = 200
 
 MMS = "mms"
 KOKORO = "kokoro"
+OPENJTALK = "openjtalk"
 
 
 @dataclass(frozen=True)
@@ -141,13 +145,24 @@ LANGUAGES = {
     "ita": Language("Italiano"),
     JAPANESE: Language(
         "日本語",
-        engine=KOKORO,
+        # Open JTalk rather than Kokoro, and the reason is `ACCENT_MARKS`: 箸
+        # and 橋 are both `hashi` and only the pitch separates them, Kokoro-82M
+        # v1.0 has no way of being told which, and Open JTalk reads the accent
+        # out of a dictionary. `KokoroSynthesizer` is still here and still
+        # works — `modal run -m modal_app.tts --engine kokoro` is the A/B —
+        # because this is a trade rather than a free win: the HTS voice is far
+        # less natural, and what makes that bearable is the thing this module
+        # opens by saying, that the synthetic voice is a stand-in and Seed-VC
+        # replaces the timbre one step later. Correct beats pretty here.
+        engine=OPENJTALK,
         # ~700 Japanese characters is the same two to three minutes of speech
         # the Latin limit buys, and 80 per segment keeps the phoneme string
         # well under the 510 Kokoro truncates at.
         max_chars=700,
         segment_max_chars=80,
         romaji_input=True,
+        # Kept for the A/B: which engine reads is `engine`'s to say, and these
+        # are what `KokoroSynthesizer` needs when it is the one asked.
         kokoro_code="j",
         voice="jf_alpha",
     ),
@@ -385,6 +400,10 @@ def _join(segments, sample_rate: int, pauses: list[float] | None = None) -> byte
 # green. 4.46.3 is the version `conversion.py` already builds against.
 TRANSFORMERS_SPEC = "transformers==4.46.3"
 
+# Open JTalk, which reads Japanese pitch accent out of a dictionary. See
+# `ACCENT_MARKS` for why that matters and why Kokoro cannot be told it.
+OPENJTALK_SPEC = "pyopenjtalk==0.4.1"
+
 # transformers is the whole dependency: MMS-TTS is a VITS checkpoint, and
 # `VitsModel` synthesises straight to a waveform with no vocoder to install and
 # no phonemizer — the tokenizer works on characters.
@@ -515,6 +534,10 @@ class Synthesizer:
         return wav
 
 
+# The image both Japanese engines share, because they share a dependency:
+# `misaki[ja]` requires `pyopenjtalk`, so installing Kokoro's front end already
+# installs Open JTalk. One image, one build, and the A/B costs nothing.
+#
 # Kokoro is one pip package on top of the same base: an 82M StyleTTS2-style
 # model plus `misaki`, its front end. Only the Japanese G2P is used here, and
 # it needs no `espeak-ng` — that is the fallback for Kokoro's *European*
@@ -525,11 +548,17 @@ class Synthesizer:
 # does to a torch 2.4.0 image. Everything else resolves around the pins already
 # in `base_image`: spacy 3.8 and thinc 8.3 come in and leave numpy at 1.26.4,
 # so nothing here drags the audio stack onto numpy 2, and torch stays put.
-kokoro_image = (
+japanese_image = (
     base_image.pip_install(
         "kokoro==0.9.4",
         "misaki[ja]==0.9.4",
         "unidic-lite==1.0.8",
+        # Pinned rather than left as `misaki[ja]`'s unversioned dependency,
+        # because it is now an engine here rather than something a front end
+        # happens to pull in. PyPI ships it as an sdist only — no wheels for
+        # any version — so this compiles open_jtalk and hts_engine during the
+        # build. It already did, silently, as misaki's dependency.
+        OPENJTALK_SPEC,
         TRANSFORMERS_SPEC,
     )
     # `misaki[ja]` depends on `unidic`, which ships no dictionary — it is a
@@ -542,6 +571,15 @@ kokoro_image = (
     # present. `python -m unidic download` is the other fix and costs ~700 MB
     # of image for readings `unidic-lite` already has.
     .run_commands("pip uninstall -y unidic")
+    # Read a word at build time. Open JTalk's dictionary ships inside the
+    # package, but `_lazy_init` fetches it from a GitHub release if it is ever
+    # missing — which would be a download on a cold container, on a request,
+    # over a network the container may not have. Touching it here settles that
+    # in a layer, and a broken chain fails the deploy instead of the first
+    # Japanese job.
+    .run_commands(
+        "python -c \"import pyopenjtalk; print(pyopenjtalk.g2p('今日はいい天気ですね。'))\""
+    )
     .env({"HF_HOME": MODEL_DIR})
 )
 
@@ -587,7 +625,7 @@ KOKORO_MAX_PHONEMES = 510
 
 
 @app.cls(
-    image=kokoro_image,
+    image=japanese_image,
     # CPU for the same reason as the MMS synthesiser: 82M parameters, and the
     # GPU minutes in this pipeline belong to the conversion.
     cpu=4,
@@ -609,8 +647,11 @@ class KokoroSynthesizer:
         from kokoro import KPipeline
 
         spec = spec_for(self.language)
-        if spec.engine != KOKORO:
-            raise TtsError(f"{self.language} does not read through Kokoro")
+        # What this class actually needs, rather than what the language happens
+        # to be configured to use: Japanese reads through Open JTalk now, and
+        # `--engine kokoro` has to still be able to get here to be compared to.
+        if not spec.kokoro_code:
+            raise TtsError(f"{self.language} has no Kokoro voice to read it")
         os.makedirs(MODEL_DIR, exist_ok=True)
 
         self.spec = spec
@@ -746,24 +787,147 @@ class KokoroSynthesizer:
         return wav
 
 
+# Open JTalk's HTS engine returns 48 kHz, and returns it in int16 units rather
+# than in [-1, 1].
+OPENJTALK_SAMPLE_RATE = 48000
+OPENJTALK_SCALE = 32768.0
+
+
+@app.cls(
+    image=japanese_image,
+    # No GPU and no Volume: the HTS voice and the dictionary are both inside
+    # the package, so there is nothing to fetch and nothing to cache. It is by
+    # far the cheapest of the three engines to start.
+    cpu=2,
+    memory=2048,
+    scaledown_window=300,
+    timeout=900,
+    max_containers=4,
+)
+class OpenJTalkSynthesizer:
+    """Japanese, read with the accent a dictionary says rather than a guess.
+
+    The engine is old — HTS, the statistical parametric kind, and it sounds it.
+    It is here because of what this module says in its first paragraph: the
+    synthetic voice is a stand-in and Seed-VC replaces the timbre a step later,
+    so a checkpoint is chosen for correctness rather than for beauty. And the
+    thing Open JTalk is correct about is the one thing Japanese cannot afford
+    to have wrong. 箸 and 橋 are both `hashi`; 雨 and 飴 are both `ame`. Where
+    the pitch falls is which word it is, `pyopenjtalk.run_frontend` reads that
+    out of Open JTalk's dictionary, and its synthesis backend renders it.
+
+    What it costs is naturalness, and the buzz of an HTS excitation is exactly
+    the part of the signal Seed-VC throws away. What it buys is words.
+
+    Two conveniences fall out of it, both better than the workarounds the other
+    engines need: `speed` and `half_tone` are synthesis parameters, so the pace
+    and the pitch of a sentence are set before a sample exists — no resample,
+    no formants dragged along, no length to pay back. `prosody.shape` is left
+    with the level alone, which is why it is called with `engine_pitch=True`
+    and why this is the one engine handed `Beat.rate` rather than
+    `Beat.synth_rate`.
+    """
+
+    language: str = modal.parameter(default=JAPANESE)
+
+    @modal.enter()
+    def load(self) -> None:
+        import pyopenjtalk
+
+        if self.language != JAPANESE:
+            raise TtsError(f"Open JTalk reads Japanese, not {self.language}")
+        self.spec = spec_for(self.language)
+        # Also what pulls the dictionary into memory, so the first request does
+        # not pay for it. The probe is ours, never the user's text.
+        print(f"[OpenJTalkSynthesizer] {ACCENT_PROBE} -> {pyopenjtalk.g2p(ACCENT_PROBE)}")
+
+    @modal.method()
+    def synthesize(
+        self,
+        text: str,
+        speaking_rate: float = DEFAULT_SPEAKING_RATE,
+        emotion: str = prosody.DEFAULT_EMOTION,
+        expressiveness: float = prosody.DEFAULT_EXPRESSIVENESS,
+    ) -> bytes:
+        """Text in, 16-bit PCM wav out at 48 kHz. Same contract as the others."""
+        import time
+
+        import numpy as np
+        import pyopenjtalk
+
+        spoken_text = check_text(text, self.language)
+        if self.spec.romaji_input:
+            spoken_text = to_kana(spoken_text)
+        blocks = split_blocks(spoken_text, self.spec.segment_max_chars)
+        rate = clamp_speaking_rate(speaking_rate)
+        beats = prosody.plan(
+            blocks,
+            emotion=emotion,
+            speaking_rate=rate,
+            expressiveness=expressiveness,
+        )
+
+        started = time.time()
+        spoken: list[np.ndarray] = []
+        pauses: list[float] = []
+        for i, beat in enumerate(beats, start=1):
+            # `rate`, not `synth_rate`: nothing is resampled afterwards, so
+            # there is nothing to pay back. `half_tone` is semitones, which is
+            # the unit `Beat.pitch` is already in.
+            audio, sample_rate = pyopenjtalk.tts(
+                beat.text,
+                speed=clamp_speaking_rate(beat.rate),
+                half_tone=float(beat.pitch),
+            )
+            audio = np.asarray(audio, dtype=np.float32) / OPENJTALK_SCALE
+            if not audio.size:
+                print(f"[OpenJTalkSynthesizer] segment {i}/{len(beats)} produced no audio")
+                continue
+            spoken.append(prosody.shape(audio, sample_rate, beat, engine_pitch=True))
+            pauses.append(beat.pause_sec)
+
+        wav = _join(spoken, OPENJTALK_SAMPLE_RATE, pauses)
+        print(
+            f"[OpenJTalkSynthesizer] {len(beats)} segment(s) in {time.time() - started:.1f}s "
+            f"(rate={rate:.2f} emotion={prosody.clean_emotion(emotion)} "
+            f"expressiveness={prosody.clamp_expressiveness(expressiveness):.2f})"
+        )
+        return wav
+
+
+# Which class reads which engine. A dict rather than a chain of conditionals
+# for the same reason `pipeline.PIPELINES` is one: a missing entry is a
+# KeyError here instead of a language quietly read by the wrong model.
+ENGINES = {
+    MMS: Synthesizer,
+    KOKORO: KokoroSynthesizer,
+    OPENJTALK: OpenJTalkSynthesizer,
+}
+
+
 def synthesize(
     language: str,
     text: str,
     speaking_rate: float,
     emotion: str = prosody.DEFAULT_EMOTION,
     expressiveness: float = prosody.DEFAULT_EXPRESSIVENESS,
+    engine: str = "",
 ) -> bytes:
     """Read `text` with whichever engine speaks `language`, on its own container.
 
     The one place the engine split is resolved. `pipeline.py` asks for a
     language and gets audio back; which model produced it is this module's
     business, and adding a third engine should not reach the pipeline at all.
-    The same is now true of how it is read: both engines take the same style,
-    because the style is `prosody`'s and not either model's.
+    The same is now true of how it is read: every engine takes the same style,
+    because the style is `prosody`'s and not any model's.
+
+    `engine` overrides the language's own choice. It exists for the smoke test
+    and for nothing else — no request can set it — because Japanese has two
+    engines that are a real trade against each other and the only way to judge
+    that trade is to hear both.
     """
     spec = spec_for(language)
-    engine = KokoroSynthesizer if spec.engine == KOKORO else Synthesizer
-    return engine(language=language).synthesize.remote(
+    return ENGINES[engine or spec.engine](language=language).synthesize.remote(
         text=text,
         speaking_rate=speaking_rate,
         emotion=emotion,
@@ -781,6 +945,7 @@ def speak(
     speaking_rate: float = DEFAULT_SPEAKING_RATE,
     emotion: str = prosody.DEFAULT_EMOTION,
     expressiveness: float = prosody.DEFAULT_EXPRESSIVENESS,
+    engine: str = "",
 ) -> None:
     """Standalone smoke test: text in, one wav out. No reference, no GPU.
 
@@ -789,11 +954,21 @@ def speak(
     modal run -m modal_app.tts --emotion cheerful \
         --text "Chào cậu! Cậu khoẻ không? Lâu rồi không gặp…"
 
-    The last one is the whole point of `prosody`: three sentences, three
-    different pauses after them, and only one of them ends on a rise.
+    The third one is the whole point of `prosody`: three sentences and three
+    different pauses after them.
+
+    And the comparison the Japanese engine choice rests on, which is a trade
+    and wants ears rather than an argument — dictionary accent against a
+    guess, an old voice against a natural one:
+
+        --language jpn --output openjtalk.wav --text "箸と橋、雨と飴。"
+        --language jpn --output kokoro.wav --engine kokoro --text "箸と橋、雨と飴。"
+
+    Both are the *input* to the conversion rather than the product, so what
+    settles it is which one comes out of Seed-VC saying the right words.
     """
     from pathlib import Path
 
-    result = synthesize(language, text, speaking_rate, emotion, expressiveness)
+    result = synthesize(language, text, speaking_rate, emotion, expressiveness, engine)
     Path(output).write_bytes(result)
     print(f"wrote {output} ({len(result) / 1e6:.1f} MB)")

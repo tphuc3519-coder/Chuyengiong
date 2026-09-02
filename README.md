@@ -845,21 +845,53 @@ checkpoint không được huấn luyện với nó thì không lỗi — nó l�
 Nên `KokoroSynthesizer.load` **hỏi thay vì đoán**, đúng kiểu cổng `is_uroman`
 của MMS: nếu `model.vocab` có id cho `_ - ^` thì đổi sang front end đời hai;
 không có thì giữ nguyên và **nói ra trong log**. Kèm một câu thăm dò cố định
-(`今日はいい天気ですね。`, không phải chữ của người dùng) in ra chuỗi phoneme, để
-nhìn log là biết chuỗi G2P đang chạy cái gì.
+(`今日はいい天気ですね。`, không phải chữ của người dùng) in ra chuỗi phoneme.
 
-Nếu log nói `hexgrad/Kokoro-82M` không có id cho các dấu đó thì **đấy là trần**:
-bản v1.0 không thể được cho biết cao độ rơi ở đâu, trọng âm là model tự đoán.
-Ba đường đi tiếp, không cái nào làm mù được:
+**Câu trả lời đã tra được, không cần đoán.** `config.json` của Kokoro-82M có 114
+ký hiệu (đọc từ bản ONNX port trên PyPI, `kokoro-onnx`, vì `huggingface.co`
+không tới được từ máy viết code):
 
-1. chấp nhận — Seed-VC giữ nguyên trọng âm sai của bản đọc gốc, nên nó đi thẳng
-   ra sản phẩm;
-2. đổi engine tiếng Nhật sang thứ lấy trọng âm từ từ điển — `pyopenjtalk` đã có
-   sẵn trong image và Open JTalk tự nó là một TTS đầy đủ. Giọng HTS nghe rất máy,
-   nhưng đúng theo tiêu chí của repo (chọn checkpoint vì *đúng*, không vì đẹp —
-   timbre bị Seed-VC thay ngay bước sau). Rủi ro chưa đo: Seed-VC convert từ
-   giọng HTS máy móc có ra hồn không;
-3. đợi một bản Kokoro có trọng âm cho tiếng Nhật.
+```
+;:,.!?—…"()“” ̃ʣʥʦʨᵝꭧAIOQSTWYᵊabcdefhijklmnopqrstuvwxyzɑɐɒæβɔɕçɖðʤəɚɛɜɟɡɥɨɪʝɯɰŋɳɲɴøɸθœɹɾɻʁɽʂʃʈʧʊʋʌɣɤχʎʒʔˈˌːʰʲ↓→↗↘ᵻ
+```
+
+`_`, `-`, `^`, `↑` — **không có cái nào**. `j` thì có (id 52). Nghĩa là đưa dải
+trọng âm đời hai cho v1.0 sẽ xoá sạch các dấu và đọc thừa một tràng /j/. Cổng ở
+trên sẽ báo `accent=False`, và nó đúng.
+
+### Nên tiếng Nhật đổi sang Open JTalk
+
+`hexgrad/Kokoro-82M` không thể được cho biết cao độ rơi ở đâu — đó là trần của
+nó, không sửa được trong engine. Nên tiếng Nhật đọc bằng
+`OpenJTalkSynthesizer`: `pyopenjtalk.run_frontend` đọc nhân trọng âm ra từ **từ
+điển** của Open JTalk, và backend HTS của nó dựng ra âm thanh.
+
+Ba lý do nó hợp ở đây hơn là nghe qua tưởng:
+
+- **Đã có sẵn trong image.** `misaki[ja]==0.9.4` khai `Requires-Dist:
+  pyopenjtalk`, nên nó vốn đã được build vào container từ đầu. Giọng
+  (`mei_normal.htsvoice`) và từ điển đều nằm trong package, không tải gì.
+- **Đúng tiêu chí repo.** Module `tts.py` mở đầu bằng đúng câu này: giọng tổng
+  hợp là *người đóng thế*, Seed-VC mới là thứ làm nó thành giọng người dùng, nên
+  checkpoint chọn vì đúng chứ không vì đẹp. Cái HTS dở nhất — tiếng rè của nguồn
+  kích thích — lại đúng là phần Seed-VC vứt đi.
+- **`speed` và `half_tone` là tham số tổng hợp.** Cao độ theo câu đặt được ngay
+  lúc dựng tiếng, tính bằng nửa cung: không resample, không kéo formant theo,
+  không phải trả lại độ dài. Đây là engine duy nhất nhận `Beat.rate` thay vì
+  `Beat.synth_rate`, và `prosody.shape` chỉ còn phải chỉnh mức.
+
+Đổi lại là mất tự nhiên, và **đây là đánh đổi chứ không phải thắng không**. Nên
+`KokoroSynthesizer` vẫn còn nguyên và vẫn chạy được, để so bằng tai:
+
+```
+modal run -m modal_app.tts --language jpn --output openjtalk.wav --text "箸と橋、雨と飴。"
+modal run -m modal_app.tts --language jpn --output kokoro.wav --engine kokoro --text "箸と橋、雨と飴。"
+```
+
+`--engine` chỉ có ở smoke test, không request nào đặt được: nó là một lựa chọn
+kỹ thuật cần tai chứ không phải một nút cho người dùng. Và nhớ rằng cả hai file
+đó mới là **đầu vào** của conversion — cái quyết định là bản nào ra khỏi Seed-VC
+mà đọc đúng chữ.
 
 ### Số và ký hiệu không được đọc
 
@@ -1050,9 +1082,12 @@ không ai đưa nó trở lại.
 - [ ] cùng đoạn văn qua cả năm style: nghe ra khác nhau, và không style nào
       nghe như đang diễn
 - [ ] `--expressiveness 0` → đúng bằng bản đọc Phase 8 (trừ ngắt nghỉ theo dấu câu)
-- [ ] **log cold start của `KokoroSynthesizer` nói `accent=` là gì** — đây là
-      câu trả lời cho việc trọng âm tiếng Nhật có sửa được trong engine này hay
-      không, và nó in ra ngay dòng đầu
+- [ ] **so `openjtalk.wav` với `kokoro.wav` trên 箸/橋, 雨/飴** — trước và sau
+      Seed-VC. Đây là mục quyết định giọng tiếng Nhật đi đường nào
+- [ ] Seed-VC convert từ giọng HTS máy móc có ra hồn không — rủi ro duy nhất
+      chưa đo được của việc đổi engine
+- [ ] `pyopenjtalk==0.4.1` build được trong image (PyPI chỉ có sdist, không có
+      wheel) — bước `pyopenjtalk.g2p` lúc build sẽ làm deploy đỏ nếu không
 - [ ] **tiếng Nhật đọc đúng chữ** — đây là mục quan trọng nhất của phase này,
       vì bản đầu đã sai đúng chỗ đó: っ và ー còn nguyên độ dài, きって không
       thành きて

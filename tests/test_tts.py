@@ -48,12 +48,21 @@ def test_the_model_id_is_the_mms_checkpoint_for_the_language():
 
 def test_japanese_is_offered_and_does_not_read_through_mms():
     spec = tts.spec_for("jpn")
-    assert spec.engine == tts.KOKORO
+    assert spec.engine != tts.MMS
     assert spec.label == "日本語"
 
 
+def test_japanese_reads_through_the_engine_that_knows_where_the_pitch_falls():
+    """箸 and 橋 are both `hashi`, 雨 and 飴 are both `ame`, and which word it is
+    is where the pitch falls. Open JTalk reads that out of a dictionary;
+    Kokoro-82M v1.0 has no id in its vocabulary for an accent mark, so it can
+    only guess. The HTS voice is much less natural and that is the trade: the
+    timbre is Seed-VC's a step later, the words are not."""
+    assert tts.spec_for("jpn").engine == tts.OPENJTALK
+
+
 def test_asking_mms_for_japanese_is_an_error_not_a_silent_wrong_reading():
-    with pytest.raises(tts.TtsError, match="kokoro"):
+    with pytest.raises(tts.TtsError, match=tts.OPENJTALK):
         tts.model_id("jpn")
 
 
@@ -359,29 +368,57 @@ def test_the_natural_reading_is_what_a_request_that_says_nothing_gets():
     assert signature.parameters["expressiveness"].default == prosody.DEFAULT_EXPRESSIVENESS
 
 
-def test_the_seam_hands_both_engines_the_same_style():
+class _FakeEngine:
+    """Stands in for a `@app.cls` so the seam can be exercised without Modal."""
+
+    sent: dict = {}
+
+    def __init__(self, language):
+        type(self).sent = {"language": language}
+
+    @property
+    def synthesize(self):
+        return self
+
+    def remote(self, **kwargs):
+        type(self).sent.update(kwargs)
+        return b"wav"
+
+
+def test_the_seam_hands_every_engine_the_same_style():
     """Which model reads is `tts`'s business and the style is `prosody`'s, so
     the argument list cannot differ between them — a paragraph read in Japanese
     gets the same pauses as one read in Vietnamese."""
-    sent = {}
-
-    class Fake:
-        def __init__(self, language):
-            sent["language"] = language
-
-        @property
-        def synthesize(self):
-            return self
-
-        def remote(self, **kwargs):
-            sent.update(kwargs)
-            return b"wav"
-
-    for language, engine in (("vie", "Synthesizer"), ("jpn", "KokoroSynthesizer")):
-        with mock.patch.object(tts, engine, Fake):
+    for language in ("vie", "jpn"):
+        with mock.patch.dict(tts.ENGINES, dict.fromkeys(tts.ENGINES, _FakeEngine)):
             tts.synthesize(language, "Xin chào.", 1.0, emotion="warm", expressiveness=0.5)
-        assert sent["language"] == language
-        assert (sent["emotion"], sent["expressiveness"]) == ("warm", 0.5)
+        assert _FakeEngine.sent["language"] == language
+        assert (_FakeEngine.sent["emotion"], _FakeEngine.sent["expressiveness"]) == ("warm", 0.5)
+
+
+def test_every_engine_a_language_can_name_has_a_class_to_run_it():
+    assert {spec.engine for spec in tts.LANGUAGES.values()} <= set(tts.ENGINES)
+
+
+def test_the_smoke_test_can_force_the_other_engine_to_compare_it():
+    """The Japanese choice is a trade — dictionary accent against a much more
+    natural voice — and a trade wants ears rather than an argument. No request
+    can set this; only `modal run`."""
+    picked = []
+
+    class Recorder(_FakeEngine):
+        def __init__(self, language):
+            picked.append(language)
+            super().__init__(language)
+
+    for engine in ("", tts.KOKORO):
+        with mock.patch.dict(tts.ENGINES, {tts.OPENJTALK: Recorder, tts.KOKORO: Recorder}):
+            tts.synthesize("jpn", "こんにちは。", 1.0, engine=engine)
+    assert picked == ["jpn", "jpn"]
+
+    import inspect
+
+    assert "engine" not in inspect.signature(pipeline.clean_params).parameters
 
 
 # --- speaking rate --------------------------------------------------------
