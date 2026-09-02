@@ -162,6 +162,10 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
     form.set("text", input.text ?? "");
     form.set("language", input.params.language);
     form.set("speaking_rate", String(input.params.speakingRate));
+    // How it is read. Both are clamped server-side and both have a default, so
+    // a client that never learned about them still gets the natural reading.
+    form.set("emotion", input.params.emotion);
+    form.set("expressiveness", String(input.params.expressiveness));
   } else if (input.source) {
     form.set("input", input.source, input.source.name);
   }

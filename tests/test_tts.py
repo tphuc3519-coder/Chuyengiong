@@ -8,10 +8,11 @@ TTL as the audio, and never in the audit log.
 """
 
 import importlib
+from unittest import mock
 
 import pytest
 
-from modal_app import jobs, pipeline, storage, tts
+from modal_app import jobs, pipeline, prosody, storage, tts
 
 # --- language -------------------------------------------------------------
 
@@ -217,6 +218,102 @@ def test_every_segment_fits_the_default_budget():
     assert all(len(segment) <= tts.SEGMENT_MAX_CHARS for segment in tts.split_text(text))
 
 
+# --- paragraphs -----------------------------------------------------------
+#
+# `split_text` throws away where the blank lines were, and two of the reading
+# rules are about the start and the end of a paragraph — the pitch resets at one
+# and the silence is three quarters of a second rather than four tenths. So the
+# split keeps the structure and `split_text` is the flattened view of it.
+
+
+def test_a_blank_line_starts_a_new_block():
+    assert tts.split_blocks("Một. Hai.\n\nBa.") == [["Một.", "Hai."], ["Ba."]]
+
+
+def test_a_single_line_break_is_a_sentence_boundary_not_a_paragraph():
+    """Text pasted out of a document is full of wrapped lines. Only a blank
+    line means the writer stopped."""
+    assert tts.split_blocks("Một.\nHai.") == [["Một.", "Hai."]]
+
+
+def test_split_text_is_split_blocks_flattened():
+    text = "Một. Hai.\n\nBa.\n\n\nBốn."
+    assert tts.split_text(text) == [
+        segment for block in tts.split_blocks(text) for segment in block
+    ]
+
+
+def test_blocks_that_hold_nothing_are_dropped_rather_than_kept_empty():
+    assert tts.split_blocks("\n\n   \n\nMột.\n\n\n") == [["Một."]]
+
+
+# --- the reading ----------------------------------------------------------
+
+
+def test_the_pauses_between_segments_are_the_plan_not_one_fixed_gap():
+    """`_join` used to insert the same 0.25s everywhere. A comma, a full stop
+    and a blank line are three different silences, and the file gets longer as
+    they do."""
+    import numpy as np
+
+    from modal_app.audio_utils import decode_wav
+
+    voice = [np.zeros(1000, dtype=np.float32) for _ in range(2)]
+    voice[0][0] = 0.5
+    short, _ = decode_wav(tts._join(voice, 16000, [0.1, 0.0]))
+    long, _ = decode_wav(tts._join(voice, 16000, [0.6, 0.0]))
+    assert len(long) - len(short) == pytest.approx(0.5 * 16000, abs=2)
+
+
+def test_join_without_a_plan_still_reads_as_it_always_did():
+    """Nothing else calls it that way, but the fallback is what keeps `_join`
+    a wav writer rather than a second copy of the prosody rules."""
+    import numpy as np
+
+    from modal_app.audio_utils import decode_wav
+
+    voice = [np.zeros(1000, dtype=np.float32) for _ in range(2)]
+    voice[0][0] = 0.5
+    plain, _ = decode_wav(tts._join(voice, 16000))
+    planned, _ = decode_wav(tts._join(voice, 16000, [tts.SEGMENT_GAP_SEC, 0.0]))
+    assert len(plain) == len(planned)
+
+
+def test_the_natural_reading_is_what_a_request_that_says_nothing_gets():
+    """Every existing caller — and every form that predates the field — sends
+    no style at all, and has to keep getting the reading it was getting."""
+    import inspect
+
+    signature = inspect.signature(tts.synthesize)
+    assert signature.parameters["emotion"].default == prosody.DEFAULT_EMOTION
+    assert signature.parameters["expressiveness"].default == prosody.DEFAULT_EXPRESSIVENESS
+
+
+def test_the_seam_hands_both_engines_the_same_style():
+    """Which model reads is `tts`'s business and the style is `prosody`'s, so
+    the argument list cannot differ between them — a paragraph read in Japanese
+    gets the same pauses as one read in Vietnamese."""
+    sent = {}
+
+    class Fake:
+        def __init__(self, language):
+            sent["language"] = language
+
+        @property
+        def synthesize(self):
+            return self
+
+        def remote(self, **kwargs):
+            sent.update(kwargs)
+            return b"wav"
+
+    for language, engine in (("vie", "Synthesizer"), ("jpn", "KokoroSynthesizer")):
+        with mock.patch.object(tts, engine, Fake):
+            tts.synthesize(language, "Xin chào.", 1.0, emotion="warm", expressiveness=0.5)
+        assert sent["language"] == language
+        assert (sent["emotion"], sent["expressiveness"]) == ("warm", 0.5)
+
+
 # --- speaking rate --------------------------------------------------------
 
 
@@ -266,6 +363,28 @@ def test_clean_params_defaults_to_vietnamese_and_normal_speed():
     params = pipeline.clean_params("tts")
     assert params["language"] == tts.DEFAULT_LANGUAGE
     assert params["speaking_rate"] == tts.DEFAULT_SPEAKING_RATE
+    assert params["emotion"] == prosody.DEFAULT_EMOTION
+    assert params["expressiveness"] == prosody.DEFAULT_EXPRESSIVENESS
+
+
+def test_clean_params_carries_the_style_and_how_far_it_is_taken():
+    params = pipeline.clean_params("tts", {"emotion": "warm", "expressiveness": 0.5})
+    assert params["emotion"] == "warm"
+    assert params["expressiveness"] == 0.5
+
+
+def test_clean_params_falls_back_on_a_style_we_do_not_have():
+    """A language we cannot read is refused because reading it anyway produces
+    confident nonsense. A style we do not have costs nothing to ignore."""
+    params = pipeline.clean_params("tts", {"emotion": "wistful", "expressiveness": 99})
+    assert params["emotion"] == prosody.DEFAULT_EMOTION
+    assert params["expressiveness"] == prosody.EXPRESSIVENESS_MAX
+
+
+def test_the_style_is_not_a_setting_the_other_branches_carry():
+    """There is nothing to read on a branch that starts from a recording."""
+    for mode in ("song", "speech"):
+        assert "emotion" not in pipeline.clean_params(mode)
 
 
 def test_clean_params_refuses_a_language_we_do_not_speak():

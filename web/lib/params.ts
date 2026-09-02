@@ -117,6 +117,37 @@ export const SPEAKING_RATE_MIN = 0.5;
 export const SPEAKING_RATE_MAX = 2;
 export const DEFAULT_SPEAKING_RATE = 1;
 
+/**
+ * How the text is read, mirrored from `modal_app/prosody.py`.
+ *
+ * Neither synthesiser has an emotion input — both speak in one fixed voice —
+ * so a style here is not a label handed to a model. It is the five things the
+ * acoustic literature says actually differ between deliveries (pace, height,
+ * range, level, and how long the silences are) applied to the reading from the
+ * outside, per sentence. The backend falls back to the natural one for a name
+ * it does not know, so this list can never break a job; it just has to stay
+ * honest about what is on offer.
+ */
+export const EMOTIONS: { id: string; label: string; hint: string }[] = [
+  { id: "natural", label: "Tự nhiên", hint: "Đọc bình thường, đúng nhịp câu chữ" },
+  { id: "warm", label: "Ấm áp", hint: "Chậm và mềm hơn, hợp kể chuyện" },
+  { id: "cheerful", label: "Vui vẻ", hint: "Nhanh hơn, cao hơn, lên xuống rõ hơn" },
+  { id: "sad", label: "Trầm buồn", hint: "Chậm, thấp, ngắt nghỉ dài hơn" },
+  { id: "serious", label: "Nghiêm túc", hint: "Đều và chắc, kiểu đọc bản tin" },
+];
+export const DEFAULT_EMOTION = "natural";
+
+/**
+ * How far the style is taken, against a completely flat reading.
+ *
+ * 0 is not "no style" — it is the reading this app produced before there was
+ * one: every sentence the same pace, height and loudness. The pauses that come
+ * from punctuation survive it, because a comma is a pause whatever the mood is.
+ */
+export const EXPRESSIVENESS_MIN = 0;
+export const EXPRESSIVENESS_MAX = 1.5;
+export const DEFAULT_EXPRESSIVENESS = 1;
+
 export type Params = {
   /**
    * null = auto-detect (plan §7). Not the same as 0, which is a deliberate
@@ -129,6 +160,9 @@ export type Params = {
   /** `tts` only, ignored by the other two branches. */
   language: string;
   speakingRate: number;
+  /** How the text is read, and how far that is taken. `tts` only as well. */
+  emotion: string;
+  expressiveness: number;
 };
 
 export function defaultParams(mode: Mode): Params {
@@ -138,6 +172,8 @@ export function defaultParams(mode: Mode): Params {
     vocalGainDb: 0,
     language: DEFAULT_LANGUAGE,
     speakingRate: DEFAULT_SPEAKING_RATE,
+    emotion: DEFAULT_EMOTION,
+    expressiveness: DEFAULT_EXPRESSIVENESS,
   };
 }
 
@@ -168,6 +204,16 @@ export function forMode(params: Params, next: Mode, previous: Mode): Params {
 /** `1,0×` — the speaking rate as the slider labels it. */
 export function formatRate(rate: number): string {
   return `${rate.toFixed(2).replace(/0$/, "").replace(".", ",")}×`;
+}
+
+/**
+ * The expressiveness slider's own label.
+ *
+ * A percentage rather than the raw multiplier: 1 means "as much as this style
+ * normally has", which reads as 100% and not as a quantity of anything.
+ */
+export function formatExpressiveness(depth: number): string {
+  return `${Math.round(depth * 100)}%`;
 }
 
 /** `+3` / `−2` / `0`, with a real minus sign. */
