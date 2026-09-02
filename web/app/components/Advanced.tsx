@@ -97,9 +97,9 @@ export function Advanced({
                 ))}
               </div>
               <span className="slider-hint">
-                Nhịp ngắt nghỉ theo dấu câu, câu hỏi lên giọng ở cuối, giọng hạ dần trong một đoạn
-                rồi bắt lại ở đoạn sau — cái đó lúc nào cũng có. Chọn ở đây là chọn cái nền: nhanh
-                hay chậm, cao hay trầm, lên xuống nhiều hay ít.
+                Nhịp ngắt nghỉ theo dấu câu, câu hỏi đọc cao hơn, giọng hạ dần trong một đoạn rồi
+                bắt lại ở đoạn sau — cái đó lúc nào cũng có. Chọn ở đây là chọn cái nền: nhanh hay
+                chậm, cao hay trầm, lên xuống nhiều hay ít.
               </span>
             </div>
 

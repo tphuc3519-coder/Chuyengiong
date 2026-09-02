@@ -95,11 +95,28 @@ def test_a_segment_is_classified_by_what_closes_it(segment, kind):
 
 
 def test_a_japanese_question_ending_in_ka_is_a_question_without_a_question_mark():
-    """「そうですか。」 is a question and ends in a full stop. Only the final
-    position is read, so the か that means "or" mid-sentence is untouched."""
+    """「そうですか。」 is a question and ends in a full stop."""
     assert prosody.classify("そうですか。") == prosody.QUESTION
-    assert prosody.classify("元気ですか") == prosody.QUESTION
     assert prosody.classify("コーヒーか紅茶をください。") == prosody.SENTENCE
+
+
+def test_a_bare_ka_is_the_particle_only_where_a_sentence_really_ends():
+    """か is an ordinary syllable in ordinary words — しずか, なんとか, たしか —
+    and Japanese gives `_wrap` no spaces to cut a long sentence at, so a
+    fragment ending in one is common. Reading it as a question puts a question's
+    intonation in the middle of a statement."""
+    for fragment in ("きょうはとてもしずか", "なんとか", "コーヒーか紅茶か"):
+        assert prosody.classify(fragment) == prosody.RUN_ON
+    # …but a whole sentence typed without a full stop is still a question.
+    assert prosody.classify("元気ですか", sentence_end=True) == prosody.QUESTION
+
+
+def test_the_last_segment_of_a_paragraph_is_told_a_sentence_ends_there():
+    """Which is what makes the rule above usable: the writer who leaves the
+    full stop off 「元気ですか」 leaves it off at the end of the text."""
+    assert plan([["元気ですか"]])[0].kind == prosody.QUESTION
+    # The same fragment mid-paragraph is a cut, not a question.
+    assert plan([["きょうはとてもしずか", "でした。"]])[0].kind == prosody.RUN_ON
 
 
 def test_a_closing_quote_does_not_hide_the_punctuation_under_it():
@@ -151,10 +168,13 @@ def test_a_blank_line_is_a_longer_silence_than_a_full_stop():
     assert across > same
 
 
-def test_a_question_rises_and_a_statement_does_not():
-    rises, flat = plan([["Thật à?", "Ừ."]])
-    assert rises.rise > 0
-    assert flat.rise == 0
+def test_a_question_is_read_higher_than_the_statement_beside_it():
+    """It used to end on a rising glide, which is the better imitation and is
+    gone: drawing a contour inside an utterance needs a phase vocoder, and
+    `_transpose` carries the account of what that did to Japanese. Overall F0
+    going up on a question is the cue that survives."""
+    question, statement = plan([["Thật à?", "Ừ."]])
+    assert question.pitch > statement.pitch
 
 
 def test_pitch_declines_across_a_paragraph_and_starts_again_at_the_next():
@@ -200,9 +220,16 @@ def test_a_sad_read_is_slower_with_longer_gaps_than_a_cheerful_one():
 
 def test_expressiveness_zero_is_the_flat_read_this_used_to_produce():
     beats = plan([["Thật à?", "Tuyệt vời!"], ["Ừ thì…"]], emotion="cheerful", expressiveness=0)
-    assert all(beat.pitch == 0 and beat.gain_db == 0 and beat.rise == 0 for beat in beats)
+    assert all(beat.pitch == 0 and beat.gain_db == 0 for beat in beats)
     assert all(beat.rate == pytest.approx(1.0) for beat in beats)
     assert all(beat.variation == 1.0 for beat in beats)
+
+
+def test_a_flat_read_asks_the_engine_for_exactly_what_it_wants_heard():
+    """No pitch move means no resample, so the two rates are the same number
+    and the engine is driven exactly as it was before there was a plan."""
+    for beat in plan([["Thật à?", "Ừ."]], expressiveness=0):
+        assert beat.synth_rate == pytest.approx(beat.rate)
 
 
 def test_a_flat_read_still_pauses_where_the_punctuation_says_to():
@@ -217,8 +244,26 @@ def test_more_expressiveness_takes_every_deviation_further():
     half = plan([["Thật à?"]], emotion="cheerful", expressiveness=0.5)[0]
     whole = plan([["Thật à?"]], emotion="cheerful", expressiveness=1.0)[0]
     assert abs(half.pitch) < abs(whole.pitch)
-    assert half.rise < whole.rise
     assert abs(half.gain_db) < abs(whole.gain_db)
+
+
+# --- the rate the engine is actually given --------------------------------
+
+
+def test_the_engine_is_asked_to_pay_for_what_the_transposition_will_take():
+    """`shape` transposes by resampling, which shortens what it raises. So the
+    engine is asked for the reciprocal and the sentence lands on the pace the
+    listener was meant to hear. Feeding it `rate` instead is how every sentence
+    with a pitch move comes out the wrong length."""
+    for beat in plan([["Thật à?", "Tuyệt vời!", "Ừ thì…", "Xong."]], emotion="cheerful"):
+        heard = beat.synth_rate * prosody.semitone_ratio(beat.pitch)
+        assert heard == pytest.approx(beat.rate)
+
+
+def test_a_sentence_read_higher_is_spoken_slower_to_pay_for_it():
+    raised = plan([["Thật à?"]])[0]
+    assert raised.pitch > 0
+    assert raised.synth_rate < raised.rate
 
 
 def test_a_style_moves_the_noise_scales_as_multipliers_not_values():
@@ -257,10 +302,8 @@ def test_shaping_never_clips_because_the_join_normalises_afterwards():
     """`tts._join` scales the finished wav to a fixed peak. Clipping here would
     throw away the headroom it is about to use."""
     audio = np.full(1000, 0.95, dtype=np.float32)
-    assert (
-        float(np.abs(prosody.shape(audio, 16000, Beat("x", prosody.SENTENCE, 1, 0, 6.0))).max())
-        > 1.0
-    )
+    loud = prosody.shape(audio, 16000, Beat("x", prosody.SENTENCE, gain_db=6.0))
+    assert float(np.abs(loud).max()) > 1.0
 
 
 def test_a_pitch_move_under_the_audible_threshold_is_not_worth_a_vocoder_pass():
@@ -270,34 +313,76 @@ def test_a_pitch_move_under_the_audible_threshold_is_not_worth_a_vocoder_pass():
     assert np.allclose(prosody.shape(audio, 16000, tiny), audio)
 
 
-def test_a_segment_too_short_to_have_a_tail_is_not_bent():
-    """The rise is the last third of a second of a sentence. A segment barely
-    longer than that would have all of itself transposed, which is not a final
-    rise — it is a higher sentence."""
-    audio = np.linspace(-0.4, 0.4, int(0.2 * 16000), dtype=np.float32)
-    assert np.allclose(prosody.shape(audio, 16000, Beat("x", prosody.QUESTION, rise=2.0)), audio)
+# --- the transposition ----------------------------------------------------
+#
+# These need librosa, which is in `base_image` and so in both synthesiser
+# images, but not in `requirements.txt` — CI skips them. They exist because the
+# first version of this module used `librosa.effects.pitch_shift`, a phase
+# vocoder, and it read Japanese wrong. What follows is the measurement that
+# says why, so nobody puts it back.
 
 
-def test_the_pitch_moves_are_capped_for_a_tonal_language():
-    """A whole sentence transposed is safe — the tone contours move with it.
-    The final rise is a contour of its own laid over the last syllable, and a
-    large one is the difference between asking a question and saying another
-    word. Vietnamese is the default language of this app."""
-    beats = plan(
-        [["Thật à?", "Tuyệt vời!", "Ừ."]],
-        emotion="cheerful",
-        expressiveness=prosody.EXPRESSIVENESS_MAX,
+def _voiced(sample_rate: int, stop_sec: float = 0.08):
+    """1.5s of a voiced tone with a `stop_sec` silence in it, like a geminate."""
+    t = np.arange(int(1.5 * sample_rate)) / sample_rate
+    audio = (0.4 * np.sin(2 * np.pi * 180 * t) + 0.2 * np.sin(2 * np.pi * 360 * t)).astype(
+        np.float32
     )
-    assert all(abs(beat.pitch) <= prosody.MAX_SENTENCE_PITCH_ST for beat in beats)
-    assert all(beat.rise <= prosody.MAX_RISE_ST for beat in beats)
+    audio[int(0.7 * sample_rate) : int((0.7 + stop_sec) * sample_rate)] = 0.0
+    return audio
 
 
-@pytest.mark.parametrize(
-    ("length", "window"),
-    [(32000, 2048), (1400, 1024), (900, 512), (300, 256), (100, 256)],
-)
-def test_the_transposition_window_shrinks_to_fit_short_audio(length, window):
-    """A glide step is ~90ms — 1400 samples at 16 kHz — and librosa's default
-    2048 window is longer than that. A window longer than the signal is padding
-    rather than analysis, and it warns on stderr once per step."""
-    assert prosody._window(length) == window
+def _longest_quiet_ms(audio, sample_rate: int, threshold: float = 0.02) -> float:
+    quiet = np.abs(audio) < threshold
+    best = run = 0
+    for is_quiet in quiet:
+        run = run + 1 if is_quiet else 0
+        best = max(best, run)
+    return 1000.0 * best / sample_rate
+
+
+def test_the_transposition_moves_the_pitch_by_what_it_was_asked_for():
+    pytest.importorskip("librosa")
+    from modal_app import pitch
+
+    sample_rate = 24000  # Kokoro's, which is the rate that got this wrong
+    audio = _voiced(sample_rate)
+    before = pitch.median_f0(audio, sample_rate, "speech")
+    for semitones in (-1.2, -0.6, 0.6, 2.5):
+        after = pitch.median_f0(prosody._transpose(audio, sample_rate, semitones), sample_rate)
+        assert 12 * np.log2(after / before) == pytest.approx(semitones, abs=0.05)
+
+
+def test_the_transposition_changes_the_length_by_exactly_what_synth_rate_undoes():
+    pytest.importorskip("librosa")
+    sample_rate = 24000
+    audio = _voiced(sample_rate)
+    for semitones in (-1.2, 0.6, 2.5):
+        moved = prosody._transpose(audio, sample_rate, semitones)
+        assert len(moved) / len(audio) == pytest.approx(
+            1 / prosody.semitone_ratio(semitones), rel=1e-3
+        )
+
+
+def test_the_transposition_keeps_a_stop_a_stop():
+    """The measurement this module was rewritten around. A phase vocoder
+    analyses in windows — librosa's default 2048 is 85ms at 24kHz — and smears
+    anything shorter than one across it: an 80ms stop came out at 37ms, which in
+    Japanese is the difference between きって and きて. Mora length is meaning
+    there, and every sentence went through it for a sub-semitone move nobody
+    would have noticed missing. A resample has no window."""
+    pytest.importorskip("librosa")
+    import librosa
+
+    sample_rate, stop_ms = 24000, 80.0
+    audio = _voiced(sample_rate, stop_sec=stop_ms / 1000)
+    assert _longest_quiet_ms(audio, sample_rate) == pytest.approx(stop_ms, abs=1)
+
+    vocoded = librosa.effects.pitch_shift(y=audio, sr=sample_rate, n_steps=0.6)
+    assert _longest_quiet_ms(vocoded, sample_rate) < stop_ms / 1.5
+
+    resampled = prosody._transpose(audio, sample_rate, 0.6)
+    # Shorter only by the transposition itself, which `synth_rate` pays back.
+    assert _longest_quiet_ms(resampled, sample_rate) == pytest.approx(
+        stop_ms / prosody.semitone_ratio(0.6), abs=3
+    )
