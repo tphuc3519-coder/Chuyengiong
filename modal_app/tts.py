@@ -547,6 +547,40 @@ kokoro_image = (
 
 KOKORO_REPO = "hexgrad/Kokoro-82M"
 KOKORO_SAMPLE_RATE = 24000
+
+# --- Japanese pitch accent ------------------------------------------------
+#
+# 箸 and 橋 are both `hashi`. 雨 and 飴 are both `ame`. What separates them is
+# where the pitch falls, and getting it wrong is not an accent — it is a
+# different word. So how the accent reaches the model is the single most
+# important thing about reading Japanese here.
+#
+# `misaki` has two Japanese front ends and `kokoro.KPipeline` builds the first
+# one, because `JAG2P()` defaults to `version='cutlet'`:
+#
+#   1st gen  cutlet -> fugashi -> mecab -> unidic-lite.  No accent marks at
+#            all: the phoneme string says which sounds, never which pitch, and
+#            the model is left to guess.
+#   2nd gen  `version='pyopenjtalk'`. `pyopenjtalk.run_frontend` returns an
+#            accent nucleus per word out of Open JTalk's dictionary, and the
+#            G2P appends a pitch track to the phoneme string — one character
+#            per phoneme, `_` low, `-` mid, `^` the fall.
+#
+# The second is plainly the one to want. Whether it can be used at all is a
+# question about the *checkpoint*, not about the library: `KModel.forward`
+# maps phonemes through `self.vocab` and **silently drops** everything it has
+# no id for, so handing the pitch track to a checkpoint that was not trained
+# with it does not fail — it quietly deletes the marks and pronounces whatever
+# is left, and `j`, the track's own filler character, is the IPA phoneme /j/.
+# That is a worse reading than not trying.
+#
+# So it is asked rather than assumed, the same way `Synthesizer.load` asks
+# whether MMS wants romanised input instead of hoping. The answer is in
+# `model.vocab`.
+ACCENT_MARKS = ("_", "-", "^")
+# Read to the log on load so the G2P chain is visible in a container's output
+# without one word of anybody's text passing through it.
+ACCENT_PROBE = "今日はいい天気ですね。"
 # Kokoro truncates a phoneme string past this, with a warning and no error.
 # `segment_max_chars` is set well under it; this is here to explain the margin.
 KOKORO_MAX_PHONEMES = 510
@@ -584,8 +618,57 @@ class KokoroSynthesizer:
         # `huggingface_hub`, so HF_HOME on the Volume is what keeps a second
         # container from downloading them again.
         self.pipeline = KPipeline(lang_code=spec.kokoro_code, repo_id=KOKORO_REPO)
+        self.accent = self._use_accent_g2p()
         model_vol.commit()
-        print(f"[KokoroSynthesizer] language={self.language} voice={spec.voice}")
+        print(
+            f"[KokoroSynthesizer] language={self.language} voice={spec.voice} accent={self.accent}"
+        )
+        print(f"[KokoroSynthesizer] {ACCENT_PROBE} -> {self._phonemes(ACCENT_PROBE)}")
+
+    def _use_accent_g2p(self) -> bool:
+        """Swap in misaki's accent-carrying front end, if the checkpoint reads it.
+
+        Returns whether it was swapped, and never raises: a reading without
+        accent marks is the reading this shipped with, and it is much better
+        than a container that will not start.
+
+        The gate is `model.vocab`, because that is what decides whether the
+        pitch track becomes input ids or becomes nothing. See `ACCENT_MARKS`.
+        """
+        model = getattr(self.pipeline, "model", None)
+        vocab = getattr(model, "vocab", None)
+        if not vocab:
+            print("[KokoroSynthesizer] no vocab to check; leaving the G2P alone")
+            return False
+
+        missing = [mark for mark in ACCENT_MARKS if mark not in vocab]
+        if missing:
+            # Expected for Kokoro-82M v1.0, which `KOKORO_REPO` points at: it
+            # was trained on the first generation's phonemes. Said out loud
+            # rather than passed over, because it is the ceiling on how right
+            # the Japanese can be here, and the next person to ask why should
+            # find the answer in the log.
+            print(
+                f"[KokoroSynthesizer] {KOKORO_REPO} has no id for {missing} — it cannot be "
+                "told where the pitch falls, so the accent is the model's guess"
+            )
+            return False
+
+        try:
+            from misaki import ja
+        except ImportError:
+            print("[KokoroSynthesizer] misaki[ja] is not importable; leaving the G2P alone")
+            return False
+        self.pipeline.g2p = ja.JAG2P(version="pyopenjtalk")
+        return True
+
+    def _phonemes(self, text: str) -> str:
+        """What the G2P makes of `text`, for the log. Never user text."""
+        try:
+            result = self.pipeline.g2p(text)
+        except Exception as exc:  # a front end that cannot read the probe
+            return f"<{type(exc).__name__}: {exc}>"
+        return result[0] if isinstance(result, tuple) else str(result)
 
     @modal.method()
     def synthesize(

@@ -822,6 +822,45 @@ regex cũ đòi khoảng trắng sau dấu chấm nên nguyên đoạn văn sẽ
 700 ký tự. `_SENTENCE_END` có thêm nhánh khớp rỗng sau `。！？`, và `_CLAUSE_BREAKS`
 có thêm `、`.
 
+### Trọng âm tiếng Nhật — trần của cách làm hiện tại
+
+箸 và 橋 đều là `hashi`. 雨 và 飴 đều là `ame`. Cái phân biệt chúng là chỗ cao độ
+rơi xuống, nên **đọc sai trọng âm không phải là giọng lạ, mà là ra từ khác**.
+
+`kokoro.KPipeline` dựng `misaki.ja.JAG2P()` — và mặc định của nó là
+`version='cutlet'`, tức front end **đời một**:
+
+| | chuỗi | trọng âm |
+|---|---|---|
+| đời 1 (`cutlet`) | cutlet → fugashi → mecab → unidic-lite | **không có** |
+| đời 2 (`pyopenjtalk`) | `pyopenjtalk.run_frontend` → nhân trọng âm theo từ điển Open JTalk | có, dạng dải `_` thấp / `-` giữa / `^` chỗ rơi, một ký tự mỗi phoneme |
+
+Đời hai rõ ràng là cái nên dùng. Nhưng **dùng được hay không là câu hỏi về
+checkpoint chứ không phải về thư viện**: `KModel.forward` map phoneme qua
+`self.vocab` và **bỏ im lặng** mọi thứ không có id. Đưa dải trọng âm cho một
+checkpoint không được huấn luyện với nó thì không lỗi — nó lặng lẽ xoá các dấu
+đi và đọc phần còn lại, mà `j` (ký tự độn của dải) lại đúng là phoneme IPA /j/.
+Đọc còn tệ hơn là không thử.
+
+Nên `KokoroSynthesizer.load` **hỏi thay vì đoán**, đúng kiểu cổng `is_uroman`
+của MMS: nếu `model.vocab` có id cho `_ - ^` thì đổi sang front end đời hai;
+không có thì giữ nguyên và **nói ra trong log**. Kèm một câu thăm dò cố định
+(`今日はいい天気ですね。`, không phải chữ của người dùng) in ra chuỗi phoneme, để
+nhìn log là biết chuỗi G2P đang chạy cái gì.
+
+Nếu log nói `hexgrad/Kokoro-82M` không có id cho các dấu đó thì **đấy là trần**:
+bản v1.0 không thể được cho biết cao độ rơi ở đâu, trọng âm là model tự đoán.
+Ba đường đi tiếp, không cái nào làm mù được:
+
+1. chấp nhận — Seed-VC giữ nguyên trọng âm sai của bản đọc gốc, nên nó đi thẳng
+   ra sản phẩm;
+2. đổi engine tiếng Nhật sang thứ lấy trọng âm từ từ điển — `pyopenjtalk` đã có
+   sẵn trong image và Open JTalk tự nó là một TTS đầy đủ. Giọng HTS nghe rất máy,
+   nhưng đúng theo tiêu chí của repo (chọn checkpoint vì *đúng*, không vì đẹp —
+   timbre bị Seed-VC thay ngay bước sau). Rủi ro chưa đo: Seed-VC convert từ
+   giọng HTS máy móc có ra hồn không;
+3. đợi một bản Kokoro có trọng âm cho tiếng Nhật.
+
 ### Số và ký hiệu không được đọc
 
 Tokenizer của MMS làm việc trên ký tự, theo một bảng từ vựng chỉ có chữ cái và
@@ -1011,6 +1050,9 @@ không ai đưa nó trở lại.
 - [ ] cùng đoạn văn qua cả năm style: nghe ra khác nhau, và không style nào
       nghe như đang diễn
 - [ ] `--expressiveness 0` → đúng bằng bản đọc Phase 8 (trừ ngắt nghỉ theo dấu câu)
+- [ ] **log cold start của `KokoroSynthesizer` nói `accent=` là gì** — đây là
+      câu trả lời cho việc trọng âm tiếng Nhật có sửa được trong engine này hay
+      không, và nó in ra ngay dòng đầu
 - [ ] **tiếng Nhật đọc đúng chữ** — đây là mục quan trọng nhất của phase này,
       vì bản đầu đã sai đúng chỗ đó: っ và ー còn nguyên độ dài, きって không
       thành きて

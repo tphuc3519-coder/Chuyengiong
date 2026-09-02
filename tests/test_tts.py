@@ -8,6 +8,7 @@ TTL as the audio, and never in the audit log.
 """
 
 import importlib
+import types
 from unittest import mock
 
 import pytest
@@ -277,6 +278,75 @@ def test_join_without_a_plan_still_reads_as_it_always_did():
     plain, _ = decode_wav(tts._join(voice, 16000))
     planned, _ = decode_wav(tts._join(voice, 16000, [tts.SEGMENT_GAP_SEC, 0.0]))
     assert len(plain) == len(planned)
+
+
+# --- Japanese pitch accent ------------------------------------------------
+#
+# 箸 and 橋 are both `hashi`; 雨 and 飴 are both `ame`. Where the pitch falls is
+# what separates them, so getting it wrong is a different word rather than an
+# accent. `kokoro.KPipeline` builds `misaki.ja.JAG2P()`, whose default is the
+# first-generation front end — cutlet, which emits no accent marks at all.
+# The second one does, and whether it can be used is a question about the
+# checkpoint's vocabulary, so the code asks instead of assuming.
+
+
+def _probe_accent(vocab, misaki=None):
+    """`_use_accent_g2p` against a checkpoint whose vocab is `vocab`."""
+    import sys
+    from unittest import mock
+
+    fake = types.SimpleNamespace(
+        pipeline=types.SimpleNamespace(model=types.SimpleNamespace(vocab=vocab), g2p="cutlet")
+    )
+    # `None` in sys.modules makes `import misaki` raise ImportError, which is
+    # what a box without misaki[ja] does and what CI is.
+    modules = (
+        {"misaki": misaki, "misaki.ja": getattr(misaki, "ja", None)} if misaki else {"misaki": None}
+    )
+    with mock.patch.dict(sys.modules, modules):
+        used = tts.KokoroSynthesizer._use_accent_g2p(fake)
+    return used, fake.pipeline.g2p
+
+
+def test_the_accent_marks_are_the_ones_misaki_appends():
+    """`_` low, `-` mid, `^` the fall — one character per phoneme, appended to
+    the phoneme string as a parallel track."""
+    assert set(tts.ACCENT_MARKS) == {"_", "-", "^"}
+
+
+def test_a_checkpoint_with_no_id_for_the_marks_keeps_the_front_end_it_had():
+    """`KModel.forward` maps phonemes through `vocab` and silently drops what
+    it cannot find, so handing the pitch track to a checkpoint that was not
+    trained on it deletes the marks and reads what is left — and `j`, the
+    track's filler, is the IPA phoneme /j/. Quietly worse than not trying."""
+    used, g2p = _probe_accent({"a": 1, "i": 2, "j": 3})
+    assert used is False
+    assert g2p == "cutlet"
+
+
+def test_a_checkpoint_that_reads_the_marks_gets_the_accent_front_end():
+    accent_g2p = object()
+    misaki = types.ModuleType("misaki")
+    misaki.ja = types.SimpleNamespace(JAG2P=lambda version: accent_g2p)
+    vocab = {mark: i for i, mark in enumerate(tts.ACCENT_MARKS)}
+    used, g2p = _probe_accent(vocab, misaki=misaki)
+    assert used is True
+    assert g2p is accent_g2p
+
+
+def test_the_gate_never_stops_the_container_starting():
+    """A reading with no accent marks is the reading this shipped with. A
+    container that will not start is not."""
+    # No vocab to ask, and a vocab that says yes but no misaki to import.
+    assert _probe_accent(None) == (False, "cutlet")
+    assert _probe_accent({mark: 1 for mark in tts.ACCENT_MARKS}) == (False, "cutlet")
+
+
+def test_the_probe_sentence_is_ours_and_not_the_users():
+    """It is read to the log on every cold start so the G2P chain is visible in
+    a container's output. What the user wrote never goes there — the same rule
+    the audit log has been under all along."""
+    assert tts.ACCENT_PROBE and all(not ch.isascii() or ch == "。" for ch in tts.ACCENT_PROBE)
 
 
 def test_the_natural_reading_is_what_a_request_that_says_nothing_gets():
