@@ -196,8 +196,10 @@ async def submit(
         )
         # Text and audio are the same thing to everything downstream — the
         # bytes a job starts from — so they are validated in the same place and
-        # answered with the same 400.
-        text_bytes = check_text(text).encode("utf-8") if mode == "tts" else None
+        # answered with the same 400. The language comes from `params` rather
+        # than the form field because that one has been checked; how long the
+        # text may be depends on it (Japanese says more per character).
+        text_bytes = check_text(text, params["language"]).encode("utf-8") if mode == "tts" else None
     except (jobs.JobError, SeparationError, AudioError, TtsError, ValueError) as exc:
         # Every one of these is something the client sent, not a fault here.
         raise HTTPException(400, str(exc)) from exc

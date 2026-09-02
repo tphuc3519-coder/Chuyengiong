@@ -8,3 +8,8 @@ ruff>=0.6
 # Used by modal_app/audio_utils.py, which runs both in the container and in
 # the unit tests. Pinned below 2 to match the audio stack in the images.
 numpy>=1.26,<2
+
+# Romaji -> kana for `modal_app/tts.to_kana`. Pure Python and tiny; it is here
+# rather than only in the Kokoro image so CI runs the conversion for real
+# instead of asserting against a mock of it. The image gets it via misaki[ja].
+jaconv>=0.3

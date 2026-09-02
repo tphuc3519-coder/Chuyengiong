@@ -345,7 +345,7 @@ def run_tts_pipeline(job_id: str, params: dict) -> str:
     """
     from .conversion import VoiceConverter
     from .mixing import to_mp3
-    from .tts import Synthesizer
+    from .tts import synthesize
 
     started = time.monotonic()
     data_vol.reload()
@@ -354,7 +354,11 @@ def run_tts_pipeline(job_id: str, params: dict) -> str:
         spoken = _done_already(job_id, SPOKEN)
         if spoken is None:
             text = storage.get(job_id, TEXT).decode("utf-8")
-            spoken = Synthesizer(language=params["language"]).synthesize.remote(
+            # Which model reads it is `tts`'s business, not this one's: Japanese
+            # goes to a different engine than Vietnamese and the pipeline is the
+            # same either way.
+            spoken = synthesize(
+                params["language"],
                 text=text,
                 speaking_rate=params["speaking_rate"],
             )

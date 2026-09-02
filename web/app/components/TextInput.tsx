@@ -2,7 +2,7 @@
 
 import { useId } from "react";
 
-import { LANGUAGES, MAX_TEXT_CHARS } from "@/lib/params";
+import { LANGUAGES, maxCharsFor } from "@/lib/params";
 
 /**
  * What the `tts` branch has instead of a file: a box to write in, and the
@@ -14,9 +14,14 @@ import { LANGUAGES, MAX_TEXT_CHARS } from "@/lib/params";
  * beside the text it applies to.
  *
  * The counter turns into a warning before the limit rather than at it: the
- * backend refuses text past `MAX_TEXT_CHARS` outright, and finding that out
- * after writing three paragraphs and uploading a voice sample is a bad way to
- * learn it. `maxLength` stops the typing; the counter explains why.
+ * backend refuses text past the limit outright, and finding that out after
+ * writing three paragraphs and uploading a voice sample is a bad way to learn
+ * it. `maxLength` stops the typing; the counter explains why.
+ *
+ * The limit moves with the language — 700 characters of Japanese is as much
+ * speech as 2000 of Vietnamese — so switching language can leave text already
+ * over it. `maxLength` cannot take words back, so the counter goes red and
+ * says how many are past; the page keeps the button disabled until they are.
  */
 export function TextInput({
   text,
@@ -33,8 +38,9 @@ export function TextInput({
 }) {
   const textId = useId();
   const languageId = useId();
-  const left = MAX_TEXT_CHARS - text.length;
-  const tight = left <= MAX_TEXT_CHARS / 10;
+  const limit = maxCharsFor(language);
+  const left = limit - text.length;
+  const tight = left <= limit / 10;
 
   return (
     <div className="composer">
@@ -46,7 +52,7 @@ export function TextInput({
         className="composer-text"
         value={text}
         rows={6}
-        maxLength={MAX_TEXT_CHARS}
+        maxLength={limit}
         disabled={disabled}
         placeholder="Gõ hoặc dán đoạn văn bản muốn nghe bằng giọng mẫu…"
         onChange={(event) => onText(event.target.value)}
@@ -69,7 +75,7 @@ export function TextInput({
           </select>
         </label>
         <span className={tight ? "composer-count is-tight" : "composer-count"}>
-          còn {left} ký tự
+          {left < 0 ? `thừa ${-left} ký tự` : `còn ${left} ký tự`}
         </span>
       </div>
 
@@ -83,6 +89,12 @@ export function TextInput({
         Viết số và ký hiệu thành chữ — “25” hay “%” sẽ bị bỏ qua khi đọc. Chấm câu thì giữ nguyên,
         nó là chỗ ngắt nghỉ.
       </p>
+      {/* Nobody has an IME on every device they own. */}
+      {language === "jpn" && (
+        <p className="field-note">
+          Gõ romaji cũng được: “konnichiwa” đọc ra こんにちわ. Kana và kanji thì giữ nguyên.
+        </p>
+      )}
     </div>
   );
 }

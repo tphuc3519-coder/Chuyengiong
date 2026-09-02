@@ -78,26 +78,40 @@ export const AUDIO_ACCEPT = [
 /**
  * The `tts` branch, mirrored from `modal_app/tts.py`.
  *
- * The list is short because it is the list of MMS-TTS checkpoints that read
- * their language as it is written. Everything outside a Latin script needs the
- * text romanised first, and a checkpoint handed unromanised text returns
- * silence rather than an error — so the backend refuses what is not here, and
- * this offers nothing it would refuse.
+ * Most of these are MMS-TTS checkpoints that read their language as it is
+ * written. Everything outside a Latin script would need the text romanised
+ * first, and a checkpoint handed unromanised text returns silence rather than
+ * an error — so the backend refuses what is not on this list, and this offers
+ * nothing it would refuse.
+ *
+ * Japanese is read by a different engine for exactly that reason: the
+ * romaniser MMS was trained with turns kanji into Mandarin. See the module
+ * docstring in `modal_app/tts.py` — it carries the measurements.
+ *
+ * `maxChars` differs per language because a character is not a unit of speech.
+ * 2000 characters of Vietnamese and 700 of Japanese are the same two or three
+ * minutes of audio, and the cap is there to bound the recording.
  */
-export const LANGUAGES: { id: string; label: string }[] = [
-  { id: "vie", label: "Tiếng Việt" },
-  { id: "eng", label: "English" },
-  { id: "ind", label: "Bahasa Indonesia" },
-  { id: "fra", label: "Français" },
-  { id: "spa", label: "Español" },
-  { id: "deu", label: "Deutsch" },
-  { id: "por", label: "Português" },
-  { id: "ita", label: "Italiano" },
+export const LANGUAGES: { id: string; label: string; maxChars: number }[] = [
+  { id: "vie", label: "Tiếng Việt", maxChars: 2000 },
+  { id: "eng", label: "English", maxChars: 2000 },
+  { id: "jpn", label: "日本語", maxChars: 700 },
+  { id: "ind", label: "Bahasa Indonesia", maxChars: 2000 },
+  { id: "fra", label: "Français", maxChars: 2000 },
+  { id: "spa", label: "Español", maxChars: 2000 },
+  { id: "deu", label: "Deutsch", maxChars: 2000 },
+  { id: "por", label: "Português", maxChars: 2000 },
+  { id: "ita", label: "Italiano", maxChars: 2000 },
 ];
 export const DEFAULT_LANGUAGE = "vie";
 
-/** ~2 to 3 minutes of speech; past that the conversion is the expensive half. */
+/** The ceiling, for a language that somehow is not on the list. */
 export const MAX_TEXT_CHARS = 2000;
+
+/** ~2 to 3 minutes of speech, in whatever the language spends per character. */
+export function maxCharsFor(language: string): number {
+  return LANGUAGES.find((item) => item.id === language)?.maxChars ?? MAX_TEXT_CHARS;
+}
 
 export const SPEAKING_RATE_MIN = 0.5;
 export const SPEAKING_RATE_MAX = 2;

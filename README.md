@@ -17,7 +17,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 5 | Pitch auto-detect | 🟡 code xong, acceptance §7 pass bằng tone tổng hợp |
 | 6 | Consent gate & an toàn | 🟡 code xong, chờ verify watermark trên hạ tầng thật |
 | 7 | Audio watermark (§8 "cân nhắc thêm") | 🟡 code xong, chờ chạy checkpoint thật |
-| 8 | Text to speech theo giọng mẫu | 🟡 code xong, chờ nghe thật trên container |
+| 8 | Text to speech theo giọng mẫu (có tiếng Nhật) | 🟡 code xong, chờ nghe thật trên container |
 
 ## Cấu trúc
 
@@ -28,7 +28,7 @@ modal_app/
 ├── audio_utils.py  # chunk theo silence, crossfade, validate — numpy thuần, test được
 ├── separation.py   # tách stem trên GPU: Separator (@app.cls) — port từ tachnhac
 ├── conversion.py   # Seed-VC trên GPU: VoiceConverter (@app.cls)
-├── tts.py          # MMS-TTS trên CPU: Synthesizer (@app.cls) — văn bản → wav
+├── tts.py          # văn bản → wav trên CPU: Synthesizer (MMS) + KokoroSynthesizer (tiếng Nhật)
 ├── mixing.py       # ffmpeg: mix vocal + nhạc nền, encode mp3
 ├── pipeline.py     # orchestration: spawn + nối các bước, cập nhật job state
 ├── storage.py      # file trên Volume + cron dọn rác
@@ -704,13 +704,19 @@ giọng mẫu.
 
 ```
 tts:  input.txt ──► Synthesizer ──► spoken.wav ──► VoiceConverter ──► output.mp3
+                    (MMS · 8 ngôn ngữ chữ Latin)
+                    KokoroSynthesizer
+                    (tiếng Nhật)
 ```
 
 Điểm chính của thiết kế: **không có model cloning thứ hai**. Bước đọc chữ chỉ
-tạo ra một bản thu bằng giọng tổng hợp sẵn có của MMS; cái làm nó thành giọng
-của người dùng vẫn là Seed-VC ở nhánh `speech`, y nguyên code đang chạy. Nhờ
-vậy pitch auto-detect, chuẩn hoá độ ồn, watermark, consent gate, TTL — tất cả
-là code cũ chứ không phải bản sao thứ hai của chúng.
+tạo ra một bản thu bằng giọng tổng hợp sẵn có; cái làm nó thành giọng của người
+dùng vẫn là Seed-VC ở nhánh `speech`, y nguyên code đang chạy. Nhờ vậy pitch
+auto-detect, chuẩn hoá độ ồn, watermark, consent gate, TTL — tất cả là code cũ
+chứ không phải bản sao thứ hai của chúng.
+
+`tts.synthesize(language, ...)` là chỗ duy nhất chọn engine; `pipeline.py` chỉ
+biết ngôn ngữ, không biết model nào đọc.
 
 ### Vì sao MMS-TTS chứ không phải một TTS zero-shot
 
@@ -724,17 +730,80 @@ Whisper-small mà Seed-VC đang dùng.
 thực trên vài core, nên GPU sẽ dành phần lớn thời gian để cold start. GPU trong
 pipeline này thuộc về bước chuyển giọng.
 
-### Ngôn ngữ: chỉ chữ Latin, và đó là một cái gate chứ không phải một danh sách
+### Ngôn ngữ: một cái gate chứ không phải một danh sách
 
 MMS phủ ~1100 ngôn ngữ nhưng thứ ngoài chữ Latin phải romanise bằng `uroman`
 trước, và checkpoint nhận chữ chưa romanise thì trả về **im lặng chứ không phải
-lỗi**. Nên `LANGUAGES` chỉ liệt kê những thứ đọc được nguyên văn (vie, eng, ind,
-fra, spa, deu, por, ita), backend từ chối ngôn ngữ không có trong đó, và
-`Synthesizer.load` còn kiểm tra `tokenizer.is_uroman` một lần nữa. Thêm ngôn ngữ
-= thêm vào dict rồi chạy smoke test, không phải hy vọng.
+lỗi**. Nên nhánh MMS của `LANGUAGES` chỉ liệt kê những thứ đọc được nguyên văn
+(vie, eng, ind, fra, spa, deu, por, ita), backend từ chối ngôn ngữ không có
+trong bảng, và `Synthesizer.load` còn kiểm tra `tokenizer.is_uroman` một lần
+nữa. Thêm ngôn ngữ = thêm vào bảng rồi chạy smoke test, không phải hy vọng.
 
 Ngôn ngữ sai cũng bị từ chối chứ không rơi về mặc định: đọc tiếng Việt bằng
 checkpoint tiếng Anh cho ra một bản thu trôi chảy của thứ vô nghĩa, tệ hơn lỗi.
+
+### Tiếng Nhật: engine riêng, và đây là số đo chứ không phải phỏng đoán
+
+`facebook/mms-tts-jpn` là ngõ cụt, kiểm chứng được bằng chính `uroman` — thứ
+MMS dùng cả lúc train lẫn lúc chạy:
+
+```
+今日はいい天気ですね。  ->  jinrihaiitianqidesune.     (đúng: kyou wa ii tenki desu ne)
+私の名前は田中です。    ->  sinomingqianhatianzhongdesu. (đúng: watashi no namae wa tanaka desu)
+```
+
+Kanji ra **âm Hán ngữ**: 今日 thành "jinri", 天気 thành "tianqi", 田中 thành
+"tianzhong"; truyền `lcode='jpn'` không đổi gì. Kana thì ổn, nhưng văn xuôi
+tiếng Nhật khoảng một nửa là kanji. Đó chính là văn bản mà `mms-tts-jpn` học từ
+đó — nên đưa romaji đúng vào cũng lệch phân phối, mà đưa output của uroman vào
+thì lệch ngôn ngữ. Không có đường nào ra tiếng Nhật thật.
+
+Nên tiếng Nhật đọc bằng **Kokoro** (`hexgrad/Kokoro-82M`, Apache-2.0, 82M
+tham số, chạy CPU), với front end `misaki[ja]` — G2P có từ điển và phân tích
+hình thái thật:
+
+```
+今日はいい天気ですね。      ->  kʲoː βa iː teŋkʲi desɨ ne.
+私の名前は田中です。        ->  βatakɯɕi no namae βa tanaka desɨ.
+よろしくお願いします。      ->  joɾoɕikɯ oneɡai ɕi masɨ.
+```
+
+Một engine thì gọn hơn. Hai engine là thứ ngôn ngữ này cần.
+
+**Bẫy `unidic`.** `misaki[ja]` khai báo phụ thuộc `unidic` — package này *không*
+chứa từ điển, nó chỉ là bộ tải về, mà `fugashi` lại ưu tiên nó hơn `unidic-lite`
+khi có cả hai. Container chết ngay trong `Tagger()`:
+
+```
+param.cpp(69) [ifs] no such file or directory: .../unidic/dicdir/mecabrc
+```
+
+Nên image cài `unidic-lite` rồi `pip uninstall -y unidic`. Cách khác là chạy
+`python -m unidic download` lúc build, tốn ~700 MB image cho những cách đọc mà
+`unidic-lite` đã có sẵn.
+
+**Giới hạn ký tự theo ngôn ngữ.** Ký tự không phải đơn vị của lời nói: 2000 ký
+tự tiếng Việt và 700 ký tự tiếng Nhật là cùng khoảng 2–3 phút audio. Giới hạn
+đặt lên bản ghi chứ không đặt lên bàn phím, nên nó nằm trong `Language` cùng với
+`segment_max_chars` (200 vs 80 — đo trên G2P thật thì 80 ký tự tiếng Nhật ra
+~200 phoneme, còn Kokoro cắt cụt ở 510).
+
+**Romaji cũng đọc được.** Không phải máy nào cũng có IME, nên gõ `konnichiwa`
+phải ra được こんにちわ. Front end của Kokoro cho chữ Latin đi thẳng qua không
+đổi, nên `tts.to_kana` chuyển romaji sang kana *trước* khi cắt câu (kana mới là
+đơn vị của `segment_max_chars`). Romaji là chữ ghi âm nên đây là đổi chính tả
+chứ không phải dịch — `kyou wa ii tenki desu ne.` ra đúng bộ phoneme
+`kʲoː βa iː teŋkʲi desɨ ne.` mà `今日はいい天気ですね。` cho.
+
+Một cái bẫy nhỏ trong đó: romaji kiểu wapuro viết ん trước nguyên âm là `nn`
+hoặc `n'`, mà `jaconv` chỉ đọc dạng có dấu nháy — `konnichiwa` ra こん**い**ちわ,
+thiếu một mora và thành từ khác. `_ROMAJI_DOUBLE_N` viết lại `nn` thành `n'n`
+trước khi chuyển.
+
+**Cắt câu.** Tiếng Nhật viết 「です。」rồi vào câu sau, không có dấu cách nào cả —
+regex cũ đòi khoảng trắng sau dấu chấm nên nguyên đoạn văn sẽ thành một "câu"
+700 ký tự. `_SENTENCE_END` có thêm nhánh khớp rỗng sau `。！？`, và `_CLAUSE_BREAKS`
+có thêm `、`.
 
 ### Số và ký hiệu không được đọc
 
@@ -766,14 +835,26 @@ năm", và ngữ pháp số theo từng ngôn ngữ là một việc lớn hơn 
 ### Còn phải verify bằng hạ tầng thật
 
 Test trong CI phủ phần thuần logic — validate, cắt câu, clamp tốc độ, tham số
-job, và việc `/submit` nhận text thay cho file. Bản thân checkpoint thì chưa
-từng được nạp ở đây (`huggingface.co` không tới được từ máy viết code):
+job, và việc `/submit` nhận text thay cho file. Ngoài ra, những thứ dưới đây đã
+được **chạy thật** lúc viết code (PyPI tới được, chỉ HF là không): `uroman` trên
+tiếng Nhật, `misaki[ja]` G2P trên chính các segment mà `split_text` sinh ra,
+lỗi `unidic` và cách sửa, và việc resolve được cả `kokoro` lẫn `torch==2.4.0` +
+`transformers==4.46.3` + `numpy<2` trong cùng một môi trường.
+
+Còn checkpoint thì chưa từng được nạp ở đây (`huggingface.co` không tới được từ
+máy viết code):
 
 - [ ] `modal run -m modal_app.tts --text "Xin chào, đây là một câu thử."` → nghe được
 - [ ] tiếng Việt có dấu đọc đúng thanh điệu, không nuốt dấu
+- [ ] `--language jpn --text "今日はいい天気ですね。"` → ra tiếng Nhật thật, kanji
+      đọc đúng (đây là mục quan trọng nhất của cả phase này)
+- [ ] `--language jpn --text "kyou wa ii tenki desu ne."` → nghe giống hệt câu trên
+- [ ] `hexgrad/Kokoro-82M` tải được cả `kokoro-v1_0.pth` lẫn `voices/jf_alpha.pt`
 - [ ] chạy end-to-end với giọng mẫu thật: bản ra nghe giống giọng mẫu chứ không
-      phải giọng MMS pha
-- [ ] đoạn 2000 ký tự: mối nối giữa các câu không cụt, nhịp không trôi
+      phải giọng tổng hợp pha
+- [ ] đoạn dài kịch giới hạn (2000 ký tự Latin · 700 ký tự Nhật): mối nối giữa
+      các câu không cụt, nhịp không trôi
 - [ ] tốc độ đọc 0.5× và 2× vẫn hiểu được sau khi qua Seed-VC
 - [ ] container thứ hai không tải lại weights (HF_HOME trên Volume chạy đúng)
-- [ ] đo thời gian thật của bước synthesize trên CPU, để biết `cpu=4` là đủ hay thừa
+- [ ] đo thời gian thật của bước synthesize trên CPU cho cả hai engine, để biết
+      `cpu=4` là đủ hay thừa

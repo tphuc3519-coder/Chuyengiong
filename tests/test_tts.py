@@ -34,6 +34,117 @@ def test_the_model_id_is_the_mms_checkpoint_for_the_language():
     assert tts.model_id("vie") == "facebook/mms-tts-vie"
 
 
+# --- Japanese -------------------------------------------------------------
+#
+# It is the one language that does not read through MMS, because MMS reads a
+# non-Latin script by romanising it with `uroman` first and uroman renders
+# Japanese kanji in Mandarin: 今日 ("kyou") comes out "jinri", 田中 ("tanaka")
+# comes out "tianzhong". That is the text `facebook/mms-tts-jpn` was trained
+# on, so no romanisation on our side rescues it. Kokoro's `misaki[ja]` front
+# end is a dictionary-and-morphology G2P and reads both correctly.
+
+
+def test_japanese_is_offered_and_does_not_read_through_mms():
+    spec = tts.spec_for("jpn")
+    assert spec.engine == tts.KOKORO
+    assert spec.label == "日本語"
+
+
+def test_asking_mms_for_japanese_is_an_error_not_a_silent_wrong_reading():
+    with pytest.raises(tts.TtsError, match="kokoro"):
+        tts.model_id("jpn")
+
+
+def test_a_kokoro_language_carries_what_kokoro_needs():
+    for code, spec in tts.LANGUAGES.items():
+        if spec.engine != tts.KOKORO:
+            continue
+        assert spec.kokoro_code, code
+        assert spec.voice, code
+
+
+def test_japanese_splits_on_punctuation_that_carries_no_space():
+    """Japanese writes 「です。」 and starts the next sentence immediately, so a
+    splitter that needs whitespace after a full stop never fires."""
+    assert tts.split_text("今日はいい天気ですね。私の名前は田中です。") == [
+        "今日はいい天気ですね。",
+        "私の名前は田中です。",
+    ]
+
+
+def test_japanese_breaks_a_long_sentence_at_the_ideographic_comma():
+    text = "こんにちは、" + "あ" * 40
+    segments = tts.split_text(text, max_chars=20)
+    assert segments[0] == "こんにちは、"
+    assert all(len(segment) <= 20 for segment in segments)
+
+
+def test_japanese_gets_a_shorter_limit_because_a_character_says_more():
+    """700 Japanese characters and 2000 Latin ones are the same two or three
+    minutes of speech; the cap is on the recording, not on the typing."""
+    assert tts.spec_for("jpn").max_chars < tts.spec_for("vie").max_chars
+    assert tts.check_text("あ" * 700, "jpn")
+    with pytest.raises(tts.TtsError):
+        tts.check_text("あ" * 701, "jpn")
+    # The same length is fine in a language that spends characters faster.
+    assert tts.check_text("a" * 701, "vie")
+
+
+def test_kana_and_kanji_count_as_words_to_read():
+    """The "no letters" gate is about digits and symbols, and `str.isalpha` is
+    true for both scripts — so Japanese passes it as written."""
+    assert tts.check_text("こんにちは。", "jpn")
+    assert tts.check_text("東京", "jpn")
+
+
+def test_japanese_segments_stay_well_under_the_kokoro_truncation_point():
+    assert tts.spec_for("jpn").segment_max_chars < tts.KOKORO_MAX_PHONEMES / 3
+
+
+# --- romaji ---------------------------------------------------------------
+#
+# Japanese typed without an IME is romaji, and Kokoro's front end hands Latin
+# letters through untouched: `konnichiwa` reaches the model as eleven Latin
+# characters. Romaji is phonetic, so spelling it back into kana costs nothing
+# and is the difference between a reading and none.
+
+
+def test_japanese_is_the_language_that_takes_romaji():
+    assert tts.spec_for("jpn").romaji_input
+    assert not tts.spec_for("vie").romaji_input
+
+
+def test_romaji_becomes_kana():
+    assert tts.to_kana("kyou wa ii tenki desu ne.") == "きょう わ いい てんき です ね."
+    assert tts.to_kana("ohayou gozaimasu") == "おはよう ございます"
+
+
+def test_a_doubled_n_is_the_syllabic_n_not_a_dropped_mora():
+    """Wapuro romaji writes ん before a vowel as "nn"; jaconv reads only the
+    apostrophe form, so "konnichiwa" came back こんいちわ — a different word."""
+    assert tts.to_kana("konnichiwa") == "こんにちわ"
+    assert tts.to_kana("onnanoko") == "おんなのこ"
+    assert tts.to_kana("sennin") == "せんにん"
+    # An n that already closes a syllable was never the broken case.
+    assert tts.to_kana("shinbun") == "しんぶん"
+
+
+def test_kana_and_kanji_pass_through_untouched():
+    assert tts.to_kana("今日はいい天気ですね。") == "今日はいい天気ですね。"
+    # A Latin word inside Japanese is read as Japanese, which is the right
+    # answer for a name and the closest available one for anything else.
+    assert tts.to_kana("私はTanakaです。") == "私はたなかです。"
+
+
+def test_romaji_keeps_its_punctuation_so_the_split_still_works():
+    """The splitter runs after the conversion, so a full stop that did not
+    survive it would take the sentence boundary with it."""
+    assert tts.split_text(tts.to_kana("konnichiwa. genki desu ka?")) == [
+        "こんにちわ.",
+        "げんき です か?",
+    ]
+
+
 # --- the text -------------------------------------------------------------
 
 

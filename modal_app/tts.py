@@ -1,28 +1,48 @@
 """Text to speech, as the third way of producing something to convert.
 
-    text ──► Synthesizer (MMS-TTS) ──► spoken.wav ──► VoiceConverter ──► output
+    text ──► Synthesizer (MMS-TTS)  ──► spoken.wav ──► VoiceConverter ──► output
+             KokoroSynthesizer (ja)
 
 This module owns only the first arrow. Nothing here knows about the reference
 voice: the timbre comes from the same Seed-VC pass the `speech` branch already
 runs, so a voice sample that works there works here, and everything downstream —
 pitch auto-detect, loudness, watermark, the consent gate — is the code that was
-already shipping rather than a second copy of it.
+already shipping rather than a second copy of it. `synthesize()` is the seam:
+callers name a language, not an engine.
 
 Two consequences worth naming, because they are the reason it is built this way:
 
-* **The synthetic voice is a stand-in, not the product.** MMS-TTS speaks in its
-  own single speaker; the conversion is what makes it the user's voice. So the
-  checkpoint is chosen for coverage and size, not for beauty.
+* **The synthetic voice is a stand-in, not the product.** Both engines speak in
+  a single fixed speaker; the conversion is what makes it the user's voice. So
+  a checkpoint is chosen for coverage, correctness and size, not for beauty.
 * **The pitch shift is measured, not assumed.** `pipeline._resolve_shift` runs
   on `spoken.wav` against the reference exactly as it does for an uploaded
-  recording — the MMS speaker for a language has one register and the target
-  may be nowhere near it.
+  recording — the synthetic speaker for a language has one register and the
+  target may be nowhere near it.
 
 Why MMS-TTS (`facebook/mms-tts-<iso639-3>`) and not a zero-shot cloning TTS:
 it is a plain `transformers` VITS checkpoint of ~145 MB that loads on CPU, it
 covers Vietnamese properly, and cloning is already handled one step later —
 a zero-shot TTS would duplicate that job with a second set of weights, a second
 GPU, and a worse claim on languages.
+
+**Japanese does not go through MMS, and this is measured rather than assumed.**
+MMS reads a non-Latin script by romanising it with `uroman` first, both when it
+was trained and at inference. Run `uroman` on Japanese and the kanji come back
+in *Mandarin*:
+
+    今日はいい天気ですね。  ->  jinrihaiitianqidesune.
+    私の名前は田中です。    ->  sinomingqianhatianzhongdesu.
+
+(`kyou wa ii tenki desu ne` / `watashi no namae wa tanaka desu`; passing
+`lcode='jpn'` changes nothing.) Kana survives, kanji does not — and Japanese
+prose is roughly half kanji. That is the training text `facebook/mms-tts-jpn`
+learned from, so neither correct romaji nor uroman's own output gets real
+Japanese out of it. Hence a second engine for it, and only for it: Kokoro,
+whose Japanese front end (`misaki[ja]`) is a dictionary-and-morphology G2P
+that reads 今日 as `kʲoː` and 田中 as `tanaka`.
+
+One engine would have been better. Two is what the language needs.
 
 **Numbers and symbols are not spoken.** MMS-TTS tokenises characters against a
 per-language vocabulary that holds letters and punctuation; a digit is not in
@@ -34,35 +54,17 @@ it looks (`hai mươi lăm`, not `hai năm`).
 Smoke test (needs Modal credentials, no GPU):
 
     modal run -m modal_app.tts --text "Xin chào, đây là giọng của tôi."
+    modal run -m modal_app.tts --language jpn --text "今日はいい天気ですね。"
 """
 
 # NB: no `from __future__ import annotations` — modal.parameter() reads the raw
 # class annotation and cannot resolve a stringified one.
 import re
+from dataclasses import dataclass
 
 import modal
 
 from .app import MODEL_DIR, app, base_image, model_vol
-
-# Latin-script languages whose MMS checkpoint tokenises the text as written.
-#
-# MMS covers ~1100 languages, but the ones outside a Latin script need their
-# input romanised with `uroman` first, and a checkpoint fed unromanised text
-# returns silence rather than an error. Only languages that need no such step
-# are listed, and `Synthesizer.load` refuses anything whose tokenizer disagrees
-# — so adding one is a matter of putting it here and running the smoke test,
-# not of hoping.
-LANGUAGES = {
-    "vie": "Tiếng Việt",
-    "eng": "English",
-    "ind": "Bahasa Indonesia",
-    "fra": "Français",
-    "spa": "Español",
-    "deu": "Deutsch",
-    "por": "Português",
-    "ita": "Italiano",
-}
-DEFAULT_LANGUAGE = "vie"
 
 # ~2000 characters is 2 to 3 minutes of speech, which is where the Seed-VC pass
 # after it starts to be the expensive half of a job rather than a step in one.
@@ -71,6 +73,72 @@ MAX_TEXT_CHARS = 2000
 # error accumulates over a long stretch, so a paragraph handed over whole comes
 # back with its timing drifting; a sentence at a time does not.
 SEGMENT_MAX_CHARS = 200
+
+MMS = "mms"
+KOKORO = "kokoro"
+
+
+@dataclass(frozen=True)
+class Language:
+    """One language, and everything that differs about reading it out loud.
+
+    `max_chars` and `segment_max_chars` are per language because a character is
+    not a unit of speech: 2000 characters of Vietnamese is two or three
+    minutes, and 2000 characters of Japanese — which writes a whole word in the
+    space of one or two — is well over ten. The limits exist to bound how long
+    the recording is, so they are set in the units each script actually spends.
+    """
+
+    label: str
+    engine: str = MMS
+    max_chars: int = MAX_TEXT_CHARS
+    segment_max_chars: int = SEGMENT_MAX_CHARS
+    # Whether Latin letters in this language are romaji to be read as its own
+    # script rather than as themselves. See `to_kana`.
+    romaji_input: bool = False
+    # Kokoro only: its own one-letter language code, and which of its voices
+    # reads. Which voice barely matters — Seed-VC replaces the timbre a step
+    # later — so this is simply a clear, natural speaker to convert from.
+    kokoro_code: str = ""
+    voice: str = ""
+
+
+# What we will read, and with what.
+#
+# The MMS entries are the Latin-script languages whose checkpoint tokenises the
+# text as written. MMS covers ~1100 languages, but everything outside a Latin
+# script has to be romanised with `uroman` first, and a checkpoint fed text it
+# cannot read returns silence rather than an error — so only languages needing
+# no such step are listed here, and `Synthesizer.load` refuses anything whose
+# tokenizer disagrees. Adding one is a matter of putting it here and running the
+# smoke test, not of hoping.
+#
+# Japanese is the exception that proves why: uroman renders its kanji in
+# Mandarin (see the module docstring), so it reads through Kokoro instead.
+JAPANESE = "jpn"
+LANGUAGES = {
+    "vie": Language("Tiếng Việt"),
+    "eng": Language("English"),
+    "ind": Language("Bahasa Indonesia"),
+    "fra": Language("Français"),
+    "spa": Language("Español"),
+    "deu": Language("Deutsch"),
+    "por": Language("Português"),
+    "ita": Language("Italiano"),
+    JAPANESE: Language(
+        "日本語",
+        engine=KOKORO,
+        # ~700 Japanese characters is the same two to three minutes of speech
+        # the Latin limit buys, and 80 per segment keeps the phoneme string
+        # well under the 510 Kokoro truncates at.
+        max_chars=700,
+        segment_max_chars=80,
+        romaji_input=True,
+        kokoro_code="j",
+        voice="jf_alpha",
+    ),
+}
+DEFAULT_LANGUAGE = "vie"
 # Silence inserted between segments, in place of the pause the split removed.
 SEGMENT_GAP_SEC = 0.25
 # Room for the converter to work with at both ends. Seed-VC's first and last
@@ -88,8 +156,18 @@ DEFAULT_SPEAKING_RATE = 1.0
 # consistent place.
 TARGET_PEAK = 0.9
 
-# Sentence enders, plus any line break. Vietnamese uses the same set.
-_SENTENCE_END = re.compile(r"(?<=[.!?…:;])\s+|\n+")
+# Sentence enders, plus any line break. Vietnamese uses the same set as English.
+#
+# Two alternatives rather than one, because the trailing space is not optional
+# in the same way for both. A Latin sentence ends "like this. And so" — the
+# space is what tells a full stop from a decimal point. Japanese ends 「です。」
+# and simply starts the next one, no space anywhere in the line, so its
+# punctuation has to split on a zero-width match or a paragraph of it stays a
+# single 700 character "sentence".
+_SENTENCE_END = re.compile(r"(?<=[.!?…:;])\s+|(?<=[。！？])\s*|\n+")
+# Clause boundaries to fall back on inside an over-long sentence. The
+# ideographic comma is here for the same reason as the ideographic full stop.
+_CLAUSE_BREAKS = (", ", "; ", "、", "，")
 
 
 class TtsError(ValueError):
@@ -102,8 +180,16 @@ def check_language(language: str) -> str:
     return language
 
 
+def spec_for(language: str) -> Language:
+    return LANGUAGES[check_language(language)]
+
+
 def model_id(language: str) -> str:
-    return f"facebook/mms-tts-{check_language(language)}"
+    """The MMS checkpoint for `language`. Raises for a language MMS cannot read."""
+    spec = spec_for(language)
+    if spec.engine != MMS:
+        raise TtsError(f"{language} does not read through MMS, it reads through {spec.engine}")
+    return f"facebook/mms-tts-{language}"
 
 
 def clamp_speaking_rate(rate: float | None) -> float:
@@ -122,10 +208,10 @@ def _wrap(piece: str, max_chars: int) -> list[str]:
         window = piece[:max_chars]
         # A clause boundary first, and keep the punctuation with the clause it
         # closes: the model reads a comma as the pause it is.
-        cut = max(window.rfind(", "), window.rfind("; "))
+        cut = max(window.rfind(mark) for mark in _CLAUSE_BREAKS)
         cut = cut + 1 if cut > 0 else window.rfind(" ")
-        # A single unbroken run this long is not language; cut it where it fits
-        # rather than hand the model a paragraph.
+        # No clause and no space — Japanese writes whole sentences without one,
+        # and a Latin run this long is not language either. Cut where it fits.
         if cut <= 0:
             cut = max_chars
         parts.append(piece[:cut].strip())
@@ -150,25 +236,88 @@ def split_text(text: str, max_chars: int = SEGMENT_MAX_CHARS) -> list[str]:
     return segments
 
 
-def check_text(text: str) -> str:
+# Wapuro romaji writes ん before a vowel as "nn" or "n'", and `jaconv` reads
+# only the apostrophe: "konnichiwa" comes back こんいちわ, a mora short and a
+# different word. Rewriting the doubled n into the form it does read costs one
+# regex — "onnanoko" and "sennin" come out おんなのこ and せんにん.
+_ROMAJI_DOUBLE_N = re.compile(r"n{2,}(?=[aiueo])", re.IGNORECASE)
+
+
+def to_kana(text: str) -> str:
+    """Romaji in `text` as kana, leaving kana, kanji and punctuation alone.
+
+    Japanese typed without an IME is romaji, and Kokoro's Japanese front end
+    hands Latin letters straight through untouched — `konnichiwa` reaches the
+    model as eleven Latin characters, which is not a reading of anything.
+
+    Romaji is phonetic, so this is a spelling change rather than a translation
+    and the result is the same audio: `kyou wa ii tenki desu ne.` comes out of
+    the G2P as `kʲoː βa iː teŋkʲi desɨ ne.`, which is exactly what
+    `今日はいい天気ですね。` gives. A Latin word inside Japanese text is read the
+    same way — `私はTanakaです` becomes 私はたなかです — which is the right answer
+    for a name and the closest available one for anything else.
+    """
+    import jaconv
+
+    return jaconv.alphabet2kana(_ROMAJI_DOUBLE_N.sub("n'n", text))
+
+
+def check_text(text: str, language: str = DEFAULT_LANGUAGE) -> str:
     """Validate what `/submit` was given. Returns the text to store.
+
+    The limit comes from the language because a character is not a unit of
+    speech — see `Language`.
 
     The "no letters" case is the one worth having: MMS drops every character it
     has no token for, so a line of digits synthesises to silence and would
     otherwise reach the user as a job that succeeded and produced nothing.
+    Kana and kanji are letters to `str.isalpha`, so Japanese passes it as
+    written.
     """
+    limit = spec_for(language).max_chars
     if not isinstance(text, str):
         raise TtsError("text must be a string")
     cleaned = text.strip()
     if not cleaned:
         raise TtsError("no text to read: write something first")
-    if len(cleaned) > MAX_TEXT_CHARS:
-        raise TtsError(f"text is {len(cleaned)} characters, the limit is {MAX_TEXT_CHARS}")
+    if len(cleaned) > limit:
+        raise TtsError(f"text is {len(cleaned)} characters, the limit is {limit}")
     if not any(ch.isalpha() for ch in cleaned):
         raise TtsError("no words to read: numbers and symbols are not spoken, write them out")
     if not split_text(cleaned):
         raise TtsError("no text to read: write something first")
     return cleaned
+
+
+def _join(segments, sample_rate: int) -> bytes:
+    """One wav out of the per-segment audio, with the pauses put back.
+
+    A gap between segments in place of the pause the split removed, a little
+    silence at each end so the converter's least certain frames land on nothing
+    rather than on the first syllable, and a fixed peak so both engines hand
+    Seed-VC input at the same level. `loudnorm` sets the real level later.
+    """
+    import numpy as np
+
+    from .audio_utils import encode_wav
+
+    if not segments:
+        raise TtsError("nothing in this text could be read out loud")
+
+    gap = np.zeros(int(SEGMENT_GAP_SEC * sample_rate), dtype=np.float32)
+    pad = np.zeros(int(EDGE_PAD_SEC * sample_rate), dtype=np.float32)
+    pieces = [pad]
+    for i, audio in enumerate(segments):
+        if i:
+            pieces.append(gap)
+        pieces.append(np.asarray(audio, dtype=np.float32))
+    pieces.append(pad)
+
+    audio = np.concatenate(pieces)
+    peak = float(np.abs(audio).max())
+    if peak > 0:
+        audio = audio * (TARGET_PEAK / peak)
+    return encode_wav(audio, sample_rate)
 
 
 # transformers is the whole dependency: MMS-TTS is a VITS checkpoint, and
@@ -200,6 +349,8 @@ class Synthesizer:
 
         from transformers import AutoTokenizer, VitsModel
 
+        # Raises for a language that does not read through MMS at all, which is
+        # a deployment mistake rather than something a request can cause.
         repo = model_id(self.language)
         os.makedirs(MODEL_DIR, exist_ok=True)
 
@@ -229,17 +380,15 @@ class Synthesizer:
         import numpy as np
         import torch
 
-        from .audio_utils import encode_wav
-
-        segments = split_text(check_text(text))
+        spec = spec_for(self.language)
+        segments = split_text(check_text(text, self.language), spec.segment_max_chars)
         rate = clamp_speaking_rate(speaking_rate)
         # `speaking_rate` scales the predicted durations, so it is read at
         # forward time and can be set per request without reloading anything.
         self.model.speaking_rate = rate
 
         started = time.time()
-        gap = np.zeros(int(SEGMENT_GAP_SEC * self.sr), dtype=np.float32)
-        pieces: list[np.ndarray] = []
+        spoken: list[np.ndarray] = []
         with torch.no_grad():
             for i, segment in enumerate(segments, start=1):
                 inputs = self.tokenizer(segment, return_tensors="pt")
@@ -249,25 +398,136 @@ class Synthesizer:
                 if inputs["input_ids"].shape[-1] == 0:
                     print(f"[Synthesizer] segment {i}/{len(segments)} has no readable characters")
                     continue
-                wave = self.model(**inputs).waveform[0].cpu().numpy().astype(np.float32)
-                if pieces:
-                    pieces.append(gap)
-                pieces.append(wave)
+                spoken.append(self.model(**inputs).waveform[0].cpu().numpy().astype(np.float32))
 
-        if not pieces:
-            raise TtsError("nothing in this text could be read out loud")
-
-        pad = np.zeros(int(EDGE_PAD_SEC * self.sr), dtype=np.float32)
-        audio = np.concatenate([pad, *pieces, pad])
-        peak = float(np.abs(audio).max())
-        if peak > 0:
-            audio = audio * (TARGET_PEAK / peak)
-
+        wav = _join(spoken, self.sr)
         print(
-            f"[Synthesizer] {len(segments)} segment(s) -> {len(audio) / self.sr:.1f}s "
-            f"in {time.time() - started:.1f}s (rate={rate:.2f})"
+            f"[Synthesizer] {len(segments)} segment(s) in {time.time() - started:.1f}s "
+            f"(rate={rate:.2f})"
         )
-        return encode_wav(audio, self.sr)
+        return wav
+
+
+# Kokoro is one pip package on top of the same base: an 82M StyleTTS2-style
+# model plus `misaki`, its front end. Only the Japanese G2P is used here, and
+# it needs no `espeak-ng` — that is the fallback for Kokoro's *European*
+# languages, which read through MMS in this app.
+#
+# The resolution was checked against the pins already in `base_image` (torch
+# 2.4.0, numpy<2, transformers 4.46.3): spacy 3.8 and thinc 8.3 come in and
+# leave numpy at 1.26.4, so nothing here drags the audio stack onto numpy 2.
+kokoro_image = (
+    base_image.pip_install(
+        "kokoro==0.9.4",
+        "misaki[ja]==0.9.4",
+        "unidic-lite==1.0.8",
+    )
+    # `misaki[ja]` depends on `unidic`, which ships no dictionary — it is a
+    # downloader for one, and `fugashi` picks it over `unidic-lite` whenever
+    # both are installed. The container then dies inside `Tagger()` with
+    #
+    #     param.cpp(69) [ifs] no such file or directory: .../unidic/dicdir/mecabrc
+    #
+    # before a word is read. Removing it leaves the dictionary that is actually
+    # present. `python -m unidic download` is the other fix and costs ~700 MB
+    # of image for readings `unidic-lite` already has.
+    .run_commands("pip uninstall -y unidic")
+    .env({"HF_HOME": MODEL_DIR})
+)
+
+KOKORO_REPO = "hexgrad/Kokoro-82M"
+KOKORO_SAMPLE_RATE = 24000
+# Kokoro truncates a phoneme string past this, with a warning and no error.
+# `segment_max_chars` is set well under it; this is here to explain the margin.
+KOKORO_MAX_PHONEMES = 510
+
+
+@app.cls(
+    image=kokoro_image,
+    # CPU for the same reason as the MMS synthesiser: 82M parameters, and the
+    # GPU minutes in this pipeline belong to the conversion.
+    cpu=4,
+    memory=4096,
+    volumes={MODEL_DIR: model_vol},
+    scaledown_window=300,
+    timeout=900,
+    max_containers=4,
+)
+class KokoroSynthesizer:
+    """The engine for languages MMS cannot read as written. Today: Japanese."""
+
+    language: str = modal.parameter(default=JAPANESE)
+
+    @modal.enter()
+    def load(self) -> None:
+        import os
+
+        from kokoro import KPipeline
+
+        spec = spec_for(self.language)
+        if spec.engine != KOKORO:
+            raise TtsError(f"{self.language} does not read through Kokoro")
+        os.makedirs(MODEL_DIR, exist_ok=True)
+
+        self.spec = spec
+        # Weights, config and the voice pack all arrive through
+        # `huggingface_hub`, so HF_HOME on the Volume is what keeps a second
+        # container from downloading them again.
+        self.pipeline = KPipeline(lang_code=spec.kokoro_code, repo_id=KOKORO_REPO)
+        model_vol.commit()
+        print(f"[KokoroSynthesizer] language={self.language} voice={spec.voice}")
+
+    @modal.method()
+    def synthesize(self, text: str, speaking_rate: float = DEFAULT_SPEAKING_RATE) -> bytes:
+        """Text in, 16-bit PCM wav out at Kokoro's 24 kHz. Same contract as MMS."""
+        import time
+
+        import numpy as np
+
+        spoken_text = check_text(text, self.language)
+        # Before the split, not after: kana is what the segment budget is
+        # measured in, and romaji is about twice as long as the kana it spells.
+        if self.spec.romaji_input:
+            spoken_text = to_kana(spoken_text)
+        segments = split_text(spoken_text, self.spec.segment_max_chars)
+        rate = clamp_speaking_rate(speaking_rate)
+
+        started = time.time()
+        spoken: list[np.ndarray] = []
+        for i, segment in enumerate(segments, start=1):
+            # `split_pattern=None`: the segments are already the split, and
+            # letting Kokoro re-split on newlines it will not find only makes
+            # the two disagree about where the pauses are.
+            parts = [
+                result.audio.cpu().numpy().astype(np.float32)
+                for result in self.pipeline(
+                    segment, voice=self.spec.voice, speed=rate, split_pattern=None
+                )
+                if result.audio is not None
+            ]
+            if not parts:
+                print(f"[KokoroSynthesizer] segment {i}/{len(segments)} produced no audio")
+                continue
+            spoken.append(np.concatenate(parts) if len(parts) > 1 else parts[0])
+
+        wav = _join(spoken, KOKORO_SAMPLE_RATE)
+        print(
+            f"[KokoroSynthesizer] {len(segments)} segment(s) in {time.time() - started:.1f}s "
+            f"(rate={rate:.2f})"
+        )
+        return wav
+
+
+def synthesize(language: str, text: str, speaking_rate: float) -> bytes:
+    """Read `text` with whichever engine speaks `language`, on its own container.
+
+    The one place the engine split is resolved. `pipeline.py` asks for a
+    language and gets audio back; which model produced it is this module's
+    business, and adding a third engine should not reach the pipeline at all.
+    """
+    spec = spec_for(language)
+    engine = KokoroSynthesizer if spec.engine == KOKORO else Synthesizer
+    return engine(language=language).synthesize.remote(text=text, speaking_rate=speaking_rate)
 
 
 # `speak`, not `main`: local entrypoint names are one flat namespace across the
@@ -279,11 +539,13 @@ def speak(
     language: str = DEFAULT_LANGUAGE,
     speaking_rate: float = DEFAULT_SPEAKING_RATE,
 ) -> None:
-    """Standalone smoke test: text in, one wav out. No reference, no GPU."""
+    """Standalone smoke test: text in, one wav out. No reference, no GPU.
+
+    modal run -m modal_app.tts --text "Xin chào."
+    modal run -m modal_app.tts --language jpn --text "今日はいい天気ですね。"
+    """
     from pathlib import Path
 
-    result = Synthesizer(language=language).synthesize.remote(
-        text=text, speaking_rate=speaking_rate
-    )
+    result = synthesize(language, text, speaking_rate)
     Path(output).write_bytes(result)
     print(f"wrote {output} ({len(result) / 1e6:.1f} MB)")
