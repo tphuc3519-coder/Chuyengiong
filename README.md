@@ -859,39 +859,69 @@ không tới được từ máy viết code):
 trọng âm đời hai cho v1.0 sẽ xoá sạch các dấu và đọc thừa một tràng /j/. Cổng ở
 trên sẽ báo `accent=False`, và nó đúng.
 
-### Nên tiếng Nhật đổi sang Open JTalk
+### Đã đổi sang Open JTalk, rồi đổi lại về Kokoro
 
-`hexgrad/Kokoro-82M` không thể được cho biết cao độ rơi ở đâu — đó là trần của
-nó, không sửa được trong engine. Nên tiếng Nhật đọc bằng
-`OpenJTalkSynthesizer`: `pyopenjtalk.run_frontend` đọc nhân trọng âm ra từ **từ
-điển** của Open JTalk, và backend HTS của nó dựng ra âm thanh.
+Đoạn này giữ nguyên cả hai nửa, vì nửa sau chỉ có nghĩa khi đọc cùng nửa trước.
 
-Ba lý do nó hợp ở đây hơn là nghe qua tưởng:
+**Lý lẽ lúc đổi sang Open JTalk.** `hexgrad/Kokoro-82M` không thể được cho biết
+cao độ rơi ở đâu — đó là trần của nó, không sửa được trong engine. Còn
+`pyopenjtalk.run_frontend` đọc nhân trọng âm ra từ **từ điển** của Open JTalk,
+và backend HTS dựng ra âm thanh từ đó. Ba lý do nó hợp ở đây hơn là nghe qua
+tưởng:
 
 - **Đã có sẵn trong image.** `misaki[ja]==0.9.4` khai `Requires-Dist:
   pyopenjtalk`, nên nó vốn đã được build vào container từ đầu. Giọng
   (`mei_normal.htsvoice`) và từ điển đều nằm trong package, không tải gì.
-- **Đúng tiêu chí repo.** Module `tts.py` mở đầu bằng đúng câu này: giọng tổng
-  hợp là *người đóng thế*, Seed-VC mới là thứ làm nó thành giọng người dùng, nên
-  checkpoint chọn vì đúng chứ không vì đẹp. Cái HTS dở nhất — tiếng rè của nguồn
-  kích thích — lại đúng là phần Seed-VC vứt đi.
 - **`speed` và `half_tone` là tham số tổng hợp.** Cao độ theo câu đặt được ngay
   lúc dựng tiếng, tính bằng nửa cung: không resample, không kéo formant theo,
   không phải trả lại độ dài. Đây là engine duy nhất nhận `Beat.rate` thay vì
   `Beat.synth_rate`, và `prosody.shape` chỉ còn phải chỉnh mức.
+- **Tưởng là đúng tiêu chí repo.** Giọng tổng hợp là *người đóng thế*, Seed-VC
+  mới là thứ làm nó thành giọng người dùng, nên checkpoint chọn vì đúng chứ
+  không vì đẹp — và cái dở nhất của HTS, tiếng rè của nguồn kích thích, lại
+  đúng là phần Seed-VC vứt đi.
 
-Đổi lại là mất tự nhiên, và **đây là đánh đổi chứ không phải thắng không**. Nên
-`KokoroSynthesizer` vẫn còn nguyên và vẫn chạy được, để so bằng tai:
+**Lý do đổi lại.** Gạch đầu dòng thứ ba sai, và nó là gạch đầu dòng mang cả
+quyết định. "Người đóng thế" đúng với *timbre* và chỉ với timbre: Seed-VC thay
+người nói, nó không thay cách nói. Nhịp, cách nhả chữ, độ cứng của từng âm tiết
+— tất cả đi thẳng từ `spoken.wav` ra bản cuối. Giọng HTS vào máy đã nghe như
+máy thì ra khỏi máy vẫn nghe như máy, chỉ là một cái máy khác. Nghe thử là biết,
+và đó là thứ duy nhất có thể phân xử được chuyện này — mục "Seed-VC convert từ
+giọng HTS máy móc có ra hồn không" trong danh sách verify ở dưới chính là rủi ro
+đó, và câu trả lời là không.
+
+Nên tiếng Nhật đọc lại bằng `KokoroSynthesizer`, và **cái mất được ghi ra chứ
+không giấu đi**: 箸 với 橋 vẫn là chỗ Kokoro đoán. Đổi lại là một bản đọc người
+ta chịu nghe, mà một bản đọc không ai muốn nghe thì không phải là một bản đọc
+đúng hơn.
+
+`OpenJTalkSynthesizer` ở nguyên đó, làm bản đối chiếu — cách nghe xem cái mặc
+định đang đoán gì:
 
 ```
-modal run -m modal_app.tts --language jpn --output openjtalk.wav --text "箸と橋、雨と飴。"
-modal run -m modal_app.tts --language jpn --output kokoro.wav --engine kokoro --text "箸と橋、雨と飴。"
+modal run -m modal_app.tts --language jpn --output kokoro.wav --text "箸と橋、雨と飴。"
+modal run -m modal_app.tts --language jpn --output openjtalk.wav --engine openjtalk --text "箸と橋、雨と飴。"
 ```
 
 `--engine` chỉ có ở smoke test, không request nào đặt được: nó là một lựa chọn
 kỹ thuật cần tai chứ không phải một nút cho người dùng. Và nhớ rằng cả hai file
 đó mới là **đầu vào** của conversion — cái quyết định là bản nào ra khỏi Seed-VC
-mà đọc đúng chữ.
+mà nghe được.
+
+**`--voice` cũng vậy.** Kokoro-82M v1.0 có năm giọng tiếng Nhật
+(`KOKORO_VOICES`): `jf_alpha` (mặc định), `jf_gongitsune`, `jf_nezumi`,
+`jf_tebukuro`, `jm_kumo`. Nó không phải nút cho người dùng vì Seed-VC thay timbre
+ngay sau đó — năm giọng sẽ ra cùng một giọng. Nhưng *chọn* cái mặc định lại là
+quyết định về cách đọc chứ không phải về chất giọng — cách ngắt cụm, tốc độ,
+nhả chữ rõ hay lướt đều sống sót qua conversion — nên nó phải thử được bằng một
+flag thay vì một lần deploy:
+
+```
+modal run -m modal_app.tts --language jpn --voice jf_gongitsune --text "今日はいい天気ですね。"
+```
+
+Tên giọng lạ thì rơi về mặc định chứ không làm hỏng job (`kokoro_voice`): lúc
+đọc tới đó thì container đã lên, text đã nằm trên Volume và GPU đã đặt chỗ rồi.
 
 ### Số và ký hiệu không được đọc
 
@@ -1006,6 +1036,7 @@ viết ra được thành luật:
 |---|---|
 | MMS (VITS) | `speaking_rate`, `noise_scale`, `noise_scale_duration` |
 | Kokoro | `speed` |
+| Open JTalk (chỉ dùng để A/B) | `speed`, `half_tone` — nửa cung đặt ngay lúc tổng hợp, nên nó là engine duy nhất nhận `Beat.rate` và `prosody.shape(engine_pitch=True)` |
 | Sau khi tổng hợp | gain, và dịch cao độ bằng **resample** |
 
 `noise_scale` là mức cho phép prior dao động — tức cao độ và năng lượng của bản
@@ -1082,10 +1113,13 @@ không ai đưa nó trở lại.
 - [ ] cùng đoạn văn qua cả năm style: nghe ra khác nhau, và không style nào
       nghe như đang diễn
 - [ ] `--expressiveness 0` → đúng bằng bản đọc Phase 8 (trừ ngắt nghỉ theo dấu câu)
-- [ ] **so `openjtalk.wav` với `kokoro.wav` trên 箸/橋, 雨/飴** — trước và sau
+- [x] **so `openjtalk.wav` với `kokoro.wav` trên 箸/橋, 雨/飴** — trước và sau
       Seed-VC. Đây là mục quyết định giọng tiếng Nhật đi đường nào
-- [ ] Seed-VC convert từ giọng HTS máy móc có ra hồn không — rủi ro duy nhất
-      chưa đo được của việc đổi engine
+- [x] Seed-VC convert từ giọng HTS máy móc có ra hồn không — rủi ro duy nhất
+      chưa đo được của việc đổi engine. **Không.** Nên mặc định quay về Kokoro;
+      xem "Đã đổi sang Open JTalk, rồi đổi lại về Kokoro"
+- [ ] năm giọng Nhật của Kokoro (`--voice`) — cái nào ngắt cụm và nhả chữ rõ
+      nhất *sau* Seed-VC, vì đó mới là phần giọng nào cũng giữ lại
 - [ ] `pyopenjtalk==0.4.1` build được trong image (PyPI chỉ có sdist, không có
       wheel) — bước `pyopenjtalk.g2p` lúc build sẽ làm deploy đỏ nếu không
 - [ ] **tiếng Nhật đọc đúng chữ** — đây là mục quan trọng nhất của phase này,

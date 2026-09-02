@@ -42,10 +42,23 @@ Japanese out of it. Hence a second engine for it, and only for it: Kokoro,
 whose Japanese front end (`misaki[ja]`) is a dictionary-and-morphology G2P
 that reads 今日 as `kʲoː` and 田中 as `tanaka`.
 
-One engine would have been better. Japanese needed a second, and then a third:
-`ACCENT_MARKS` is the account of why. Reading Japanese without being able to
-say where the pitch falls is not an accent problem, it is a wrong-word problem,
-and `OpenJTalkSynthesizer` is the engine that does not have it.
+**And a third engine, which is no longer the one that reads.**
+`OpenJTalkSynthesizer` gets Japanese pitch accent out of a dictionary, which
+Kokoro-82M v1.0 cannot be told — `ACCENT_MARKS` is the account of that — and for
+a while Japanese read through it on the argument that correct beats pretty. That
+argument was wrong, and it was wrong about the first bullet above rather than
+about the accent. The synthetic voice is a stand-in, but it is not *only* a
+timbre: Seed-VC replaces who is speaking and keeps what it was handed — the
+pace, the articulation, the buzz of the excitation — so an HTS voice arrives at
+the converter already sounding like a machine and comes out of it sounding like
+a machine that has changed its mind about who it is. What was meant to be a
+stand-in was audible in the product. Listening settled it, which is the only
+thing that could have.
+
+So Japanese reads through Kokoro, and what that costs is written down rather
+than quietly dropped: 箸 and 橋 are both `hashi`, Kokoro is guessing which, and
+`--engine openjtalk` is one flag away for anyone who wants to hear the trade
+from the other side.
 
 **Neither of them is read flat.** Both speak in one fixed speaker with no
 emotion conditioning, so what they are given instead is a plan: `prosody.py`
@@ -115,8 +128,10 @@ class Language:
     # script rather than as themselves. See `to_kana`.
     romaji_input: bool = False
     # Kokoro only: its own one-letter language code, and which of its voices
-    # reads. Which voice barely matters — Seed-VC replaces the timbre a step
-    # later — so this is simply a clear, natural speaker to convert from.
+    # reads. Less of a free choice than it looks: Seed-VC replaces the timbre a
+    # step later, so the *sound* of the speaker does not survive, but its
+    # phrasing, its pace and how cleanly it articulates all do. `KOKORO_VOICES`
+    # is the rest of the shelf and `kokoro_voice` is how one is picked.
     kokoro_code: str = ""
     voice: str = ""
 
@@ -145,25 +160,24 @@ LANGUAGES = {
     "ita": Language("Italiano"),
     JAPANESE: Language(
         "日本語",
-        # Open JTalk rather than Kokoro, and the reason is `ACCENT_MARKS`: 箸
-        # and 橋 are both `hashi` and only the pitch separates them, Kokoro-82M
-        # v1.0 has no way of being told which, and Open JTalk reads the accent
-        # out of a dictionary. `KokoroSynthesizer` is still here and still
-        # works — `modal run -m modal_app.tts --engine kokoro` is the A/B —
-        # because this is a trade rather than a free win: the HTS voice is far
-        # less natural, and what makes that bearable is the thing this module
-        # opens by saying, that the synthetic voice is a stand-in and Seed-VC
-        # replaces the timbre one step later. Correct beats pretty here.
-        engine=OPENJTALK,
+        # Kokoro, because it is the one that sounds like a person. Open JTalk
+        # had this seat and lost it: it is right about the pitch accent and
+        # wrong about everything a listener actually notices first, and the
+        # conversion downstream does not rescue that — see the module
+        # docstring. `modal run -m modal_app.tts --engine openjtalk` is the A/B,
+        # and `ACCENT_MARKS` is what Kokoro cannot be told in exchange.
+        engine=KOKORO,
         # ~700 Japanese characters is the same two to three minutes of speech
         # the Latin limit buys, and 80 per segment keeps the phoneme string
         # well under the 510 Kokoro truncates at.
         max_chars=700,
         segment_max_chars=80,
         romaji_input=True,
-        # Kept for the A/B: which engine reads is `engine`'s to say, and these
-        # are what `KokoroSynthesizer` needs when it is the one asked.
         kokoro_code="j",
+        # Which of Kokoro's Japanese speakers reads. `KOKORO_VOICES` lists the
+        # rest and `--voice` auditions them without a redeploy: the timbre is
+        # replaced a step later, but how a speaker phrases and paces a sentence
+        # is not, and that is worth being able to hear.
         voice="jf_alpha",
     ),
 }
@@ -586,6 +600,32 @@ japanese_image = (
 KOKORO_REPO = "hexgrad/Kokoro-82M"
 KOKORO_SAMPLE_RATE = 24000
 
+# Every speaker Kokoro-82M v1.0 ships for a language that reads through it,
+# with the language's own `Language.voice` first.
+#
+# Not a request parameter and not a UI control: Seed-VC replaces the timbre a
+# step later, so offering a listener five voices that all come out as their own
+# would be a menu of nothing. It is here because *choosing* the default is a
+# judgement about the reading rather than about the voice — a speaker's phrasing,
+# its pace and how cleanly it articulates all survive the conversion — and that
+# judgement should be checkable with `--voice` instead of a redeploy.
+KOKORO_VOICES = {
+    JAPANESE: ("jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo"),
+}
+
+
+def kokoro_voice(language: str, voice: str = "") -> str:
+    """The speaker to read `language` with, and `voice` only if it exists.
+
+    Falls back rather than raising, for the same reason `prosody.resolve_emotion`
+    does: by the time this is read the container is up, the text is on the
+    Volume and the GPU behind it is booked. A mistyped speaker name is not worth
+    any of that, and the log line says which voice actually read.
+    """
+    spec = spec_for(language)
+    return voice if voice in KOKORO_VOICES.get(language, ()) else spec.voice
+
+
 # --- Japanese pitch accent ------------------------------------------------
 #
 # 箸 and 橋 are both `hashi`. 雨 and 飴 are both `ame`. What separates them is
@@ -621,6 +661,12 @@ ACCENT_MARKS = ("_", "-", "^")
 ACCENT_PROBE = "今日はいい天気ですね。"
 # Kokoro truncates a phoneme string past this, with a warning and no error.
 # `segment_max_chars` is set well under it; this is here to explain the margin.
+#
+# The margin is also why the accent gate above is not a free upgrade if a future
+# checkpoint passes it: `JAG2P(version='pyopenjtalk')` returns the phonemes with
+# the pitch track *concatenated*, one character per phoneme, so the string that
+# reaches this limit is twice as long as the reading it encodes. Halve the
+# segment budget in the same commit that turns it on.
 KOKORO_MAX_PHONEMES = 510
 
 
@@ -718,6 +764,7 @@ class KokoroSynthesizer:
         speaking_rate: float = DEFAULT_SPEAKING_RATE,
         emotion: str = prosody.DEFAULT_EMOTION,
         expressiveness: float = prosody.DEFAULT_EXPRESSIVENESS,
+        voice: str = "",
     ) -> bytes:
         """Text in, 16-bit PCM wav out at Kokoro's 24 kHz. Same contract as MMS.
 
@@ -732,11 +779,17 @@ class KokoroSynthesizer:
         transposed every sentence with a phase vocoder whose window was longer
         than the distinctions involved; it read the words wrong. `_transpose`
         carries the account of it.
+
+        `voice` overrides the language's own speaker, for the same reason and
+        with the same reach as `synthesize`'s `engine`: the smoke test, and
+        nothing a request can touch. Anything unknown falls back rather than
+        raising — the voice is a slider, not a language.
         """
         import time
 
         import numpy as np
 
+        speaker = kokoro_voice(self.language, voice)
         spoken_text = check_text(text, self.language)
         # Before the split, not after: kana is what the segment budget is
         # measured in, and romaji is about twice as long as the kana it spells.
@@ -762,7 +815,7 @@ class KokoroSynthesizer:
                 result.audio.cpu().numpy().astype(np.float32)
                 for result in self.pipeline(
                     beat.text,
-                    voice=self.spec.voice,
+                    voice=speaker,
                     # `synth_rate` for the same reason as MMS: the resample in
                     # `prosody.shape` shortens what it raises, and this is what
                     # pays for it.
@@ -781,7 +834,7 @@ class KokoroSynthesizer:
         wav = _join(spoken, KOKORO_SAMPLE_RATE, pauses)
         print(
             f"[KokoroSynthesizer] {len(beats)} segment(s) in {time.time() - started:.1f}s "
-            f"(rate={rate:.2f} emotion={prosody.clean_emotion(emotion)} "
+            f"(voice={speaker} rate={rate:.2f} emotion={prosody.clean_emotion(emotion)} "
             f"expressiveness={prosody.clamp_expressiveness(expressiveness):.2f})"
         )
         return wav
@@ -807,17 +860,21 @@ OPENJTALK_SCALE = 32768.0
 class OpenJTalkSynthesizer:
     """Japanese, read with the accent a dictionary says rather than a guess.
 
-    The engine is old — HTS, the statistical parametric kind, and it sounds it.
-    It is here because of what this module says in its first paragraph: the
-    synthetic voice is a stand-in and Seed-VC replaces the timbre a step later,
-    so a checkpoint is chosen for correctness rather than for beauty. And the
-    thing Open JTalk is correct about is the one thing Japanese cannot afford
-    to have wrong. 箸 and 橋 are both `hashi`; 雨 and 飴 are both `ame`. Where
-    the pitch falls is which word it is, `pyopenjtalk.run_frontend` reads that
-    out of Open JTalk's dictionary, and its synthesis backend renders it.
+    **The reference, not the default.** 箸 and 橋 are both `hashi`; 雨 and 飴 are
+    both `ame`. Where the pitch falls is which word it is,
+    `pyopenjtalk.run_frontend` reads that out of Open JTalk's dictionary, and
+    its synthesis backend renders it — which is one more thing than Kokoro-82M
+    v1.0 can be told (`ACCENT_MARKS`). For a while that won the argument and
+    this was what Japanese read through.
 
-    What it costs is naturalness, and the buzz of an HTS excitation is exactly
-    the part of the signal Seed-VC throws away. What it buys is words.
+    It lost the listening. The engine is old — HTS, the statistical parametric
+    kind — and it sounds it, and the hope that Seed-VC would launder that was
+    wrong: the conversion replaces the timbre, not the delivery, so the machine
+    was still audible at the end of the pipeline. A reading nobody wants to
+    listen to is not a more correct reading.
+
+    So it stays as `--engine openjtalk`: the way to hear what the default is
+    guessing at, and the thing to reach for if a text turns on a homograph.
 
     Two conveniences fall out of it, both better than the workarounds the other
     engines need: `speed` and `half_tone` are synthesis parameters, so the pace
@@ -912,6 +969,7 @@ def synthesize(
     emotion: str = prosody.DEFAULT_EMOTION,
     expressiveness: float = prosody.DEFAULT_EXPRESSIVENESS,
     engine: str = "",
+    voice: str = "",
 ) -> bytes:
     """Read `text` with whichever engine speaks `language`, on its own container.
 
@@ -921,17 +979,26 @@ def synthesize(
     The same is now true of how it is read: every engine takes the same style,
     because the style is `prosody`'s and not any model's.
 
-    `engine` overrides the language's own choice. It exists for the smoke test
-    and for nothing else — no request can set it — because Japanese has two
-    engines that are a real trade against each other and the only way to judge
-    that trade is to hear both.
+    `engine` overrides the language's own choice and `voice` overrides its
+    speaker. Both exist for the smoke test and for nothing else — no request can
+    set either — because Japanese has two engines that are a real trade against
+    each other and the only way to judge that trade, or which speaker reads it
+    best, is to hear them.
+
+    `voice` is passed only to the engine that has speakers to choose between,
+    rather than added to every `synthesize` signature as a parameter two of them
+    would ignore. A Modal method's arguments are its contract; a third one that
+    means nothing on two of the three engines is not one worth writing down.
     """
     spec = spec_for(language)
-    return ENGINES[engine or spec.engine](language=language).synthesize.remote(
+    chosen = engine or spec.engine
+    extra = {"voice": voice} if voice and chosen == KOKORO else {}
+    return ENGINES[chosen](language=language).synthesize.remote(
         text=text,
         speaking_rate=speaking_rate,
         emotion=emotion,
         expressiveness=expressiveness,
+        **extra,
     )
 
 
@@ -946,6 +1013,7 @@ def speak(
     emotion: str = prosody.DEFAULT_EMOTION,
     expressiveness: float = prosody.DEFAULT_EXPRESSIVENESS,
     engine: str = "",
+    voice: str = "",
 ) -> None:
     """Standalone smoke test: text in, one wav out. No reference, no GPU.
 
@@ -958,17 +1026,23 @@ def speak(
     different pauses after them.
 
     And the comparison the Japanese engine choice rests on, which is a trade
-    and wants ears rather than an argument — dictionary accent against a
-    guess, an old voice against a natural one:
+    and wants ears rather than an argument — a natural voice guessing at the
+    accent against an old one that reads it out of a dictionary:
 
-        --language jpn --output openjtalk.wav --text "箸と橋、雨と飴。"
-        --language jpn --output kokoro.wav --engine kokoro --text "箸と橋、雨と飴。"
+        --language jpn --output kokoro.wav --text "箸と橋、雨と飴。"
+        --language jpn --output openjtalk.wav --engine openjtalk \
+            --text "箸と橋、雨と飴。"
 
     Both are the *input* to the conversion rather than the product, so what
-    settles it is which one comes out of Seed-VC saying the right words.
+    settles it is which one comes out of Seed-VC worth listening to. Kokoro did,
+    which is why it is the default; run them both again before changing that.
+
+    `--voice` picks among Kokoro's Japanese speakers — see `KOKORO_VOICES`:
+
+        --language jpn --voice jf_gongitsune --text "今日はいい天気ですね。"
     """
     from pathlib import Path
 
-    result = synthesize(language, text, speaking_rate, emotion, expressiveness, engine)
+    result = synthesize(language, text, speaking_rate, emotion, expressiveness, engine, voice)
     Path(output).write_bytes(result)
     print(f"wrote {output} ({len(result) / 1e6:.1f} MB)")
