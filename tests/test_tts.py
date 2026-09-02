@@ -52,17 +52,17 @@ def test_japanese_is_offered_and_does_not_read_through_mms():
     assert spec.label == "日本語"
 
 
-def test_japanese_reads_through_the_engine_that_knows_where_the_pitch_falls():
-    """箸 and 橋 are both `hashi`, 雨 and 飴 are both `ame`, and which word it is
-    is where the pitch falls. Open JTalk reads that out of a dictionary;
-    Kokoro-82M v1.0 has no id in its vocabulary for an accent mark, so it can
-    only guess. The HTS voice is much less natural and that is the trade: the
-    timbre is Seed-VC's a step later, the words are not."""
-    assert tts.spec_for("jpn").engine == tts.OPENJTALK
+def test_japanese_reads_through_the_engine_worth_listening_to():
+    """Open JTalk had this seat: it reads the pitch accent out of a dictionary,
+    which Kokoro-82M v1.0 cannot be told. It lost it anyway. Seed-VC replaces
+    the timbre and not the delivery, so an HTS voice is still audibly a machine
+    at the end of the pipeline, and a reading nobody wants to listen to is not a
+    more correct reading. `--engine openjtalk` is still the A/B."""
+    assert tts.spec_for("jpn").engine == tts.KOKORO
 
 
 def test_asking_mms_for_japanese_is_an_error_not_a_silent_wrong_reading():
-    with pytest.raises(tts.TtsError, match=tts.OPENJTALK):
+    with pytest.raises(tts.TtsError, match=tts.KOKORO):
         tts.model_id("jpn")
 
 
@@ -401,9 +401,9 @@ def test_every_engine_a_language_can_name_has_a_class_to_run_it():
 
 
 def test_the_smoke_test_can_force_the_other_engine_to_compare_it():
-    """The Japanese choice is a trade — dictionary accent against a much more
-    natural voice — and a trade wants ears rather than an argument. No request
-    can set this; only `modal run`."""
+    """The Japanese choice is a trade — a much more natural voice against
+    dictionary accent — and a trade wants ears rather than an argument. No
+    request can set this; only `modal run`."""
     picked = []
 
     class Recorder(_FakeEngine):
@@ -411,7 +411,7 @@ def test_the_smoke_test_can_force_the_other_engine_to_compare_it():
             picked.append(language)
             super().__init__(language)
 
-    for engine in ("", tts.KOKORO):
+    for engine in ("", tts.OPENJTALK):
         with mock.patch.dict(tts.ENGINES, {tts.OPENJTALK: Recorder, tts.KOKORO: Recorder}):
             tts.synthesize("jpn", "こんにちは。", 1.0, engine=engine)
     assert picked == ["jpn", "jpn"]
@@ -419,6 +419,44 @@ def test_the_smoke_test_can_force_the_other_engine_to_compare_it():
     import inspect
 
     assert "engine" not in inspect.signature(pipeline.clean_params).parameters
+
+
+# --- which speaker reads --------------------------------------------------
+
+
+def test_the_japanese_default_is_one_of_the_voices_kokoro_ships():
+    assert tts.spec_for("jpn").voice in tts.KOKORO_VOICES[tts.JAPANESE]
+
+
+def test_a_named_voice_reaches_the_engine_that_has_voices_to_choose_from():
+    with mock.patch.dict(tts.ENGINES, dict.fromkeys(tts.ENGINES, _FakeEngine)):
+        tts.synthesize("jpn", "こんにちは。", 1.0, voice="jf_gongitsune")
+    assert _FakeEngine.sent["voice"] == "jf_gongitsune"
+
+
+def test_a_voice_is_not_offered_to_an_engine_that_has_no_such_argument():
+    """`Synthesizer` and `OpenJTalkSynthesizer` each speak in one fixed voice
+    and their `synthesize` says so. Passing one anyway would be a TypeError
+    inside a container rather than here."""
+    for language, engine in (("vie", ""), ("jpn", tts.OPENJTALK)):
+        with mock.patch.dict(tts.ENGINES, dict.fromkeys(tts.ENGINES, _FakeEngine)):
+            tts.synthesize(language, "こんにちは。", 1.0, engine=engine, voice="jf_nezumi")
+        assert "voice" not in _FakeEngine.sent
+
+
+def test_a_voice_nobody_ships_falls_back_rather_than_failing_the_job():
+    """By the time this is read the container is up, the text is on the Volume
+    and the GPU behind it is booked. A mistyped speaker name is not worth any
+    of that."""
+    assert tts.kokoro_voice("jpn", "jf_nonesuch") == tts.spec_for("jpn").voice
+    assert tts.kokoro_voice("jpn", "") == tts.spec_for("jpn").voice
+    assert tts.kokoro_voice("jpn", "jm_kumo") == "jm_kumo"
+
+
+def test_a_language_with_no_voices_to_choose_from_keeps_its_own():
+    """`kokoro_voice` is asked for every language, not only the ones with a
+    list — a Kokoro voice name is not a thing MMS could honour anyway."""
+    assert tts.kokoro_voice("vie", "jf_alpha") == tts.spec_for("vie").voice
 
 
 # --- speaking rate --------------------------------------------------------
