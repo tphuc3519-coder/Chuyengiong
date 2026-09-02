@@ -18,6 +18,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 6 | Consent gate & an toàn | 🟡 code xong, chờ verify watermark trên hạ tầng thật |
 | 7 | Audio watermark (§8 "cân nhắc thêm") | 🟡 code xong, chờ chạy checkpoint thật |
 | 8 | Text to speech theo giọng mẫu (có tiếng Nhật) | 🟡 code xong, chờ nghe thật trên container |
+| 9 | Đọc có ngữ điệu — ngắt nghỉ, lên xuống, cảm xúc | 🟡 code xong, chờ nghe thật trên container |
 
 ## Cấu trúc
 
@@ -29,6 +30,7 @@ modal_app/
 ├── separation.py   # tách stem trên GPU: Separator (@app.cls) — port từ tachnhac
 ├── conversion.py   # Seed-VC trên GPU: VoiceConverter (@app.cls)
 ├── tts.py          # văn bản → wav trên CPU: Synthesizer (MMS) + KokoroSynthesizer (tiếng Nhật)
+├── prosody.py      # đọc thế nào: ngắt nghỉ theo dấu câu, ngữ điệu, cảm xúc — Python thuần
 ├── mixing.py       # ffmpeg: mix vocal + nhạc nền, encode mp3
 ├── pipeline.py     # orchestration: spawn + nối các bước, cập nhật job state
 ├── storage.py      # file trên Volume + cron dọn rác
@@ -873,3 +875,99 @@ máy viết code):
 - [ ] container thứ hai không tải lại weights (HF_HOME trên Volume chạy đúng)
 - [ ] đo thời gian thật của bước synthesize trên CPU cho cả hai engine, để biết
       `cpu=4` là đủ hay thừa
+
+
+## Phase 9 — Đọc có ngữ điệu
+
+Phase 8 đọc được chữ. Nó đọc **đều**: câu nào cũng một tốc độ, một độ cao, một
+độ to, và giữa hai câu bất kỳ — dấu phẩy, dấu chấm, hay hết cả một đoạn — đúng
+0.25 giây im lặng như nhau. Nghe ra ngay: đó là máy đọc cho xong chứ không phải
+người đọc.
+
+Phase này thêm `modal_app/prosody.py`, và **không** thêm model nào.
+
+```
+text ──► split_blocks ──► plan() ──► [Beat, Beat, …] ──► engine + shape()
+```
+
+`tts.py` giữ phần "ai đọc", `prosody.py` giữ phần "đọc thế nào".
+
+### Vì sao không phải một model có cảm xúc
+
+Cả MMS-TTS lẫn Kokoro đều nói bằng đúng một giọng cố định, không có đầu vào
+emotion nào cả. Muốn có emotion thật theo kiểu conditioning thì phải thay engine
+lần thứ ba — thêm weight, thêm cold start, và mất luôn phần phủ ngôn ngữ mà MMS
+đang cho. Trong khi phần lớn cái tai nghe ra là "đọc có hồn" lại là những thứ
+viết ra được thành luật:
+
+- **Ngắt nghỉ dài ngắn theo dấu câu.** Hướng dẫn phổ biến của mấy hệ TTS thương
+  mại: 120–300 ms cho một chỗ ngắt trong câu, 400–700 ms cho hết đoạn hoặc chỗ
+  ngắt có chủ ý. Nên dấu phẩy (0.20s), dấu chấm (0.40s), dấu ba chấm (0.60s) và
+  dòng trống (0.75s) là bốn khoảng lặng khác nhau, thay cho một con số duy nhất.
+  Chỗ bị cắt giữa câu vì quá dài thì ngắn nhất (0.12s) — chỗ đó vốn không có
+  dấu nghỉ nào.
+- **Cao độ trôi xuống dần trong một đoạn rồi bắt lại ở đoạn sau** (declination).
+  Đây đúng là thứ khiến một dãy câu tổng hợp rời nhau nghe như đọc danh sách.
+  Nó được đặt **cân đối quanh 0** — câu đầu cao hơn nửa quãng, câu cuối thấp hơn
+  nửa quãng — để F0 trung vị của cả file không đổi, vì `pipeline._resolve_shift`
+  đo đúng con số đó để quyết định dịch giọng.
+- **Câu hỏi lên giọng, câu kể xuống giọng.** Câu kể xuống là phần đuôi của
+  declination; câu hỏi lên là một đoạn vuốt lên trong 0.35 giây cuối. Tiếng Nhật
+  hỏi bằng か cuối câu và thường không có dấu hỏi (「そうですか。」), nên chỗ đó
+  cũng được đọc là câu hỏi.
+- **Cảm xúc là năm thứ đi cùng nhau**: tốc độ, cao độ trung bình, biên độ lên
+  xuống, độ to, và độ dài khoảng lặng. Các nghiên cứu acoustic về giọng cảm xúc
+  thống nhất với nhau về *hướng* của cả năm — vui/giận thì F0 cao hơn, biên độ
+  rộng hơn, nói nhanh hơn và to hơn; buồn thì ngược lại cả năm và nghỉ nhiều
+  hơn. Nên một "cảm xúc" ở đây là năm con số theo đúng các hướng đó, biên độ cố
+  ý nhỏ hơn số đo trên giọng diễn: đây là giọng đọc, không phải diễn.
+
+### Đưa vào bằng cửa nào
+
+| Chỗ | Cái có sẵn |
+|---|---|
+| MMS (VITS) | `speaking_rate`, `noise_scale`, `noise_scale_duration` |
+| Kokoro | `speed` |
+| Sau khi tổng hợp | gain, dịch cao độ, vuốt cao độ cuối câu (librosa) |
+
+`noise_scale` là mức cho phép prior dao động — tức cao độ và năng lượng của bản
+đọc — còn `noise_scale_duration` là cùng thứ đó cho bộ dự đoán độ dài, tức nhịp.
+Style chỉnh chúng bằng **hệ số nhân** trên giá trị của chính checkpoint chứ
+không ghi đè bằng một hằng số: mặc định khác nhau theo từng checkpoint.
+
+Ba thuộc tính đó được đọc lúc forward, nên đặt lại cho **từng câu** không tốn gì
+thêm — một đoạn văn vẫn đúng bằng số lần gọi model như trước.
+
+### Hai giới hạn cố ý
+
+**Chỉ ở mức câu.** Nhấn một từ có nghĩa là cắt câu ra làm đôi và tổng hợp riêng
+từng nửa, mất coarticulation ở chỗ nối — đọc dở đi chứ không hay lên.
+
+**Mọi độ lệch đều nhân với một con số duy nhất.** `expressiveness` (0 → 1.5) là
+khoảng cách giữa bản đọc phẳng và style đã chọn. 0 không phải "không có style",
+nó chính là bản đọc mà Phase 8 cho ra. Chỉ *độ lệch* mới co lại: khoảng lặng sau
+dấu phẩy là dấu câu chứ không phải tâm trạng, nên nó sống sót ở mức 0.
+
+### Test
+
+`tests/test_prosody.py` phủ toàn bộ phần ra quyết định — nó là Python thuần trên
+một danh sách câu, chạy được trong CI không cần checkpoint, không cần container.
+Phần DSP (`shape`) chỉ test đường gain; phase vocoder làm gì với sóng thì không
+phải thứ unit test khẳng định được, nhưng đường lui khi máy không có librosa thì
+có.
+
+### Còn phải verify bằng tai
+
+- [ ] `modal run -m modal_app.tts --emotion cheerful --text "Chào cậu! Cậu khoẻ
+      không? Lâu rồi không gặp…"` → ba câu, ba khoảng lặng khác nhau, đúng một
+      câu lên giọng ở cuối
+- [ ] cùng đoạn văn qua cả năm style: nghe ra khác nhau, và không style nào
+      nghe như đang diễn
+- [ ] `--expressiveness 0` → đúng bằng bản đọc Phase 8 (trừ ngắt nghỉ theo dấu câu)
+- [ ] chỗ vuốt cao độ cuối câu hỏi không có tiếng "cụp" ở mối nối bốn bậc
+- [ ] tiếng Việt: dịch cao độ theo câu không làm méo thanh điệu (đây là lý do
+      các con số đều dưới 1.5 nửa cung)
+- [ ] `そうですか。` được đọc như câu hỏi
+- [ ] sau Seed-VC, ngữ điệu còn giữ được — nếu conversion nuốt mất phần lên
+      xuống thì phải đo lại xem nên đẩy biên độ lên bao nhiêu
+- [ ] đo thêm thời gian CPU: mỗi câu thêm một lần pitch_shift, câu hỏi thêm bốn

@@ -44,6 +44,15 @@ that reads 今日 as `kʲoː` and 田中 as `tanaka`.
 
 One engine would have been better. Two is what the language needs.
 
+**Neither of them is read flat.** Both speak in one fixed speaker with no
+emotion conditioning, so what they are given instead is a plan: `prosody.py`
+turns the text into a `Beat` per sentence — pace, height, level, the length of
+the silence after it, and a rise at the end of a question — and this module
+spends it on whichever knobs its engine has. That plan is the difference
+between a page read out and a page got through, and it is the only part of the
+reading either engine could not have worked out from the sentence in front of
+it: it is handed one at a time and cannot see the paragraph.
+
 **Numbers and symbols are not spoken.** MMS-TTS tokenises characters against a
 per-language vocabulary that holds letters and punctuation; a digit is not in
 it and is dropped without a word of complaint. "25 tuổi" is read as "tuổi".
@@ -64,6 +73,7 @@ from dataclasses import dataclass
 
 import modal
 
+from . import prosody
 from .app import MODEL_DIR, app, base_image, model_vol
 
 # ~2000 characters is 2 to 3 minutes of speech, which is where the Seed-VC pass
@@ -139,7 +149,10 @@ LANGUAGES = {
     ),
 }
 DEFAULT_LANGUAGE = "vie"
-# Silence inserted between segments, in place of the pause the split removed.
+# Silence between segments when nobody said how long it should be. `prosody`
+# decides that per segment from the punctuation that closed it — a comma is not
+# a full stop and neither is a blank line — so this is only the fallback for a
+# caller that hands `_join` audio with no plan attached.
 SEGMENT_GAP_SEC = 0.25
 # Room for the converter to work with at both ends. Seed-VC's first and last
 # frames are its least certain, and having them land on silence rather than on
@@ -221,19 +234,42 @@ def _wrap(piece: str, max_chars: int) -> list[str]:
     return parts
 
 
-def split_text(text: str, max_chars: int = SEGMENT_MAX_CHARS) -> list[str]:
-    """Text as a list of segments to synthesise one at a time.
+# A blank line: where one paragraph ends and the next begins. `_SENTENCE_END`
+# splits on any run of newlines and so cannot tell that from a wrapped line, and
+# the difference is three quarters of a second of silence and a pitch reset —
+# see `prosody`.
+_PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n\s*")
+
+
+def split_blocks(text: str, max_chars: int = SEGMENT_MAX_CHARS) -> list[list[str]]:
+    """Text as paragraphs of segments, which is what `prosody.plan` reads.
 
     Sentence boundaries first, because that is where a pause belongs anyway;
     anything still too long is broken at a clause. Empty pieces are dropped, so
-    blank lines and doubled punctuation cost nothing.
+    blank lines and doubled punctuation cost nothing — but *where* the blank
+    lines were is kept, because two of the reading rules are about the start and
+    the end of a paragraph.
     """
-    segments: list[str] = []
-    for piece in _SENTENCE_END.split(text.strip()):
-        piece = piece.strip()
-        if piece:
-            segments.extend(_wrap(piece, max_chars))
-    return segments
+    blocks: list[list[str]] = []
+    for paragraph in _PARAGRAPH_BREAK.split(text.strip()):
+        segments: list[str] = []
+        for piece in _SENTENCE_END.split(paragraph.strip()):
+            piece = piece.strip()
+            if piece:
+                segments.extend(_wrap(piece, max_chars))
+        if segments:
+            blocks.append(segments)
+    return blocks
+
+
+def split_text(text: str, max_chars: int = SEGMENT_MAX_CHARS) -> list[str]:
+    """`split_blocks` with the paragraphs flattened away.
+
+    Every caller that only needs to know how many times the model will be
+    called, and `check_text`, which only needs to know whether the answer is
+    zero.
+    """
+    return [segment for block in split_blocks(text, max_chars) for segment in block]
 
 
 # Wapuro romaji writes ん before a vowel as "nn" or "n'", and `jaconv` reads
@@ -289,13 +325,20 @@ def check_text(text: str, language: str = DEFAULT_LANGUAGE) -> str:
     return cleaned
 
 
-def _join(segments, sample_rate: int) -> bytes:
+def _join(segments, sample_rate: int, pauses: list[float] | None = None) -> bytes:
     """One wav out of the per-segment audio, with the pauses put back.
 
-    A gap between segments in place of the pause the split removed, a little
-    silence at each end so the converter's least certain frames land on nothing
-    rather than on the first syllable, and a fixed peak so both engines hand
-    Seed-VC input at the same level. `loudnorm` sets the real level later.
+    `pauses[i]` is the silence that follows segment `i`, which `prosody.plan`
+    read off the punctuation that closed it; the last entry is unused, because
+    what follows the last segment is the end. Without a plan every gap is
+    `SEGMENT_GAP_SEC`, which is what this did before there was one.
+
+    Then a little silence at each end so the converter's least certain frames
+    land on nothing rather than on the first syllable, and a fixed peak so both
+    engines hand Seed-VC input at the same level. `loudnorm` sets the real level
+    later — and it is why the per-segment gains are safe here: what this
+    normalises is the loudest moment, so a louder exclamation raises that one
+    sentence against the rest rather than the whole file against nothing.
     """
     import numpy as np
 
@@ -304,12 +347,15 @@ def _join(segments, sample_rate: int) -> bytes:
     if not segments:
         raise TtsError("nothing in this text could be read out loud")
 
-    gap = np.zeros(int(SEGMENT_GAP_SEC * sample_rate), dtype=np.float32)
+    gaps = list(pauses or [])
+    gaps += [SEGMENT_GAP_SEC] * (len(segments) - len(gaps))
     pad = np.zeros(int(EDGE_PAD_SEC * sample_rate), dtype=np.float32)
     pieces = [pad]
     for i, audio in enumerate(segments):
         if i:
-            pieces.append(gap)
+            gap = max(0.0, float(gaps[i - 1]))
+            if gap > 0:
+                pieces.append(np.zeros(int(gap * sample_rate), dtype=np.float32))
         pieces.append(np.asarray(audio, dtype=np.float32))
     pieces.append(pad)
 
@@ -378,12 +424,33 @@ class Synthesizer:
         self.model = VitsModel.from_pretrained(repo)
         self.model.eval()
         self.sr = self.model.config.sampling_rate
+        # VITS' two expressiveness knobs, as this checkpoint ships them.
+        # `noise_scale` is how much the prior is allowed to vary — the pitch and
+        # energy of the reading — and `noise_scale_duration` is the same for the
+        # stochastic duration predictor, which is its rhythm. A style moves them
+        # by a multiplier rather than setting a number, because the defaults are
+        # per checkpoint and overwriting them with a constant would be a change
+        # no style asked for.
+        self.base_noise_scale = float(self.model.noise_scale)
+        self.base_noise_scale_duration = float(self.model.noise_scale_duration)
         model_vol.commit()
         print(f"[Synthesizer] language={self.language} sr={self.sr}")
 
     @modal.method()
-    def synthesize(self, text: str, speaking_rate: float = DEFAULT_SPEAKING_RATE) -> bytes:
+    def synthesize(
+        self,
+        text: str,
+        speaking_rate: float = DEFAULT_SPEAKING_RATE,
+        emotion: str = prosody.DEFAULT_EMOTION,
+        expressiveness: float = prosody.DEFAULT_EXPRESSIVENESS,
+    ) -> bytes:
         """Text in, 16-bit PCM wav out, at the checkpoint's own sample rate.
+
+        One forward pass per sentence, and every one of them set up separately:
+        `prosody.plan` says how fast this sentence goes, how much the duration
+        predictor and the prior are allowed to wander, and what happens to the
+        audio afterwards. All three are read at forward time, so a paragraph
+        costs exactly what it did when every sentence was identical.
 
         The rate is not resampled here: `VoiceConverter.convert` decodes through
         ffmpeg at whatever rate its own checkpoint wants, so converting twice
@@ -395,29 +462,44 @@ class Synthesizer:
         import torch
 
         spec = spec_for(self.language)
-        segments = split_text(check_text(text, self.language), spec.segment_max_chars)
+        blocks = split_blocks(check_text(text, self.language), spec.segment_max_chars)
         rate = clamp_speaking_rate(speaking_rate)
-        # `speaking_rate` scales the predicted durations, so it is read at
-        # forward time and can be set per request without reloading anything.
-        self.model.speaking_rate = rate
+        beats = prosody.plan(
+            blocks,
+            emotion=emotion,
+            speaking_rate=rate,
+            expressiveness=expressiveness,
+        )
 
         started = time.time()
         spoken: list[np.ndarray] = []
+        pauses: list[float] = []
         with torch.no_grad():
-            for i, segment in enumerate(segments, start=1):
-                inputs = self.tokenizer(segment, return_tensors="pt")
+            for i, beat in enumerate(beats, start=1):
+                # Per sentence, not per container: all three are plain
+                # attributes the forward pass reads, so nothing is reloaded.
+                self.model.speaking_rate = clamp_speaking_rate(beat.rate)
+                self.model.noise_scale = self.base_noise_scale * beat.variation
+                self.model.noise_scale_duration = (
+                    self.base_noise_scale_duration * beat.duration_variation
+                )
+                inputs = self.tokenizer(beat.text, return_tensors="pt")
                 # Every character was outside the vocabulary — a segment of
                 # digits, or of a script this checkpoint does not read. Skip it
-                # rather than ask the model to generate from nothing.
+                # rather than ask the model to generate from nothing. Its pause
+                # goes with it, so the silence around the gap stays one pause.
                 if inputs["input_ids"].shape[-1] == 0:
-                    print(f"[Synthesizer] segment {i}/{len(segments)} has no readable characters")
+                    print(f"[Synthesizer] segment {i}/{len(beats)} has no readable characters")
                     continue
-                spoken.append(self.model(**inputs).waveform[0].cpu().numpy().astype(np.float32))
+                audio = self.model(**inputs).waveform[0].cpu().numpy().astype(np.float32)
+                spoken.append(prosody.shape(audio, self.sr, beat))
+                pauses.append(beat.pause_sec)
 
-        wav = _join(spoken, self.sr)
+        wav = _join(spoken, self.sr, pauses)
         print(
-            f"[Synthesizer] {len(segments)} segment(s) in {time.time() - started:.1f}s "
-            f"(rate={rate:.2f})"
+            f"[Synthesizer] {len(beats)} segment(s) in {time.time() - started:.1f}s "
+            f"(rate={rate:.2f} emotion={prosody.clean_emotion(emotion)} "
+            f"expressiveness={prosody.clamp_expressiveness(expressiveness):.2f})"
         )
         return wav
 
@@ -495,8 +577,21 @@ class KokoroSynthesizer:
         print(f"[KokoroSynthesizer] language={self.language} voice={spec.voice}")
 
     @modal.method()
-    def synthesize(self, text: str, speaking_rate: float = DEFAULT_SPEAKING_RATE) -> bytes:
-        """Text in, 16-bit PCM wav out at Kokoro's 24 kHz. Same contract as MMS."""
+    def synthesize(
+        self,
+        text: str,
+        speaking_rate: float = DEFAULT_SPEAKING_RATE,
+        emotion: str = prosody.DEFAULT_EMOTION,
+        expressiveness: float = prosody.DEFAULT_EXPRESSIVENESS,
+    ) -> bytes:
+        """Text in, 16-bit PCM wav out at Kokoro's 24 kHz. Same contract as MMS.
+
+        The same plan, with one knob fewer to spend it on: Kokoro takes a speed
+        and nothing else, so the pace is set per sentence here and the pitch,
+        the level and the final rise are all `prosody.shape`'s to apply. That is
+        the same division as MMS — `noise_scale` is the only thing MMS adds —
+        and the reading comes out the same shape either way.
+        """
         import time
 
         import numpy as np
@@ -506,45 +601,71 @@ class KokoroSynthesizer:
         # measured in, and romaji is about twice as long as the kana it spells.
         if self.spec.romaji_input:
             spoken_text = to_kana(spoken_text)
-        segments = split_text(spoken_text, self.spec.segment_max_chars)
+        blocks = split_blocks(spoken_text, self.spec.segment_max_chars)
         rate = clamp_speaking_rate(speaking_rate)
+        beats = prosody.plan(
+            blocks,
+            emotion=emotion,
+            speaking_rate=rate,
+            expressiveness=expressiveness,
+        )
 
         started = time.time()
         spoken: list[np.ndarray] = []
-        for i, segment in enumerate(segments, start=1):
+        pauses: list[float] = []
+        for i, beat in enumerate(beats, start=1):
             # `split_pattern=None`: the segments are already the split, and
             # letting Kokoro re-split on newlines it will not find only makes
             # the two disagree about where the pauses are.
             parts = [
                 result.audio.cpu().numpy().astype(np.float32)
                 for result in self.pipeline(
-                    segment, voice=self.spec.voice, speed=rate, split_pattern=None
+                    beat.text,
+                    voice=self.spec.voice,
+                    speed=clamp_speaking_rate(beat.rate),
+                    split_pattern=None,
                 )
                 if result.audio is not None
             ]
             if not parts:
-                print(f"[KokoroSynthesizer] segment {i}/{len(segments)} produced no audio")
+                print(f"[KokoroSynthesizer] segment {i}/{len(beats)} produced no audio")
                 continue
-            spoken.append(np.concatenate(parts) if len(parts) > 1 else parts[0])
+            audio = np.concatenate(parts) if len(parts) > 1 else parts[0]
+            spoken.append(prosody.shape(audio, KOKORO_SAMPLE_RATE, beat))
+            pauses.append(beat.pause_sec)
 
-        wav = _join(spoken, KOKORO_SAMPLE_RATE)
+        wav = _join(spoken, KOKORO_SAMPLE_RATE, pauses)
         print(
-            f"[KokoroSynthesizer] {len(segments)} segment(s) in {time.time() - started:.1f}s "
-            f"(rate={rate:.2f})"
+            f"[KokoroSynthesizer] {len(beats)} segment(s) in {time.time() - started:.1f}s "
+            f"(rate={rate:.2f} emotion={prosody.clean_emotion(emotion)} "
+            f"expressiveness={prosody.clamp_expressiveness(expressiveness):.2f})"
         )
         return wav
 
 
-def synthesize(language: str, text: str, speaking_rate: float) -> bytes:
+def synthesize(
+    language: str,
+    text: str,
+    speaking_rate: float,
+    emotion: str = prosody.DEFAULT_EMOTION,
+    expressiveness: float = prosody.DEFAULT_EXPRESSIVENESS,
+) -> bytes:
     """Read `text` with whichever engine speaks `language`, on its own container.
 
     The one place the engine split is resolved. `pipeline.py` asks for a
     language and gets audio back; which model produced it is this module's
     business, and adding a third engine should not reach the pipeline at all.
+    The same is now true of how it is read: both engines take the same style,
+    because the style is `prosody`'s and not either model's.
     """
     spec = spec_for(language)
     engine = KokoroSynthesizer if spec.engine == KOKORO else Synthesizer
-    return engine(language=language).synthesize.remote(text=text, speaking_rate=speaking_rate)
+    return engine(language=language).synthesize.remote(
+        text=text,
+        speaking_rate=speaking_rate,
+        emotion=emotion,
+        expressiveness=expressiveness,
+    )
 
 
 # `speak`, not `main`: local entrypoint names are one flat namespace across the
@@ -555,14 +676,21 @@ def speak(
     output: str = "spoken.wav",
     language: str = DEFAULT_LANGUAGE,
     speaking_rate: float = DEFAULT_SPEAKING_RATE,
+    emotion: str = prosody.DEFAULT_EMOTION,
+    expressiveness: float = prosody.DEFAULT_EXPRESSIVENESS,
 ) -> None:
     """Standalone smoke test: text in, one wav out. No reference, no GPU.
 
     modal run -m modal_app.tts --text "Xin chào."
     modal run -m modal_app.tts --language jpn --text "今日はいい天気ですね。"
+    modal run -m modal_app.tts --emotion cheerful \
+        --text "Chào cậu! Cậu khoẻ không? Lâu rồi không gặp…"
+
+    The last one is the whole point of `prosody`: three sentences, three
+    different pauses after them, and only one of them ends on a rise.
     """
     from pathlib import Path
 
-    result = synthesize(language, text, speaking_rate)
+    result = synthesize(language, text, speaking_rate, emotion, expressiveness)
     Path(output).write_bytes(result)
     print(f"wrote {output} ({len(result) / 1e6:.1f} MB)")

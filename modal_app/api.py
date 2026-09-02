@@ -35,6 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import audit, jobs, pipeline, ratelimit, storage
 from .app import APP_NAME, DATA_DIR, api_image, app, config_secret, data_vol
 from .audio_utils import AudioError
+from .prosody import DEFAULT_EMOTION, DEFAULT_EXPRESSIVENESS
 from .separation import DEFAULT_SEPARATION_MODEL, SeparationError, safe_ext
 from .tts import DEFAULT_LANGUAGE, DEFAULT_SPEAKING_RATE, TtsError, check_text
 
@@ -152,6 +153,11 @@ async def submit(
     text: Annotated[str, Form()] = "",
     language: Annotated[str, Form()] = DEFAULT_LANGUAGE,
     speaking_rate: Annotated[float, Form()] = DEFAULT_SPEAKING_RATE,
+    # How the text is read: which delivery, and how far it is taken. Both are
+    # `tts` only, both are clamped rather than refused, and both are safe to
+    # leave out — the defaults are the natural reading.
+    emotion: Annotated[str, Form()] = DEFAULT_EMOTION,
+    expressiveness: Annotated[float, Form()] = DEFAULT_EXPRESSIVENESS,
     mode: Annotated[str, Form()] = "song",
     # Absent means auto-detect (plan §7), which is not the same as 0 — that is
     # a client explicitly asking for no shift. The pipeline measures the vocal
@@ -192,6 +198,8 @@ async def submit(
                 "source_ext": safe_ext(source.filename if source else None),
                 "language": language,
                 "speaking_rate": speaking_rate,
+                "emotion": emotion,
+                "expressiveness": expressiveness,
             },
         )
         # Text and audio are the same thing to everything downstream — the
@@ -226,6 +234,7 @@ async def submit(
         input_bytes=len(source_bytes),
         reference_bytes=len(reference_bytes),
         language=params.get("language"),
+        emotion=params.get("emotion"),
     )
     return {
         "job_id": job_id,

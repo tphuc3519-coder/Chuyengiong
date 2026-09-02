@@ -5,11 +5,15 @@ import { useId, useState } from "react";
 import {
   DIFFUSION_STEPS_MAX,
   DIFFUSION_STEPS_MIN,
+  EMOTIONS,
+  EXPRESSIVENESS_MAX,
+  EXPRESSIVENESS_MIN,
   MAX_SEMITONE_SHIFT,
   MAX_VOCAL_GAIN_DB,
   SPEAKING_RATE_MAX,
   SPEAKING_RATE_MIN,
   clamp,
+  formatExpressiveness,
   formatRate,
   formatSemitones,
   type Mode,
@@ -64,28 +68,86 @@ export function Advanced({
       </button>
 
       <div id={panelId} hidden={!open} className="advanced-panel">
+        {/*
+          The `tts` block: how the text is read, before anything is done to the
+          voice reading it. Cách đọc first because it moves the other two —
+          "Trầm buồn" already comes with its own pace — and Độ biểu cảm under it
+          because it is the volume knob on whatever that choice was.
+        */}
         {mode === "tts" && (
-          <label className="slider">
-            <span className="slider-label">
-              Tốc độ đọc
-              <output>{formatRate(params.speakingRate)}</output>
-            </span>
-            <input
-              type="range"
-              min={SPEAKING_RATE_MIN}
-              max={SPEAKING_RATE_MAX}
-              step={0.05}
-              value={params.speakingRate}
-              disabled={disabled}
-              onChange={(event) =>
-                onChange({ ...params, speakingRate: Number(event.target.value) })
-              }
-            />
-            <span className="slider-hint">
-              Áp dụng lúc đọc văn bản, trước khi đổi giọng — nên nhịp nói là của bản đọc này, không
-              phải của giọng mẫu.
-            </span>
-          </label>
+          <>
+            <div className="slider">
+              <span className="slider-label" id={`${panelId}-emotion`}>
+                Cách đọc
+              </span>
+              <div className="segmented" role="radiogroup" aria-labelledby={`${panelId}-emotion`}>
+                {EMOTIONS.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={params.emotion === item.id}
+                    className={params.emotion === item.id ? "segment is-active" : "segment"}
+                    disabled={disabled}
+                    onClick={() => onChange({ ...params, emotion: item.id })}
+                  >
+                    <span className="segment-label">{item.label}</span>
+                    <span className="segment-hint">{item.hint}</span>
+                  </button>
+                ))}
+              </div>
+              <span className="slider-hint">
+                Nhịp ngắt nghỉ theo dấu câu, câu hỏi lên giọng ở cuối, giọng hạ dần trong một đoạn
+                rồi bắt lại ở đoạn sau — cái đó lúc nào cũng có. Chọn ở đây là chọn cái nền: nhanh
+                hay chậm, cao hay trầm, lên xuống nhiều hay ít.
+              </span>
+            </div>
+
+            <label className="slider">
+              <span className="slider-label">
+                Độ biểu cảm
+                <output>{formatExpressiveness(params.expressiveness)}</output>
+              </span>
+              <input
+                type="range"
+                min={EXPRESSIVENESS_MIN}
+                max={EXPRESSIVENESS_MAX}
+                step={0.1}
+                value={params.expressiveness}
+                disabled={disabled}
+                onChange={(event) =>
+                  onChange({ ...params, expressiveness: Number(event.target.value) })
+                }
+              />
+              <span className="slider-hint">
+                {params.expressiveness <= EXPRESSIVENESS_MIN
+                  ? "0% là đọc đều một mạch — vẫn ngắt nghỉ đúng dấu câu, nhưng câu nào cũng một giọng."
+                  : "Kéo lên thì lên xuống rõ hơn, kéo xuống thì điềm hơn. Quá tay dễ thành kịch."}
+              </span>
+            </label>
+
+            <label className="slider">
+              <span className="slider-label">
+                Tốc độ đọc
+                <output>{formatRate(params.speakingRate)}</output>
+              </span>
+              <input
+                type="range"
+                min={SPEAKING_RATE_MIN}
+                max={SPEAKING_RATE_MAX}
+                step={0.05}
+                value={params.speakingRate}
+                disabled={disabled}
+                onChange={(event) =>
+                  onChange({ ...params, speakingRate: Number(event.target.value) })
+                }
+              />
+              <span className="slider-hint">
+                Áp dụng lúc đọc văn bản, trước khi đổi giọng — nên nhịp nói là của bản đọc này,
+                không phải của giọng mẫu.
+              </span>
+            </label>
+          </>
         )}
 
         <div className="slider">

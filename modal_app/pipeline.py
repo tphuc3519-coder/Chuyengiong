@@ -30,6 +30,7 @@ from . import audit, jobs, storage, watermark
 from .app import DATA_DIR, api_image, app, data_vol
 from .audio_utils import clamp_diffusion_steps, clamp_semitone_shift
 from .mixing import clamp_gain_db
+from .prosody import DEFAULT_EMOTION, clamp_expressiveness, clean_emotion
 from .separation import DEFAULT_SEPARATION_MODEL, check_model, safe_ext
 from .tts import DEFAULT_LANGUAGE, check_language, clamp_speaking_rate
 
@@ -122,6 +123,12 @@ def clean_params(mode: str, raw: dict | None = None) -> dict:
         # error. `source_ext` means nothing on this branch — there is no file.
         params["language"] = check_language(raw.get("language") or DEFAULT_LANGUAGE)
         params["speaking_rate"] = clamp_speaking_rate(raw.get("speaking_rate"))
+        # How it is read, as opposed to what is read. Unlike the language these
+        # two are clamped rather than refused: an unknown style falls back to
+        # the natural reading, which is the reading this branch shipped with,
+        # and no request is worth failing over a knob that has a safe answer.
+        params["emotion"] = clean_emotion(raw.get("emotion") or DEFAULT_EMOTION)
+        params["expressiveness"] = clamp_expressiveness(raw.get("expressiveness"))
         params.pop("source_ext", None)
     return params
 
@@ -151,9 +158,12 @@ def _finished(
         shift=params.get("semitone_shift"),
         steps=params.get("diffusion_steps"),
         model=params.get("separation_model"),
-        # The language, never the text: what was said is the user's, the same
-        # way the audio is (plan §8 item 5).
+        # The language and the style, never the text: what was said is the
+        # user's, the same way the audio is (plan §8 item 5). How it was read is
+        # a setting, and knowing which styles anybody picks is the only way to
+        # find out whether the list is the right list.
         language=params.get("language"),
+        emotion=params.get("emotion"),
         watermark=params.get("watermark"),
         reason=type(exc).__name__ if exc is not None else None,
     )
@@ -361,6 +371,8 @@ def run_tts_pipeline(job_id: str, params: dict) -> str:
                 params["language"],
                 text=text,
                 speaking_rate=params["speaking_rate"],
+                emotion=params["emotion"],
+                expressiveness=params["expressiveness"],
             )
             storage.put(job_id, SPOKEN, spoken)
             data_vol.commit()
