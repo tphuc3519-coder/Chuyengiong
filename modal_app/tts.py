@@ -320,11 +320,25 @@ def _join(segments, sample_rate: int) -> bytes:
     return encode_wav(audio, sample_rate)
 
 
+# Pinned, and pinned in *both* images below rather than left to the resolver.
+#
+# `base_image` carries torch 2.4.0 and no transformers, so anything that asks
+# for transformers without a version gets the newest — today 5.x, which
+# requires torch >= 2.5. It does not fail on that: it prints
+#
+#     [transformers] Disabling PyTorch because PyTorch >= 2.5 is required but found 2.4.0
+#
+# to the build log and carries on without torch, and every model class it
+# exports becomes a stub that raises "requires the PyTorch library" the first
+# time something builds one. For the Kokoro container that is inside
+# `@modal.enter()`, on the first Japanese request, long after the deploy went
+# green. 4.46.3 is the version `conversion.py` already builds against.
+TRANSFORMERS_SPEC = "transformers==4.46.3"
+
 # transformers is the whole dependency: MMS-TTS is a VITS checkpoint, and
 # `VitsModel` synthesises straight to a waveform with no vocoder to install and
-# no phonemizer — the tokenizer works on characters. The pin matches the one
-# `conversion.py` already builds against.
-tts_image = base_image.pip_install("transformers==4.46.3").env({"HF_HOME": MODEL_DIR})
+# no phonemizer — the tokenizer works on characters.
+tts_image = base_image.pip_install(TRANSFORMERS_SPEC).env({"HF_HOME": MODEL_DIR})
 
 
 @app.cls(
@@ -413,14 +427,17 @@ class Synthesizer:
 # it needs no `espeak-ng` — that is the fallback for Kokoro's *European*
 # languages, which read through MMS in this app.
 #
-# The resolution was checked against the pins already in `base_image` (torch
-# 2.4.0, numpy<2, transformers 4.46.3): spacy 3.8 and thinc 8.3 come in and
-# leave numpy at 1.26.4, so nothing here drags the audio stack onto numpy 2.
+# `TRANSFORMERS_SPEC` is in the same call rather than left to `kokoro`, which
+# asks for transformers unversioned — see that constant for what the newest one
+# does to a torch 2.4.0 image. Everything else resolves around the pins already
+# in `base_image`: spacy 3.8 and thinc 8.3 come in and leave numpy at 1.26.4,
+# so nothing here drags the audio stack onto numpy 2, and torch stays put.
 kokoro_image = (
     base_image.pip_install(
         "kokoro==0.9.4",
         "misaki[ja]==0.9.4",
         "unidic-lite==1.0.8",
+        TRANSFORMERS_SPEC,
     )
     # `misaki[ja]` depends on `unidic`, which ships no dictionary — it is a
     # downloader for one, and `fugashi` picks it over `unidic-lite` whenever

@@ -101,6 +101,15 @@ def test_japanese_segments_stay_well_under_the_kokoro_truncation_point():
     assert tts.spec_for("jpn").segment_max_chars < tts.KOKORO_MAX_PHONEMES / 3
 
 
+def test_transformers_is_pinned_for_both_engines():
+    """`kokoro` asks for transformers unversioned, and the newest one requires
+    torch >= 2.5 against `base_image`'s 2.4.0 — which it answers by disabling
+    PyTorch and turning every model class into a stub that raises the first
+    time something builds one. That is inside `@modal.enter()`, on the first
+    Japanese request, long after a deploy has gone green."""
+    assert tts.TRANSFORMERS_SPEC.startswith("transformers==")
+
+
 # --- romaji ---------------------------------------------------------------
 #
 # Japanese typed without an IME is romaji, and Kokoro's front end hands Latin

@@ -782,6 +782,21 @@ Nên image cài `unidic-lite` rồi `pip uninstall -y unidic`. Cách khác là c
 `python -m unidic download` lúc build, tốn ~700 MB image cho những cách đọc mà
 `unidic-lite` đã có sẵn.
 
+**Bẫy `transformers` không pin.** `kokoro` khai báo `transformers` không kèm
+version, mà `base_image` pin torch 2.4.0 và không có transformers — nên
+resolver lấy bản mới nhất (5.x), thứ đòi torch ≥ 2.5. Nó **không** báo lỗi lúc
+build, chỉ in một dòng vào log:
+
+```
+[transformers] Disabling PyTorch because PyTorch >= 2.5 is required but found 2.4.0
+```
+
+rồi chạy tiếp không có torch, và mọi class model của nó thành stub ném
+`requires the PyTorch library` ở lần đầu có thứ gì dựng nó lên — tức là trong
+`@modal.enter()`, ở request tiếng Nhật đầu tiên, rất lâu sau khi deploy đã
+xanh. `TRANSFORMERS_SPEC` pin cả hai image vào 4.46.3, đúng bản `conversion.py`
+đang dùng.
+
 **Giới hạn ký tự theo ngôn ngữ.** Ký tự không phải đơn vị của lời nói: 2000 ký
 tự tiếng Việt và 700 ký tự tiếng Nhật là cùng khoảng 2–3 phút audio. Giới hạn
 đặt lên bản ghi chứ không đặt lên bàn phím, nên nó nằm trong `Language` cùng với
