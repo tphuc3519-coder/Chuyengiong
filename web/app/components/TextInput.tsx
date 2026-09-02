@@ -89,6 +89,12 @@ export function TextInput({
         Viết số và ký hiệu thành chữ — “25” hay “%” sẽ bị bỏ qua khi đọc. Chấm câu thì giữ nguyên,
         nó là chỗ ngắt nghỉ.
       </p>
+      {/* Nobody has an IME on every device they own. */}
+      {language === "jpn" && (
+        <p className="field-note">
+          Gõ romaji cũng được: “konnichiwa” đọc ra こんにちわ. Kana và kanji thì giữ nguyên.
+        </p>
+      )}
     </div>
   );
 }

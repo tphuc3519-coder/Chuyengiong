@@ -93,6 +93,9 @@ class Language:
     engine: str = MMS
     max_chars: int = MAX_TEXT_CHARS
     segment_max_chars: int = SEGMENT_MAX_CHARS
+    # Whether Latin letters in this language are romaji to be read as its own
+    # script rather than as themselves. See `to_kana`.
+    romaji_input: bool = False
     # Kokoro only: its own one-letter language code, and which of its voices
     # reads. Which voice barely matters — Seed-VC replaces the timbre a step
     # later — so this is simply a clear, natural speaker to convert from.
@@ -130,6 +133,7 @@ LANGUAGES = {
         # well under the 510 Kokoro truncates at.
         max_chars=700,
         segment_max_chars=80,
+        romaji_input=True,
         kokoro_code="j",
         voice="jf_alpha",
     ),
@@ -230,6 +234,32 @@ def split_text(text: str, max_chars: int = SEGMENT_MAX_CHARS) -> list[str]:
         if piece:
             segments.extend(_wrap(piece, max_chars))
     return segments
+
+
+# Wapuro romaji writes ん before a vowel as "nn" or "n'", and `jaconv` reads
+# only the apostrophe: "konnichiwa" comes back こんいちわ, a mora short and a
+# different word. Rewriting the doubled n into the form it does read costs one
+# regex — "onnanoko" and "sennin" come out おんなのこ and せんにん.
+_ROMAJI_DOUBLE_N = re.compile(r"n{2,}(?=[aiueo])", re.IGNORECASE)
+
+
+def to_kana(text: str) -> str:
+    """Romaji in `text` as kana, leaving kana, kanji and punctuation alone.
+
+    Japanese typed without an IME is romaji, and Kokoro's Japanese front end
+    hands Latin letters straight through untouched — `konnichiwa` reaches the
+    model as eleven Latin characters, which is not a reading of anything.
+
+    Romaji is phonetic, so this is a spelling change rather than a translation
+    and the result is the same audio: `kyou wa ii tenki desu ne.` comes out of
+    the G2P as `kʲoː βa iː teŋkʲi desɨ ne.`, which is exactly what
+    `今日はいい天気ですね。` gives. A Latin word inside Japanese text is read the
+    same way — `私はTanakaです` becomes 私はたなかです — which is the right answer
+    for a name and the closest available one for anything else.
+    """
+    import jaconv
+
+    return jaconv.alphabet2kana(_ROMAJI_DOUBLE_N.sub("n'n", text))
 
 
 def check_text(text: str, language: str = DEFAULT_LANGUAGE) -> str:
@@ -454,7 +484,12 @@ class KokoroSynthesizer:
 
         import numpy as np
 
-        segments = split_text(check_text(text, self.language), self.spec.segment_max_chars)
+        spoken_text = check_text(text, self.language)
+        # Before the split, not after: kana is what the segment budget is
+        # measured in, and romaji is about twice as long as the kana it spells.
+        if self.spec.romaji_input:
+            spoken_text = to_kana(spoken_text)
+        segments = split_text(spoken_text, self.spec.segment_max_chars)
         rate = clamp_speaking_rate(speaking_rate)
 
         started = time.time()

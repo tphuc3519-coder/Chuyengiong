@@ -788,6 +788,18 @@ tự tiếng Việt và 700 ký tự tiếng Nhật là cùng khoảng 2–3 ph�
 `segment_max_chars` (200 vs 80 — đo trên G2P thật thì 80 ký tự tiếng Nhật ra
 ~200 phoneme, còn Kokoro cắt cụt ở 510).
 
+**Romaji cũng đọc được.** Không phải máy nào cũng có IME, nên gõ `konnichiwa`
+phải ra được こんにちわ. Front end của Kokoro cho chữ Latin đi thẳng qua không
+đổi, nên `tts.to_kana` chuyển romaji sang kana *trước* khi cắt câu (kana mới là
+đơn vị của `segment_max_chars`). Romaji là chữ ghi âm nên đây là đổi chính tả
+chứ không phải dịch — `kyou wa ii tenki desu ne.` ra đúng bộ phoneme
+`kʲoː βa iː teŋkʲi desɨ ne.` mà `今日はいい天気ですね。` cho.
+
+Một cái bẫy nhỏ trong đó: romaji kiểu wapuro viết ん trước nguyên âm là `nn`
+hoặc `n'`, mà `jaconv` chỉ đọc dạng có dấu nháy — `konnichiwa` ra こん**い**ちわ,
+thiếu một mora và thành từ khác. `_ROMAJI_DOUBLE_N` viết lại `nn` thành `n'n`
+trước khi chuyển.
+
 **Cắt câu.** Tiếng Nhật viết 「です。」rồi vào câu sau, không có dấu cách nào cả —
 regex cũ đòi khoảng trắng sau dấu chấm nên nguyên đoạn văn sẽ thành một "câu"
 700 ký tự. `_SENTENCE_END` có thêm nhánh khớp rỗng sau `。！？`, và `_CLAUSE_BREAKS`
@@ -836,6 +848,7 @@ máy viết code):
 - [ ] tiếng Việt có dấu đọc đúng thanh điệu, không nuốt dấu
 - [ ] `--language jpn --text "今日はいい天気ですね。"` → ra tiếng Nhật thật, kanji
       đọc đúng (đây là mục quan trọng nhất của cả phase này)
+- [ ] `--language jpn --text "kyou wa ii tenki desu ne."` → nghe giống hệt câu trên
 - [ ] `hexgrad/Kokoro-82M` tải được cả `kokoro-v1_0.pth` lẫn `voices/jf_alpha.pt`
 - [ ] chạy end-to-end với giọng mẫu thật: bản ra nghe giống giọng mẫu chứ không
       phải giọng tổng hợp pha

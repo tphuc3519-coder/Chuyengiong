@@ -101,6 +101,50 @@ def test_japanese_segments_stay_well_under_the_kokoro_truncation_point():
     assert tts.spec_for("jpn").segment_max_chars < tts.KOKORO_MAX_PHONEMES / 3
 
 
+# --- romaji ---------------------------------------------------------------
+#
+# Japanese typed without an IME is romaji, and Kokoro's front end hands Latin
+# letters through untouched: `konnichiwa` reaches the model as eleven Latin
+# characters. Romaji is phonetic, so spelling it back into kana costs nothing
+# and is the difference between a reading and none.
+
+
+def test_japanese_is_the_language_that_takes_romaji():
+    assert tts.spec_for("jpn").romaji_input
+    assert not tts.spec_for("vie").romaji_input
+
+
+def test_romaji_becomes_kana():
+    assert tts.to_kana("kyou wa ii tenki desu ne.") == "きょう わ いい てんき です ね."
+    assert tts.to_kana("ohayou gozaimasu") == "おはよう ございます"
+
+
+def test_a_doubled_n_is_the_syllabic_n_not_a_dropped_mora():
+    """Wapuro romaji writes ん before a vowel as "nn"; jaconv reads only the
+    apostrophe form, so "konnichiwa" came back こんいちわ — a different word."""
+    assert tts.to_kana("konnichiwa") == "こんにちわ"
+    assert tts.to_kana("onnanoko") == "おんなのこ"
+    assert tts.to_kana("sennin") == "せんにん"
+    # An n that already closes a syllable was never the broken case.
+    assert tts.to_kana("shinbun") == "しんぶん"
+
+
+def test_kana_and_kanji_pass_through_untouched():
+    assert tts.to_kana("今日はいい天気ですね。") == "今日はいい天気ですね。"
+    # A Latin word inside Japanese is read as Japanese, which is the right
+    # answer for a name and the closest available one for anything else.
+    assert tts.to_kana("私はTanakaです。") == "私はたなかです。"
+
+
+def test_romaji_keeps_its_punctuation_so_the_split_still_works():
+    """The splitter runs after the conversion, so a full stop that did not
+    survive it would take the sentence boundary with it."""
+    assert tts.split_text(tts.to_kana("konnichiwa. genki desu ka?")) == [
+        "こんにちわ.",
+        "げんき です か?",
+    ]
+
+
 # --- the text -------------------------------------------------------------
 
 
