@@ -46,6 +46,22 @@ chứ không hardcode vào client bundle — nên nó được phục vụ **lú
 bị nhúng thẳng vào bundle lúc build. Hệ quả tiện: cùng một build chạy được cho cả
 preview lẫn production.
 
+## Hai chế độ beat
+
+`rebeat` ("Đổi beat") giữ nguyên giọng gốc và chỉ thay nhạc nền; `beat` ("Đổi
+beat + giọng") làm cả hai. Chúng dùng chung đúng một component nguồn beat, và
+khác nhau ở ba chỗ trong UI:
+
+- bước "Giọng mẫu" bị **ẩn** ở `rebeat` — không phải disable, vì backend từ
+  chối reference gửi tới mode đó và một ô trống ở đây là lời mời tới một cái 400;
+- trong "Tinh chỉnh", dịch cao độ / chất lượng / bám giọng mẫu biến mất, còn lại
+  độ trong và âm lượng giọng;
+- câu cam kết đổi sang _"tôi có quyền sử dụng bản ghi này"_, vì không có file
+  tham chiếu nào để cam kết về. Bắt ai đó xác nhận quyền với một file họ chưa
+  từng được hỏi là một checkbox không ai tick thật lòng được.
+
+`convertsVoice(mode)` trong `lib/params.ts` là chỗ duy nhất quyết định cả ba.
+
 ## Chế độ "Đổi beat"
 
 `app/components/BeatSource.tsx`. Mode `beat` thêm đúng một bước vào form (2b) và

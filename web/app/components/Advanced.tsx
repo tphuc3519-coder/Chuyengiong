@@ -17,6 +17,7 @@ import {
   SPEAKING_RATE_MAX,
   SPEAKING_RATE_MIN,
   clamp,
+  convertsVoice,
   formatExpressiveness,
   formatPercent,
   formatRate,
@@ -50,6 +51,11 @@ export function Advanced({
 }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
+  // `rebeat` keeps the singer it was given, so the pitch, the step count and
+  // the guidance strength are not knobs it has — the backend does not read
+  // them for it. What survives is what applies to any mix: how much the voice
+  // is cleaned up, and how loud it sits.
+  const converts = convertsVoice(mode);
   const pitchLimit = MAX_SEMITONE_SHIFT[mode];
   const auto = params.semitoneShift === null;
   // What "no explicit shift" means differs by mode, because the backend only
@@ -156,111 +162,117 @@ export function Advanced({
           </>
         )}
 
-        <div className="slider">
-          <span className="slider-label">
-            Dịch cao độ
-            <output>
+        {converts && (
+          <div className="slider">
+            <span className="slider-label">
+              Dịch cao độ
+              <output>
+                {auto
+                  ? keepsKey
+                    ? "giữ tone gốc"
+                    : detected === null
+                      ? "tự động"
+                      : `tự động · lần trước ${formatSemitones(detected)}`
+                  : `${formatSemitones(params.semitoneShift ?? 0)} nửa cung`}
+              </output>
+            </span>
+
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={auto}
+                disabled={disabled}
+                onChange={(event) =>
+                  onChange({
+                    ...params,
+                    // Turning auto off starts from what the last run measured,
+                    // which is the number the user is reacting to.
+                    semitoneShift: event.target.checked
+                      ? null
+                      : clamp(detected ?? 0, -pitchLimit, pitchLimit),
+                  })
+                }
+              />
+              <span>{keepsKey ? "Giữ nguyên tone gốc" : "Tự động dò từ giọng mẫu"}</span>
+            </label>
+
+            {!auto && (
+              <input
+                type="range"
+                min={-pitchLimit}
+                max={pitchLimit}
+                step={1}
+                value={params.semitoneShift ?? 0}
+                disabled={disabled}
+                aria-label="Dịch cao độ, nửa cung"
+                onChange={(event) =>
+                  onChange({ ...params, semitoneShift: Number(event.target.value) })
+                }
+              />
+            )}
+
+            <span className="slider-hint">
               {auto
-                ? keepsKey
-                  ? "giữ tone gốc"
-                  : detected === null
-                    ? "tự động"
-                    : `tự động · lần trước ${formatSemitones(detected)}`
-                : `${formatSemitones(params.semitoneShift ?? 0)} nửa cung`}
-            </output>
-          </span>
+                ? mode === "beat"
+                  ? "Beat mới được kéo về tông của giọng chứ không ngược lại, nên giọng cứ để nguyên."
+                  : mode === "song"
+                    ? "Nhạc nền không được dịch theo, nên một lượng dịch lẻ sẽ đặt giọng vào tông khác bản phối. Để nguyên là an toàn."
+                    : keepsKey
+                      ? "Bản hát có key của nó. Để nguyên thì giai điệu giữ đúng tông đã thu."
+                      : "Đo F0 trung vị của giọng trong bài và của giọng mẫu rồi lấy chênh lệch. Chỉ tính trên đoạn có tiếng."
+                : keepsKey
+                  ? "Nam→nữ thường +12, nữ→nam thường −12. Bội số của 12 là một quãng tám, giữ nguyên key; các giá trị khác sẽ lệch tông."
+                  : `Giọng nói giới hạn ±${pitchLimit}: dịch xa hơn nghe méo thanh điệu.`}
+            </span>
+          </div>
+        )}
 
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={auto}
-              disabled={disabled}
-              onChange={(event) =>
-                onChange({
-                  ...params,
-                  // Turning auto off starts from what the last run measured,
-                  // which is the number the user is reacting to.
-                  semitoneShift: event.target.checked
-                    ? null
-                    : clamp(detected ?? 0, -pitchLimit, pitchLimit),
-                })
-              }
-            />
-            <span>{keepsKey ? "Giữ nguyên tone gốc" : "Tự động dò từ giọng mẫu"}</span>
-          </label>
-
-          {!auto && (
+        {converts && (
+          <label className="slider">
+            <span className="slider-label">
+              Chất lượng
+              <output>{params.diffusionSteps} bước</output>
+            </span>
             <input
               type="range"
-              min={-pitchLimit}
-              max={pitchLimit}
-              step={1}
-              value={params.semitoneShift ?? 0}
+              min={DIFFUSION_STEPS_MIN}
+              max={DIFFUSION_STEPS_MAX}
+              step={5}
+              value={params.diffusionSteps}
               disabled={disabled}
-              aria-label="Dịch cao độ, nửa cung"
               onChange={(event) =>
-                onChange({ ...params, semitoneShift: Number(event.target.value) })
+                onChange({ ...params, diffusionSteps: Number(event.target.value) })
               }
             />
-          )}
+            <span className="slider-hint">
+              Cao hơn thì mượt hơn nhưng chậm hơn tuyến tính. Trên {DIFFUSION_STEPS_MAX} gần như
+              không cải thiện thêm.
+            </span>
+          </label>
+        )}
 
-          <span className="slider-hint">
-            {auto
-              ? mode === "beat"
-                ? "Beat mới được kéo về tông của giọng chứ không ngược lại, nên giọng cứ để nguyên."
-                : mode === "song"
-                  ? "Nhạc nền không được dịch theo, nên một lượng dịch lẻ sẽ đặt giọng vào tông khác bản phối. Để nguyên là an toàn."
-                  : keepsKey
-                    ? "Bản hát có key của nó. Để nguyên thì giai điệu giữ đúng tông đã thu."
-                    : "Đo F0 trung vị của giọng trong bài và của giọng mẫu rồi lấy chênh lệch. Chỉ tính trên đoạn có tiếng."
-              : keepsKey
-                ? "Nam→nữ thường +12, nữ→nam thường −12. Bội số của 12 là một quãng tám, giữ nguyên key; các giá trị khác sẽ lệch tông."
-                : `Giọng nói giới hạn ±${pitchLimit}: dịch xa hơn nghe méo thanh điệu.`}
-          </span>
-        </div>
-
-        <label className="slider">
-          <span className="slider-label">
-            Chất lượng
-            <output>{params.diffusionSteps} bước</output>
-          </span>
-          <input
-            type="range"
-            min={DIFFUSION_STEPS_MIN}
-            max={DIFFUSION_STEPS_MAX}
-            step={5}
-            value={params.diffusionSteps}
-            disabled={disabled}
-            onChange={(event) =>
-              onChange({ ...params, diffusionSteps: Number(event.target.value) })
-            }
-          />
-          <span className="slider-hint">
-            Cao hơn thì mượt hơn nhưng chậm hơn tuyến tính. Trên {DIFFUSION_STEPS_MAX} gần như không
-            cải thiện thêm.
-          </span>
-        </label>
-
-        <label className="slider">
-          <span className="slider-label">
-            Bám giọng mẫu
-            <output>{formatPercent(params.cfgRate)}</output>
-          </span>
-          <input
-            type="range"
-            min={CFG_RATE_MIN}
-            max={CFG_RATE_MAX}
-            step={0.05}
-            value={params.cfgRate}
-            disabled={disabled}
-            onChange={(event) => onChange({ ...params, cfgRate: Number(event.target.value) })}
-          />
-          <span className="slider-hint">
-            Kéo lên thì giống giọng mẫu hơn nhưng cũng lộ chất máy hơn — model càng bị ép theo mẫu
-            thì nhiễu của nó cũng bị ép theo. Kéo xuống thì còn lại nhiều nét của giọng gốc trong
-            file. Ở giữa là chỗ hợp với hầu hết bài.
-          </span>
-        </label>
+        {converts && (
+          <label className="slider">
+            <span className="slider-label">
+              Bám giọng mẫu
+              <output>{formatPercent(params.cfgRate)}</output>
+            </span>
+            <input
+              type="range"
+              min={CFG_RATE_MIN}
+              max={CFG_RATE_MAX}
+              step={0.05}
+              value={params.cfgRate}
+              disabled={disabled}
+              onChange={(event) => onChange({ ...params, cfgRate: Number(event.target.value) })}
+            />
+            <span className="slider-hint">
+              Kéo lên thì giống giọng mẫu hơn nhưng cũng lộ chất máy hơn — model càng bị ép theo mẫu
+              thì nhiễu của nó cũng bị ép theo. Kéo xuống thì còn lại nhiều nét của giọng gốc trong
+              file. Ở giữa là chỗ hợp với hầu hết bài.
+            </span>
+          </label>
+        )}
 
         <label className="slider">
           <span className="slider-label">
@@ -283,7 +295,7 @@ export function Advanced({
           </span>
         </label>
 
-        {(mode === "song" || mode === "beat") && (
+        {(mode === "song" || mode === "beat" || mode === "rebeat") && (
           <label className="slider">
             <span className="slider-label">
               Âm lượng giọng

@@ -7,13 +7,31 @@
  * when a number moves there, move it here too.
  */
 
-export type Mode = "song" | "beat" | "vocal" | "speech" | "tts";
+export type Mode = "song" | "beat" | "rebeat" | "vocal" | "speech" | "tts";
+
+/**
+ * The modes that convert a voice, and therefore need a reference.
+ *
+ * `rebeat` is the only one that does not — it keeps the singer it was given —
+ * which is why it has no voice sample step, no pitch slider and no voice
+ * profile. The backend refuses a reference sent to it rather than ignoring one.
+ */
+export function convertsVoice(mode: Mode): boolean {
+  return mode !== "rebeat";
+}
 
 /**
  * `beat` is `song` with the backing track replaced rather than kept: same
  * separation, same conversion, and then the original instrumental is measured
- * for tempo and key and thrown away. What goes back under the voice is either a
- * beat the user uploaded or one generated from a description.
+ * for tempo and key and thrown away. What goes back under the voice is a beat
+ * the user uploaded, one generated from a description, or the song's own
+ * chords rebuilt from scratch.
+ *
+ * `rebeat` is that without the conversion — the singer is left exactly as they
+ * were. It exists as a mode of its own because bundling it into `beat` made
+ * changing a backing track cost a voice sample, a consent question about
+ * somebody's voice and a second GPU pass, none of which somebody who only
+ * wants a different beat should be asked for.
  *
  * `vocal` is `song` without the separator, and that is the whole difference.
  *
@@ -26,7 +44,8 @@ export type Mode = "song" | "beat" | "vocal" | "speech" | "tts";
  */
 export const MODES: { id: Mode; label: string; hint: string }[] = [
   { id: "song", label: "Bài hát", hint: "Tách nhạc nền, đổi giọng, ghép lại" },
-  { id: "beat", label: "Đổi beat", hint: "Thay nhạc nền bằng beat khác hoặc beat tự sinh" },
+  { id: "rebeat", label: "Đổi beat", hint: "Giữ nguyên giọng gốc, chỉ thay nhạc nền" },
+  { id: "beat", label: "Đổi beat + giọng", hint: "Vừa thay nhạc nền vừa đổi sang giọng mẫu" },
   { id: "vocal", label: "Giọng hát", hint: "File đã tách sẵn — đổi giọng, giữ nguyên" },
   { id: "speech", label: "Giọng nói", hint: "Đổi giọng trực tiếp, nhanh hơn" },
   { id: "tts", label: "Văn bản", hint: "Gõ chữ, đọc lên bằng giọng mẫu" },
@@ -40,6 +59,8 @@ export const MODES: { id: Mode; label: string; hint: string }[] = [
 export const MAX_SEMITONE_SHIFT: Record<Mode, number> = {
   song: 12,
   beat: 12,
+  // Never read — `rebeat` converts nothing — but the record has to be total.
+  rebeat: 12,
   vocal: 12,
   speech: 8,
   tts: 8,
@@ -51,6 +72,7 @@ export const DEFAULT_DIFFUSION_STEPS: Record<Mode, number> = {
   song: 50,
   // Same checkpoint as a song: it is a song, with a different bed under it.
   beat: 50,
+  rebeat: 50,
   // A vocal take converts with the singing checkpoint, so it wants the same
   // number of steps a song does.
   vocal: 50,

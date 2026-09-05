@@ -131,9 +131,28 @@ def test_a_nonsense_seed_falls_back_to_a_different_beat_every_time():
 
 
 def test_only_the_branches_that_start_from_a_mix_run_the_separator():
-    assert set(pipeline.SEPARATING_MODES) == {"song", "beat"}
+    assert set(pipeline.SEPARATING_MODES) == {"song", "beat", "rebeat"}
     for mode in pipeline.SEPARATING_MODES:
         assert "separation_model" in pipeline.clean_params(mode)
+
+
+def test_both_beat_branches_take_a_beat_source():
+    assert set(pipeline.BEAT_MODES) == {"beat", "rebeat"}
+    for mode in pipeline.BEAT_MODES:
+        assert pipeline.clean_params(mode)["beat_source"] == pipeline.DEFAULT_BEAT_SOURCE
+
+
+def test_the_rebeat_branch_converts_nothing_and_says_so_by_omission():
+    """It keeps the singer it was given, so a pitch shift, a step count and a
+    voice profile are not settings it has. Recording them anyway would put
+    numbers in the job record that nothing reads and `/status` reports."""
+    params = pipeline.clean_params("rebeat")
+    assert "rebeat" not in jobs.CONVERSION_MODE
+    for absent in ("semitone_shift", "diffusion_steps", "cfg_rate", "voice_profile"):
+        assert absent not in params
+    # What it does still have: it separates, it mixes, and it is watermarked.
+    for present in ("separation_model", "beat_source", "clarity", "vocal_gain_db", "watermark"):
+        assert present in params
 
 
 def test_the_vocal_branch_converts_as_singing_and_keeps_the_key():

@@ -2,7 +2,7 @@
 
     GET  /health
     GET  /voices
-    POST /submit            multipart: input | text, reference, beat, mode, params, consent
+    POST /submit            multipart: input | text, reference?, beat, mode, params, consent
     GET  /status/{job_id}
     GET  /download/{job_id}
 
@@ -132,7 +132,7 @@ def _start_job(
     mode: str,
     params: dict,
     source: bytes,
-    reference: bytes,
+    reference: bytes | None,
     client: str,
     beat: bytes | None = None,
 ) -> str:
@@ -147,12 +147,16 @@ def _start_job(
     expires a job's audio after six hours has to take what the user wrote with
     it, and a job record is not where that belongs.
 
-    `beat` is the replacement backing track on the `beat` branch, when one was
+    `beat` is the replacement backing track on the beat branches, when one was
     uploaded rather than described. It expires with everything else.
+
+    `reference` is None on `rebeat` alone: it converts nothing, so there is no
+    voice to be given.
     """
     job_id = storage.new_job_id()
     storage.put(job_id, pipeline.TEXT if mode == "tts" else pipeline.INPUT, source)
-    storage.put(job_id, pipeline.REFERENCE, reference)
+    if reference is not None:
+        storage.put(job_id, pipeline.REFERENCE, reference)
     if beat is not None:
         # Under the name the pipeline looks for, so an uploaded beat and a
         # generated one are the same artifact by the time anything reads it.
@@ -179,7 +183,11 @@ def _start_job(
 @web.post("/submit")
 async def submit(
     request: Request,
-    reference: Annotated[UploadFile, File()],
+    # Required for every mode except `rebeat`, which converts nothing and
+    # therefore has no voice to be handed. Optional in the signature and
+    # required below, so the refusal is a 400 explaining which mode needs it
+    # rather than a 422 about a missing form field.
+    reference: Annotated[UploadFile | None, File()] = None,
     # Optional because `tts` has no file to send: that branch reads `text`
     # instead, and which of the two is required is decided by `mode` below
     # rather than by the signature.
@@ -244,6 +252,11 @@ async def submit(
     converted voice over a different bed. `beat_source` says where that bed
     comes from — an uploaded `beat` file, music generated from `beat_prompt`, or
     the song's own chords rebuilt on synthesised instruments.
+
+    `rebeat` is that without the conversion: the singer is left exactly as they
+    were and only the backing track changes. It is the one mode that needs no
+    `reference` — and refuses one, because sending a voice sample to a job that
+    will never look at it is a misunderstanding worth answering.
     """
     client = ratelimit.client_key(
         ratelimit.address_from_headers(
@@ -254,8 +267,8 @@ async def submit(
     if not consent:
         raise HTTPException(
             400,
-            "consent is required: confirm you have the right to use this voice, "
-            "or that it is your own",
+            "consent is required: confirm you have the right to the voice and the "
+            "recording you are using, or that they are your own",
         )
     try:
         params = pipeline.clean_params(
@@ -295,14 +308,27 @@ async def submit(
         raise HTTPException(400, "input file is required for this mode")
     else:
         source_bytes = await _read_upload(source, MAX_INPUT_BYTES, "input")
-    reference_bytes = await _read_upload(reference, MAX_REFERENCE_BYTES, "reference")
+
+    # The one mode with no voice in it. Refused rather than ignored when a
+    # reference is sent anyway: silently discarding it is how somebody spends a
+    # run wondering why the singer did not change.
+    if mode == "rebeat":
+        if reference is not None:
+            raise HTTPException(
+                400, "this mode keeps the original singer, so it takes no reference voice"
+            )
+        reference_bytes = None
+    elif reference is None:
+        raise HTTPException(400, "a reference voice is required for this mode")
+    else:
+        reference_bytes = await _read_upload(reference, MAX_REFERENCE_BYTES, "reference")
 
     # What each source requires, checked here because only this layer can see the
     # upload — `clean_params` gets the prompt and never the file. Refused rather
     # than resolved by a precedence rule: no ordering between "the file I sent"
     # and "the beat I described" is one anybody would guess.
     beat_bytes = None
-    if mode == "beat":
+    if mode in pipeline.BEAT_MODES:
         source_of_beat = params["beat_source"]
         if source_of_beat == "upload":
             if beat is None:
@@ -333,7 +359,7 @@ async def submit(
         # On the `tts` branch this is how long the text was, never what it
         # said — the same rule the audio has been under all along.
         input_bytes=len(source_bytes),
-        reference_bytes=len(reference_bytes),
+        reference_bytes=len(reference_bytes) if reference_bytes else None,
         # How the bed got here, never what it was asked to sound like.
         beat_bytes=len(beat_bytes) if beat_bytes else None,
         beat_source=params.get("beat_source"),

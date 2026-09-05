@@ -13,7 +13,7 @@
  * * `download` goes straight to Modal again — same size argument as the upload.
  */
 
-import type { Mode, Params } from "./params";
+import { convertsVoice, type Mode, type Params } from "./params";
 
 export type Status =
   | "queued"
@@ -150,7 +150,8 @@ export type SubmitInput = {
   text?: string;
   /** `beat` mode only, and only when the user brought their own. */
   beat?: File | null;
-  reference: File | Blob;
+  /** Omitted on `rebeat`, which converts nothing and refuses one. */
+  reference: File | Blob | null;
   referenceName: string;
   consent: boolean;
   onProgress?: (fraction: number) => void;
@@ -174,7 +175,7 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
   }
   // Named rather than inferred: `remake` sends neither a file nor a prompt, so
   // there would be nothing for the backend to infer it from.
-  if (input.mode === "beat") {
+  if (input.mode === "beat" || input.mode === "rebeat") {
     form.set("beat_source", input.params.beatSource);
     if (input.params.beatSource === "generate") {
       form.set("beat_prompt", input.params.beatPrompt);
@@ -186,19 +187,23 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
       form.set("beat", input.beat, input.beat.name);
     }
   }
-  form.set("reference", input.reference, input.referenceName);
+  if (input.reference) form.set("reference", input.reference, input.referenceName);
   form.set("mode", input.mode);
-  // Omitted, not sent as 0: an absent field is how the backend is told to
-  // measure the pitch itself, and 0 is a real setting that suppresses it.
-  if (input.params.semitoneShift !== null) {
-    form.set("semitone_shift", String(input.params.semitoneShift));
+  // Nothing about the conversion on the one mode that has none: the backend
+  // does not read these for `rebeat`, and sending them would only suggest it
+  // might.
+  if (convertsVoice(input.mode)) {
+    // Omitted, not sent as 0: an absent field is how the backend is told to
+    // measure the pitch itself, and 0 is a real setting that suppresses it.
+    if (input.params.semitoneShift !== null) {
+      form.set("semitone_shift", String(input.params.semitoneShift));
+    }
+    form.set("diffusion_steps", String(input.params.diffusionSteps));
+    // Always sent, never omitted: 0 is a real setting — no guidance at all —
+    // so "leave it out and let the server decide" is a different request.
+    form.set("cfg_rate", String(input.params.cfgRate));
   }
-  form.set("diffusion_steps", String(input.params.diffusionSteps));
   form.set("vocal_gain_db", String(input.params.vocalGainDb));
-  // Always sent, never omitted: 0 is a real setting for both — no guidance, no
-  // post-processing — so "leave it out and let the server decide" is a
-  // different request from "send zero", and this form always has an answer.
-  form.set("cfg_rate", String(input.params.cfgRate));
   form.set("clarity", String(input.params.clarity));
   form.set("consent", String(input.consent));
 

@@ -198,6 +198,78 @@ def test_an_unknown_source_falls_back_to_the_one_that_needs_no_model(client, sta
     assert started[0]["params"]["beat_source"] == "upload"
 
 
+# --- rebeat: the one mode that converts nothing ---------------------------
+
+
+def test_rebeat_needs_no_reference_voice(client, started):
+    """The whole point of the mode: changing a backing track should not cost a
+    voice sample, a consent question about somebody's voice, and a GPU pass."""
+    response = client.post(
+        "/submit",
+        data={"mode": "rebeat", "consent": "true", "beat_source": "remake"},
+        files={"input": ("song.m4a", b"fake-audio", "audio/mp4")},
+    )
+    assert response.status_code == 200
+    assert started[0]["mode"] == "rebeat"
+    assert started[0]["reference"] is None
+
+
+def test_rebeat_refuses_a_reference_rather_than_ignoring_it(client, started):
+    """Silently discarding it is how somebody spends a run wondering why the
+    singer did not change."""
+    response = client.post(
+        "/submit",
+        data={"mode": "rebeat", "consent": "true", "beat_source": "remake"},
+        files={
+            "input": ("song.m4a", b"fake-audio", "audio/mp4"),
+            "reference": ("voice.wav", b"fake-voice", "audio/wav"),
+        },
+    )
+    assert response.status_code == 400
+    assert started == []
+
+
+def test_rebeat_carries_no_conversion_settings_at_all(client, started):
+    """It converts nothing, so a pitch shift and a step count are not settings
+    it has — recording them would put numbers in the job record that nothing
+    reads and `/status` would report."""
+    client.post(
+        "/submit",
+        data={"mode": "rebeat", "consent": "true", "beat_source": "remake", "semitone_shift": "5"},
+        files={"input": ("song.m4a", b"fake-audio", "audio/mp4")},
+    )
+    params = started[0]["params"]
+    assert "semitone_shift" not in params
+    assert "diffusion_steps" not in params
+    assert "voice_profile" not in params
+    # …but it still separates, still mixes, and still gets watermarked.
+    assert params["separation_model"]
+    assert "clarity" in params and "vocal_gain_db" in params and "watermark" in params
+
+
+def test_rebeat_still_needs_consent(client, started):
+    response = client.post(
+        "/submit",
+        data={"mode": "rebeat", "consent": "false", "beat_source": "remake"},
+        files={"input": ("song.m4a", b"fake-audio", "audio/mp4")},
+    )
+    assert response.status_code == 400
+    assert started == []
+
+
+def test_rebeat_takes_a_beat_file_like_the_bundled_mode_does(client, started):
+    response = client.post(
+        "/submit",
+        data={"mode": "rebeat", "consent": "true", "beat_source": "upload"},
+        files={
+            "input": ("song.m4a", b"fake-audio", "audio/mp4"),
+            "beat": ("beat.wav", b"fake-beat", "audio/wav"),
+        },
+    )
+    assert response.status_code == 200
+    assert started[0]["beat"] == b"fake-beat"
+
+
 def test_the_other_modes_ignore_a_beat_that_was_sent_anyway(client, started):
     assert client.post("/submit", **beat_upload(mode="song")).status_code == 200
     assert started[0]["beat"] is None
@@ -340,9 +412,14 @@ def test_tts_still_needs_consent(client, started):
 
 
 def test_tts_still_needs_a_reference_voice(client, started):
+    """A 400 saying which mode needs it, not a 422 about a missing form field:
+    the reference became optional in the signature when `rebeat` arrived, so the
+    requirement is stated per mode now."""
     form = speak()
     form["files"] = {}
-    assert client.post("/submit", **form).status_code == 422
+    response = client.post("/submit", **form)
+    assert response.status_code == 400
+    assert "reference" in response.json()["detail"]
     assert started == []
 
 

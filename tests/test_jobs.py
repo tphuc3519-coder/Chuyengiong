@@ -207,7 +207,13 @@ def test_expired_records_are_found_and_forgotten(store):
 
 def test_job_modes_map_onto_conversion_modes():
     """`song` is a job mode; `singing` is the checkpoint it converts with."""
-    assert set(jobs.CONVERSION_MODE) == set(jobs.JOB_MODES)
+    # Every mode that converts has a checkpoint, and `rebeat` is deliberately
+    # not in the map: it has no conversion mode because it does not convert,
+    # and a placeholder entry would be a lie `clean_params` would read as an
+    # answer.
+    assert set(jobs.CONVERSION_MODE) < set(jobs.JOB_MODES)
+    assert set(jobs.CONVERSION_MODE) == set(jobs.CONVERTING_MODES)
+    assert set(jobs.JOB_MODES) - set(jobs.CONVERSION_MODE) == {"rebeat"}
     assert set(jobs.CONVERSION_MODE.values()) <= set(au.MODES)
     assert jobs.CONVERSION_MODE["song"] == "singing"
 
