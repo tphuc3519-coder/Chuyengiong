@@ -78,11 +78,41 @@ def test_protobuf_is_forced_after_the_package_and_not_beside_it():
 
 
 def test_the_prompt_limit_matches_the_one_the_pipeline_enforces():
-    """`pipeline` runs on the API image and cannot import this module, so the
-    number exists twice. This is the test that keeps the copies equal."""
+    """`pipeline` runs on the API image and validates the prompt without the
+    generator's constants in front of it, so the number exists twice. This is
+    the test that keeps the copies equal."""
     from modal_app import pipeline
 
     assert pipeline.BEAT_PROMPT_CHARS == beatgen.MAX_PROMPT_CHARS
+
+
+def test_the_class_in_this_module_has_no_remote_on_it():
+    """The failure this is here about, in the shape the user saw it:
+
+        AttributeError: 'function' object has no attribute 'remote'
+
+    `BeatGenerator` is undecorated at module scope on purpose (see `register`),
+    so `@modal.method()` on it stays an ordinary function until something wraps
+    the class. A caller that imports the class and calls `.generate.remote()`
+    gets that `AttributeError` — not at import, not in a test, but on a
+    container minutes into somebody's job, where `pipeline` turns it into the
+    sentence explaining why their song failed. `generator()` is what call sites
+    reach for instead, and this is the test that says why they have to."""
+    with pytest.raises(AttributeError):
+        beatgen.BeatGenerator().generate.remote  # noqa: B018
+
+
+def test_the_accessor_hands_back_something_modal_made(monkeypatch):
+    """And the other half: what `generator()` returns instead.
+
+    The behaviour tests around `_generate_beat` run against a fake, so this is
+    the one that says the real accessor produces a Modal object — including on
+    the path that matters, a container where `register()` never ran and
+    `_REGISTERED` is `None`."""
+    import modal
+
+    monkeypatch.setattr(beatgen, "_REGISTERED", None)
+    assert isinstance(beatgen.generator(), modal.Cls)
 
 
 # --- init_audio: what turns a described beat into a derived one -------------
