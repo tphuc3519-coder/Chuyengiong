@@ -24,14 +24,26 @@ trained on Freesound and the Free Music Archive, which is to say on audio that
 was licensed for it. The provenance of the model is part of the provenance of
 what it makes.
 
-**And one limit that no amount of prompting fixes.** A generated loop can be in
-the right key and at the right tempo; it cannot know the *chord progression* of
-the song it is going under. Where a vocal moves through changes, a loop that
-sits on one harmony will clash at the bars where they diverge. That is why this
-works on rap, hip-hop and most electronic music — where the bed is a loop and
-the vocal is rhythmic — and gets progressively worse the more melodic the
-vocal is. It is a property of putting a loop under a melody, not a bug to be
-tuned out.
+**One limit no amount of prompting fixes, and the way around it.** A loop
+generated from a sentence can be in the right key and at the right tempo; it
+cannot know the *chord progression* of the song it is going under. Where a
+vocal moves through changes, a loop sitting on one harmony clashes at the bars
+where they diverge. That is a property of putting a loop under a melody, not a
+bug to be tuned out — it is why prompt-only generation works on rap, hip-hop
+and most electronic music and gets worse the more melodic the vocal is.
+
+`init_audio` is the way around it, and it is the reason `generate` takes one.
+Start the sampler from a noised recording instead of from noise and the output
+inherits that recording's harmony and bar lines while its instruments are
+re-imagined. What gets passed in decides what this branch *is*:
+
+  * `sketch.render` — this repository's own oscillators playing the chart that
+    `chords.detect` read off the song. The model never hears the original, so
+    the output is a cover of the composition, not a derivative of the master.
+    This is the path the feature is built around.
+  * the separated instrumental itself — musically the closest match, and a
+    derivative work of the recording, which is the thing the paragraph above
+    exists to avoid. Offered, off by default, and labelled as what it is.
 
 **Accuracy of the prompt does not matter much**, which is the nice consequence
 of having built `beats.py` first. Ask for 90 BPM and get 94; the beat is
@@ -138,6 +150,30 @@ SIGMA_MIN = 0.3
 SIGMA_MAX = 500.0
 SAMPLER = "dpmpp-3m-sde"
 
+# How much noise is put on `init_audio` before the sampler starts, which is
+# `sigma_max` for that run — so it is the one knob that decides how much of the
+# input survives. Full generation uses `SIGMA_MAX` (500) and keeps nothing;
+# `stable-audio-tools`' own variation UI defaults to 0.1 and keeps almost
+# everything.
+#
+# The two init sources want opposite ends of that range, which is why there are
+# two defaults rather than one:
+#
+#  * A **sketch** is four oscillators and a drum machine. Almost none of it
+#    should survive — only the harmony, the tempo and where the bar is. It gets
+#    a high value, near where the library's own inpainting sits.
+#  * The **original instrumental** is already a real arrangement. Re-rendering
+#    it that hard would throw away the thing it was passed in for, so it gets a
+#    much lower one.
+#
+# Neither number is measured. They cannot be, from here: judging them needs a
+# GPU and a pair of ears, and they are exposed as a parameter for exactly that
+# reason.
+INIT_NOISE_MIN = 0.1
+INIT_NOISE_MAX = 100.0
+SKETCH_NOISE_LEVEL = 65.0
+ORIGINAL_NOISE_LEVEL = 28.0
+
 # A prompt is a description of music, not an essay.
 MAX_PROMPT_CHARS = 300
 # Appended to whatever the user wrote, because the thing being made is a bed
@@ -181,12 +217,42 @@ def clean_prompt(prompt: str) -> str:
     return f"{text}, {PROMPT_SUFFIX}"
 
 
+def describe(track) -> str:
+    """A prompt written from what `analysis` already measured.
+
+    The derive path has a chart, a tempo and a key before it has a word from
+    the user, so an empty description is not a reason to refuse — it is a
+    reason to write the obvious one. Names the tempo and the key and stops
+    there: what genre a song is is not something `analysis` measures, and a
+    guess at it would be a guess printed in a box the user then has to correct.
+
+    `beats.fit` re-measures and re-fits whatever comes back, so the numbers
+    here are a nudge rather than a contract.
+    """
+    return f"{track.bpm:.0f} BPM, key of {track.key_name}, drums and bass"
+
+
 def clamp_seconds(seconds: float | None) -> float:
     try:
         value = DEFAULT_SECONDS if seconds is None else float(seconds)
     except (TypeError, ValueError):
         return DEFAULT_SECONDS
     return max(MIN_SECONDS, min(MAX_SECONDS, value))
+
+
+def clamp_noise_level(level: float | None, fallback: float = SKETCH_NOISE_LEVEL) -> float:
+    """The init noise level, kept inside the range the sampler accepts.
+
+    Zero is not the bottom of the range and that is not an off-by-one: at
+    `sigma_max` of zero the sampler has no noise to remove and returns the init
+    unchanged, which for the original-instrumental source would mean handing
+    back the master recording as the new beat.
+    """
+    try:
+        value = fallback if level is None else float(level)
+    except (TypeError, ValueError):
+        return fallback
+    return max(INIT_NOISE_MIN, min(INIT_NOISE_MAX, value))
 
 
 def clamp_steps(steps: int | None) -> int:
@@ -243,6 +309,8 @@ class BeatGenerator:
         seconds: float = DEFAULT_SECONDS,
         steps: int = DEFAULT_STEPS,
         seed: int = -1,
+        init_wav: bytes | None = None,
+        init_noise_level: float | None = None,
     ) -> bytes:
         """One instrumental, as 16-bit PCM wav at the model's own rate.
 
@@ -254,6 +322,17 @@ class BeatGenerator:
         `seed` of -1 is a fresh beat every time, which is the right default for
         something you are auditioning; a fixed seed is how you get the same one
         back after changing nothing else.
+
+        **`init_wav` is what makes this follow a song rather than a sentence.**
+        Given one, the sampler starts from a noised version of it instead of
+        from noise, and what comes out keeps the harmony, the tempo and the bar
+        lines of the input while the instruments are re-imagined. The prompt
+        still applies — it is what decides *what* re-imagines them.
+
+        How much survives is `init_noise_level`, and it matters more than any
+        other number here: too low and the output is the input with a filter on
+        it, too high and the harmony it was passed in for is gone. `pipeline`
+        picks the default from which source the audio came from.
         """
         import time
 
@@ -261,13 +340,21 @@ class BeatGenerator:
         import torch
         from stable_audio_tools.inference.generation import generate_diffusion_cond
 
-        from .audio_utils import encode_wav
+        from .audio_utils import decode_audio, encode_wav
 
         text = clean_prompt(prompt)
         length = clamp_seconds(seconds)
         total_steps = clamp_steps(steps)
         if seed is not None and seed >= 0:
             torch.manual_seed(int(seed))
+
+        # Decoded at the model's own rate so `prepare_audio` has nothing to
+        # resample, and shaped `(1, samples)` — the two-dimensional case it
+        # expects, which it batches and then widens to the model's channels.
+        init = None
+        if init_wav:
+            samples = decode_audio(init_wav, self.sample_rate)
+            init = (self.sample_rate, torch.from_numpy(samples).float().unsqueeze(0))
 
         started = time.time()
         # `seconds_total` tells the model how long the thing it is describing
@@ -282,9 +369,14 @@ class BeatGenerator:
                 conditioning=conditioning,
                 sample_size=self.sample_size,
                 sigma_min=SIGMA_MIN,
+                # Ignored when `init_audio` is given: the library overwrites
+                # `sigma_max` with `init_noise_level` in that case, which is
+                # exactly what makes that parameter the amount kept.
                 sigma_max=SIGMA_MAX,
                 sampler_type=SAMPLER,
                 device=self.device,
+                init_audio=init,
+                init_noise_level=clamp_noise_level(init_noise_level),
             )
 
         # (batch, channels, samples) -> mono float32, and only the seconds that
@@ -296,9 +388,10 @@ class BeatGenerator:
         if peak > 0:
             audio = audio / peak * 0.95
 
+        source = f"init {clamp_noise_level(init_noise_level):.0f}" if init_wav else "from scratch"
         print(
             f"[BeatGenerator] {length:.0f}s in {time.time() - started:.1f}s "
-            f"({total_steps} steps): {text!r}"
+            f"({total_steps} steps, {source}): {text!r}"
         )
         return encode_wav(np.asarray(audio, dtype=np.float32), self.sample_rate)
 
