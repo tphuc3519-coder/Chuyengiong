@@ -2050,24 +2050,20 @@ Hợp với rap, hip-hop, nhạc điện tử. Bài mà giọng đi giai điệu
 
 ### Bật "máy làm beat" trên deployment
 
-Hai biến, đặt trong **Settings → Secrets and variables → Actions** của repo:
+Một biến, đặt trong **Settings → Secrets and variables → Actions → Variables**
+của repo:
 
-| Tên | Đặt ở tab | Giá trị |
+| Tên | Tab | Giá trị |
 |---|---|---|
 | `BEAT_GENERATOR` | **Variables** | `1` |
-| `HF_TOKEN` | **Secrets** | token đọc của Hugging Face |
-
-Token lấy thế này, và **thứ tự quan trọng** — chấp nhận điều khoản trước, tạo
-token sau:
-
-1. đăng nhập huggingface.co, mở `stabilityai/stable-audio-open-1.0`, bấm nút
-   chấp nhận điều khoản trên trang model (weights là gated, không có bước này
-   thì token hợp lệ vẫn nhận 401);
-2. Settings → Access Tokens → New token, quyền **read** là đủ;
-3. dán vào `HF_TOKEN` ở tab Secrets.
 
 Rồi chạy lại workflow **Deploy Modal** (Actions → Deploy Modal → Run workflow),
 hoặc push bất cứ gì vào `main`.
+
+`HF_TOKEN` **không còn bắt buộc** kể từ khi generator chuyển sang ACE-Step:
+weights của nó là Apache 2.0 và không gated, không có điều khoản nào phải chấp
+nhận. Workflow vẫn chuyển tiếp token nếu có, vì tải có xác thực thì bị giới hạn
+tốc độ nhẹ tay hơn — chỉ vậy thôi.
 
 Nếu deploy đỏ: xoá biến `BEAT_GENERATOR` đi là mọi thứ còn lại trở về xanh ngay.
 Đó là lý do cái cờ tồn tại.
@@ -2470,3 +2466,105 @@ Ryu              —   23.5%       —   16.0%       —   0.763
 trên job thật, y hệt hai giá trị `init_noise_level`.
 
 **617 passed, 3 skipped.**
+
+---
+
+## Phase 15 — Đổi model: ACE-Step thay Stable Audio Open
+
+> *"Đừng đo nữa, nó quá lệch và dở"*
+
+Đúng. Và cái shelf ở 14.2 chỉ làm nó bớt bùn, không làm nó hay lên.
+
+Số đo cuối cùng nói một điều mà lúc đó tôi chưa nhấn đủ: rolloff 99% của bản
+sinh ra là **10 218 Hz, cao hơn cả bản người làm**. Nghĩa là âm thanh không
+hỏng. Nhạc dở. Cái đó không có nút nào vặn được.
+
+Nhưng có hai thứ hỏng theo kiểu *cấu trúc*, và chúng lớn hơn mọi con số:
+
+### Hai giới hạn không phải tham số
+
+**Một, cửa sổ 47 giây.** Stable Audio Open sinh tối đa 47 giây. `pipeline` xin
+30, rồi `beats.lay_under` **lặp** nó cho hết bài. Bài 90 giây = đúng 30 giây đó
+ba lần. Không intro, không verse khác chorus, không cao trào. Bản Ryu No Kage
+đem so có cấu trúc — nó đi lên ở điệp khúc. Đó không phải khoảng cách tune được,
+đó là một chiều bị thiếu.
+
+**Hai, không có điều khiển cấu trúc.** Model đó viết một đoạn nhạc, không viết
+một bài.
+
+### Vì sao là ACE-Step
+
+Kiểm trước khi tin, vì tôi đã đoán sai hai lần:
+
+| | Stable Audio Open | ACE-Step v1-3.5B |
+|---|---|---|
+| Dài tối đa | 47 giây | **240 giây** |
+| Cấu trúc | không | `[verse]` / `[chorus]` |
+| Weights | gated, Stability community terms | **Apache 2.0, không gated** |
+| Cần `HF_TOKEN` | có | **không** |
+| audio2audio | `init_audio` + `init_noise_level` | `ref_audio_input` + `ref_audio_strength` |
+
+Bed giờ dài **bằng đúng bài**, sinh một lần, một bản phối liền mạch. `lay_under`
+không còn gì để lặp và không còn mối nối nào để nghe thấy mỗi ba mươi giây.
+
+### Một chỗ đảo chiều, và nó là loại lỗi im lặng nhất khi đổi model
+
+`init_noise_level`: **cao = tự do hơn** (nó là `sigma_max`).
+`ref_audio_strength`: **cao = bám reference sát hơn**.
+
+Ngược nhau. Bê nguyên con số cũ sang là lật ngược cả tính năng mà không có gì
+báo. `SKETCH_NOISE_LEVEL = 65` (tự do nhiều) thành `SKETCH_STRENGTH = 0.35`
+(bám ít), `ORIGINAL_NOISE_LEVEL = 28` thành `ORIGINAL_STRENGTH = 0.65`. Có test
+riêng khẳng định `ORIGINAL_STRENGTH > SKETCH_STRENGTH` — tức là đọc *ngược* so
+với cặp số cũ, và chính chiều ngược đó là điều được kiểm.
+
+Hai số vẫn chưa được đo. Vẫn cần một đôi tai.
+
+### Image: bài học einops sống sót qua lần đổi model
+
+`base_image` ghim `numpy<2` cho librosa/soundfile. ACE-Step kéo `spacy`, `spacy`
+kéo `thinc`, `thinc` đòi `numpy>=2.0.0`:
+
+```
+ERROR: Cannot install ace-step, ace-step==0.2.0 and numpy<2
+because these package versions have conflicting dependencies.
+```
+
+Nên image này **có gốc riêng**, `debian_slim` chứ không kế thừa `base_image`.
+Container đó chỉ import `audio_utils` của mình, mà `wave` + ffmpeg + mảng thường
+thì numpy 2 chạy tốt.
+
+Và `torchvision` phải ghim: để nguyên thì resolver lấy bản mới nhất, bản đó đòi
+`torch==2.14.0`, và cái pin `torch==2.4.0` bên cạnh thua.
+
+Bộ pin được chạy `pip install --dry-run` **trước khi viết vào file**, đúng quy
+tắc rút ra ở 13.3:
+
+```
+torch 2.4.0 · torchaudio 2.4.0 · torchvision 0.19.0 · numpy 2.4.6
+transformers 4.50.0 · diffusers 0.39.0 · spacy 3.8.4 · thinc 8.3.11
+116 packages, exit 0
+```
+
+Commit ghim cứng (`1bee4c9`) vì repo đó không có release nào, mà nhánh mặc định
+không phải một phiên bản.
+
+### Đơn giản đi một bậc về giấy tờ
+
+Không còn `HF_TOKEN` bắt buộc, không còn trang gated phải bấm chấp nhận, không
+còn Stability community terms để đọc. Chỉ còn một biến `BEAT_GENERATOR=1`.
+
+MusicGen vẫn là ứng viên hiển nhiên không dùng được: weights CC-BY-NC, tức là
+làm nhạc để phát hành bằng một model không cho phép phát hành.
+
+### Còn phải verify — và lần này tôi đã sai hai lần rồi
+
+- [ ] **Image có build thật không.** Dry-run xanh là *giải được phụ thuộc*, chưa
+      phải *build xong* trên Modal. Cờ `BEAT_GENERATOR` vẫn là cái van
+- [ ] Weights ~7 GB tải về Volume lần đầu — container đầu tiên sẽ lâu
+- [ ] `[inst]` có thật sự làm nó câm không, hay vẫn có người hát trong bed
+- [ ] `ref_audio_strength` 0.35: bed có còn bám vòng hợp âm không, hay đi mất
+- [ ] `ref_audio_strength` 0.65 cho `original`: có khác bản gốc đủ nhiều không
+- [ ] Và câu duy nhất đáng hỏi: **nó có đi tới đâu trong ba phút, hay vẫn lặp**
+
+**619 passed, 3 skipped.**
