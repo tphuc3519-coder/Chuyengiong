@@ -98,9 +98,10 @@ SEPARATING_MODES = ("song", "beat", "rebeat")
 # `beat` also converts the voice; `rebeat` leaves it exactly as it was.
 BEAT_MODES = ("beat", "rebeat")
 
-# Mirrored from `beatgen.MAX_PROMPT_CHARS`, and duplicated rather than imported
-# for the reason every constant in this module is: `pipeline` runs on the API
-# image, and `beatgen` imports `stable_audio_tools`.
+# Mirrored from `beatgen.MAX_PROMPT_CHARS`: a prompt is validated here, on the
+# API image, where the generator's own module is reached for one thing only —
+# the handle in `_generate_beat` — and its constants are not in front of us.
+# `tests/test_beatgen.py` keeps the two copies equal.
 BEAT_PROMPT_CHARS = 300
 
 # Where a replacement backing track comes from. Three genuinely different
@@ -529,9 +530,15 @@ def _generate_beat(job_id: str, params: dict) -> bytes | None:
         return beat
 
     jobs.update(job_id, jobs.GENERATING)
-    from .beatgen import BeatGenerator
+    from . import beatgen
 
-    beat = BeatGenerator().generate.remote(prompt=params["beat_prompt"], seed=params["beat_seed"])
+    # `beatgen.deployed()`, never `from .beatgen import BeatGenerator`: the
+    # class in that module is deliberately undecorated, so `.generate` on an
+    # instance of it is a plain function and `.remote` on that is an
+    # `AttributeError` the user reads as the reason their job failed.
+    beat = beatgen.deployed()().generate.remote(
+        prompt=params["beat_prompt"], seed=params["beat_seed"]
+    )
     storage.put(job_id, BEAT, beat)
     data_vol.commit()
     return beat

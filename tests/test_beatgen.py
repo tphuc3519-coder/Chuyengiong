@@ -78,8 +78,32 @@ def test_protobuf_is_forced_after_the_package_and_not_beside_it():
 
 
 def test_the_prompt_limit_matches_the_one_the_pipeline_enforces():
-    """`pipeline` runs on the API image and cannot import this module, so the
-    number exists twice. This is the test that keeps the copies equal."""
+    """`pipeline` runs on the API image and validates the prompt without the
+    generator's constants in front of it, so the number exists twice. This is
+    the test that keeps the copies equal."""
     from modal_app import pipeline
 
     assert pipeline.BEAT_PROMPT_CHARS == beatgen.MAX_PROMPT_CHARS
+
+
+def test_the_class_in_this_module_has_no_remote_on_it():
+    """The failure this is here about, in the shape the user saw it:
+
+        AttributeError: 'function' object has no attribute 'remote'
+
+    `BeatGenerator` is undecorated at module scope on purpose (see `register`),
+    so `@modal.method()` on it stays an ordinary function until something wraps
+    the class. A caller that imports the class and calls `.generate.remote()`
+    gets that `AttributeError` — not at import, not in a test, but on a GPU-less
+    container minutes into somebody's job, where `pipeline` turns it into the
+    sentence explaining why their song failed."""
+    with pytest.raises(AttributeError):
+        beatgen.BeatGenerator().generate.remote  # noqa: B018
+
+
+def test_the_pipeline_asks_the_deployment_for_the_generator():
+    """So the only handle anything outside the deploy uses is this one, which
+    is a real Modal class and does have `.remote` under it."""
+    import modal
+
+    assert isinstance(beatgen.deployed(), modal.Cls)

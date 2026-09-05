@@ -47,7 +47,7 @@ Smoke test (needs Modal credentials, a GPU, and `HF_TOKEN`):
 # class annotation and cannot resolve a stringified one.
 import modal
 
-from .app import MODEL_DIR, app, base_image, config_secret, model_vol
+from .app import APP_NAME, MODEL_DIR, app, base_image, config_secret, model_vol
 
 # Gated on Hugging Face: somebody has to accept Stability's terms with the
 # account whose token this runs under. That is a deliberate part of the licence
@@ -331,6 +331,26 @@ def register():
     return _REGISTERED
 
 
+def deployed():
+    """A handle to the class as the deployment has it. `pipeline` calls this.
+
+    `register()` decorates a copy: `app.cls(...)` returns a new object and
+    leaves `BeatGenerator` in this module exactly as written — undecorated. So
+    `from .beatgen import BeatGenerator` hands any caller the plain Python
+    class, `@modal.method()` on it resolves to an ordinary function, and
+    `.remote` on that is an `AttributeError` — raised inside the pipeline,
+    minutes into somebody's job, and shown to them as the reason their song
+    failed. That is the whole reason this exists.
+
+    Looked up by name rather than imported because the decorated object only
+    ever existed in the process that ran `register()`, which is the deploy and
+    not a pipeline container. It resolves only on a deployment that switched the
+    generator on — which is the same condition `api.submit` already refuses on,
+    before a job is ever created.
+    """
+    return modal.Cls.from_name(APP_NAME, "BeatGenerator")
+
+
 @app.local_entrypoint()
 def make_beat(
     prompt: str,
@@ -351,6 +371,6 @@ def make_beat(
     from pathlib import Path
 
     Path(output).write_bytes(
-        BeatGenerator().generate.remote(prompt=prompt, seconds=seconds, steps=steps, seed=seed)
+        register()().generate.remote(prompt=prompt, seconds=seconds, steps=steps, seed=seed)
     )
     print(f"wrote {output}")
