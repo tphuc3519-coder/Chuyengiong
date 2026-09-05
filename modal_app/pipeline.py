@@ -99,10 +99,9 @@ SEPARATING_MODES = ("song", "beat", "rebeat")
 # `beat` also converts the voice; `rebeat` leaves it exactly as it was.
 BEAT_MODES = ("beat", "rebeat")
 
-# Mirrored from `beatgen.MAX_PROMPT_CHARS`: a prompt is validated here, on the
-# API image, where the generator's own module is reached for one thing only —
-# the handle in `_generate_beat` — and its constants are not in front of us.
-# `tests/test_beatgen.py` keeps the two copies equal.
+# Mirrored from `beatgen.MAX_PROMPT_CHARS`, and duplicated rather than imported
+# for the reason every constant in this module is: `pipeline` runs on the API
+# image, and `beatgen` imports `stable_audio_tools`.
 BEAT_PROMPT_CHARS = 300
 
 # Where a replacement backing track comes from. Three genuinely different
@@ -534,6 +533,14 @@ def _beat_bed(job_id: str, params: dict, instrumental: bytes, beat: bytes | None
         return bed
     bed, plan, beat_track, song = beats.analyse_and_fit(beat, instrumental)
     note = f"beat {beat_track} / song {song} -> {plan}"
+    # Only what came off a GPU. An uploaded beat is somebody's finished
+    # production; the generator's output is unmastered by construction, and
+    # measuring it here rather than inside `beatgen` is deliberate — `stretch`
+    # has already transposed it by then, so this reads the spectrum the mix
+    # will actually be handed.
+    if params["beat_source"] in GENERATING_SOURCES:
+        bed, balance_note = beats.balance(bed)
+        note = f"{note}; balance {balance_note}"
     print(f"[beat] {job_id}: {note}")
     jobs.record_params(job_id, {"beat_fit": note})
     storage.put(job_id, BED, bed)
@@ -613,11 +620,10 @@ def _generate_beat(job_id: str, params: dict, instrumental: bytes | None = None)
             raise BeatError("nothing to derive a beat from: the instrumental is missing")
         init_wav, noise, prompt = _init_audio(job_id, params, instrumental)
 
-    # `beatgen.deployed()`, never `from .beatgen import BeatGenerator`: the
-    # class in that module is deliberately undecorated, so `.generate` on an
-    # instance of it is a plain function and `.remote` on that is an
-    # `AttributeError` the user reads as the reason their job failed.
-    beat = beatgen.deployed()().generate.remote(
+    # `beatgen.generator()`, never the imported class: `app.cls()` returns a new
+    # object rather than decorating that one, so the name in the module has no
+    # `.remote` on it. See the docstring there.
+    beat = beatgen.generator()().generate.remote(
         prompt=prompt,
         seed=params["beat_seed"],
         init_wav=init_wav,

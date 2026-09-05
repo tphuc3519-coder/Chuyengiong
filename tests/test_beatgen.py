@@ -94,19 +94,25 @@ def test_the_class_in_this_module_has_no_remote_on_it():
     `BeatGenerator` is undecorated at module scope on purpose (see `register`),
     so `@modal.method()` on it stays an ordinary function until something wraps
     the class. A caller that imports the class and calls `.generate.remote()`
-    gets that `AttributeError` — not at import, not in a test, but on a GPU-less
+    gets that `AttributeError` — not at import, not in a test, but on a
     container minutes into somebody's job, where `pipeline` turns it into the
-    sentence explaining why their song failed."""
+    sentence explaining why their song failed. `generator()` is what call sites
+    reach for instead, and this is the test that says why they have to."""
     with pytest.raises(AttributeError):
         beatgen.BeatGenerator().generate.remote  # noqa: B018
 
 
-def test_the_pipeline_asks_the_deployment_for_the_generator():
-    """So the only handle anything outside the deploy uses is this one, which
-    is a real Modal class and does have `.remote` under it."""
+def test_the_accessor_hands_back_something_modal_made(monkeypatch):
+    """And the other half: what `generator()` returns instead.
+
+    The behaviour tests around `_generate_beat` run against a fake, so this is
+    the one that says the real accessor produces a Modal object — including on
+    the path that matters, a container where `register()` never ran and
+    `_REGISTERED` is `None`."""
     import modal
 
-    assert isinstance(beatgen.deployed(), modal.Cls)
+    monkeypatch.setattr(beatgen, "_REGISTERED", None)
+    assert isinstance(beatgen.generator(), modal.Cls)
 
 
 # --- init_audio: what turns a described beat into a derived one -------------

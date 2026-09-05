@@ -59,7 +59,7 @@ Smoke test (needs Modal credentials, a GPU, and `HF_TOKEN`):
 # class annotation and cannot resolve a stringified one.
 import modal
 
-from .app import APP_NAME, MODEL_DIR, app, base_image, config_secret, model_vol
+from .app import MODEL_DIR, app, base_image, config_secret, model_vol
 
 # Gated on Hugging Face: somebody has to accept Stability's terms with the
 # account whose token this runs under. That is a deliberate part of the licence
@@ -384,8 +384,13 @@ class BeatGenerator:
         audio = output.to(torch.float32).cpu().numpy()
         audio = audio.reshape(-1, audio.shape[-1]).mean(axis=0)
         audio = audio[: int(length * self.sample_rate)]
+        # A gentle guard and nothing more. Normalising by **peak** here is what
+        # made a bass-heavy generation come out as mud: peak normalisation of a
+        # signal whose loudest thing is one low note sets the whole level by
+        # that note and leaves the rest small. Balance is `beats.balance`'s
+        # job, and it runs after `stretch` has transposed this — see there.
         peak = float(np.abs(audio).max())
-        if peak > 0:
+        if peak > 0.95:
             audio = audio / peak * 0.95
 
         source = f"init {clamp_noise_level(init_noise_level):.0f}" if init_wav else "from scratch"
@@ -424,24 +429,40 @@ def register():
     return _REGISTERED
 
 
-def deployed():
-    """A handle to the class as the deployment has it. `pipeline` calls this.
+def generator():
+    """The `BeatGenerator` that has `.remote` on it. **Not the class above.**
 
-    `register()` decorates a copy: `app.cls(...)` returns a new object and
-    leaves `BeatGenerator` in this module exactly as written — undecorated. So
-    `from .beatgen import BeatGenerator` hands any caller the plain Python
-    class, `@modal.method()` on it resolves to an ordinary function, and
-    `.remote` on that is an `AttributeError` — raised inside the pipeline,
-    minutes into somebody's job, and shown to them as the reason their song
-    failed. That is the whole reason this exists.
+    This function exists because of one crash, and it is worth spelling out
+    because the shape that caused it looks completely fine:
 
-    Looked up by name rather than imported because the decorated object only
-    ever existed in the process that ran `register()`, which is the deploy and
-    not a pipeline container. It resolves only on a deployment that switched the
-    generator on — which is the same condition `api.submit` already refuses on,
-    before a job is ever created.
+        AttributeError: 'function' object has no attribute 'remote'
+
+    `app.cls(...)` does not decorate `BeatGenerator` in place — it *returns a
+    new object* and leaves the class alone. So the module-level name stays a
+    plain Python class, `BeatGenerator().generate` is an ordinary bound method,
+    and `.remote` on it is an attribute that was never there. Every call site
+    that reached for the imported name got that, and the first person to run a
+    generated beat got it three minutes into a job.
+
+    Preferring `_REGISTERED` is not enough on its own either. `register()` is
+    called by `deploy.py`, in the deploy process; `run_beat_pipeline` runs in a
+    container that carries no `BEAT_GENERATOR` in its environment and has no
+    reason to have imported `deploy` at all, so `_REGISTERED` there is `None`.
+    That is why the fallback is a lookup by name against the deployed App
+    rather than another attempt to register locally: the class is already
+    deployed, and this is how a container refers to one it did not define.
+
+    Fails loudly if there is nothing deployed under that name, which is the
+    honest error — `api.submit` refuses these jobs when `enabled()` is false,
+    so getting here at all means the deployment claimed to have one.
     """
-    return modal.Cls.from_name(APP_NAME, "BeatGenerator")
+    if _REGISTERED is not None:
+        return _REGISTERED
+    import modal
+
+    from .app import APP_NAME
+
+    return modal.Cls.from_name(APP_NAME, BeatGenerator.__name__)
 
 
 @app.local_entrypoint()
@@ -457,6 +478,10 @@ def make_beat(
         modal run -m modal_app.beatgen --prompt "boom bap hip hop beat, 90 BPM"
         modal run -m modal_app.beatgen --prompt "lo-fi house, 124 BPM" --seed 7
 
+    Drives the *deployed* class, through `generator()` — so it needs a deploy
+    with `BEAT_GENERATOR` on, and it is a smoke test of what users actually hit
+    rather than of a copy built for the occasion.
+
     What to listen for is not whether it is at the BPM you asked for — it will
     not be, and `beats.py` fixes that — but whether it is the *kind* of music
     you asked for, and whether anybody is singing on it.
@@ -464,6 +489,6 @@ def make_beat(
     from pathlib import Path
 
     Path(output).write_bytes(
-        register()().generate.remote(prompt=prompt, seconds=seconds, steps=steps, seed=seed)
+        generator()().generate.remote(prompt=prompt, seconds=seconds, steps=steps, seed=seed)
     )
     print(f"wrote {output}")

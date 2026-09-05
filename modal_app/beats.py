@@ -280,6 +280,121 @@ def fit(
         raise BeatError(f"could not fit the beat: {exc}") from exc
 
 
+# --- tonal balance --------------------------------------------------------
+
+# Where the shelf sits, and what it is aiming for.
+#
+# **These numbers came out of one measurement of one finished job**, and it is
+# worth writing down what it said because nothing else in this module needed a
+# number like this:
+#
+#     40-120 Hz  71.9 %      (a human rock arrangement of the same song: 23.5 %)
+#     2-6 kHz     5.3 %      (the same reference: 16.0 %)
+#
+# That is not a mix with too much bass. That is a mix that is almost *only*
+# bass — one sustained low note carrying three quarters of the energy, with the
+# band a voice lives in reduced to a fifth of where it should be. It reads as
+# mud with the singer somewhere behind it.
+#
+# Where it comes from is the honest part: `BeatGenerator.generate` used to
+# normalise its output by **peak**, and peak normalisation of a bass-heavy
+# signal sets the whole level by the bass and leaves everything above it small.
+# The generator's output is unmastered by definition — a diffusion model has no
+# reason to hand back a balanced mix — so something has to condition it, and
+# nothing did.
+#
+# `LOW_SHARE_TARGET` is a starting point and not a measurement. It needs an ear
+# on a real job, exactly like `beatgen`'s two noise levels do.
+SUB_HZ = 30.0
+LOW_HZ = 120.0
+LOW_SHARE_TARGET = 0.30
+BALANCE_RMS = 0.14
+BALANCE_PEAK = 0.89
+
+
+def balance(beat_wav: bytes, sample_rate: int = 44100) -> tuple[bytes, str]:
+    """Take the mud out of a generated bed. Returns the audio and what it did.
+
+    **Runs after `fit`, not before, and that ordering is the whole reason this
+    is a separate function.** `stretch` transposes with `asetrate`, which moves
+    every frequency at once — a bed measured before a five semitone drop is a
+    bed measured at the wrong place. Whatever this reads is what the mix will
+    actually get.
+
+    Three steps, in order:
+
+    1. Everything below `SUB_HZ` goes. A backing bed has nothing to say down
+       there and a voice has nothing to compete with it; what lives there is
+       rumble, and rumble that survives into `mixing` is rumble that
+       `loudnorm` then turns *up*, because K-weighting barely hears it.
+    2. If more than `LOW_SHARE_TARGET` of the power sits below `LOW_HZ`, the
+       low band is pulled back until that much does. A shelf rather than a
+       filter with a corner: cosine crossovers at both ends, because a brick
+       wall in the frequency domain is a long impulse response in the time one.
+    3. Level set by **RMS**, with the peak only as a ceiling. This is the step
+       that replaces peak normalisation, and it is the one that stops a single
+       low note from deciding how loud the whole bed is.
+
+    Only generated beds go through this. An uploaded beat is somebody's
+    finished production and re-balancing it would be this module deciding it
+    knows better than whoever mixed it.
+    """
+    import numpy as np
+
+    from .audio_utils import decode_audio, encode_wav
+
+    try:
+        audio = np.asarray(decode_audio(beat_wav, sample_rate), dtype=np.float64)
+    except AudioError as exc:
+        # Same wrapping `analyse_and_fit` does: everything a caller of this
+        # module has to catch is a `BeatError`.
+        raise BeatError(f"could not read the beat to balance it: {exc}") from exc
+    if not len(audio):
+        raise BeatError("no beat audio to balance")
+
+    spectrum = np.fft.rfft(audio)
+    freqs = np.fft.rfftfreq(len(audio), 1.0 / sample_rate)
+    power = np.abs(spectrum) ** 2
+    total = float(power.sum())
+    if total <= 0:
+        raise BeatError("the generated beat is silent")
+
+    share = float(power[freqs < LOW_HZ].sum() / total)
+    gain = np.ones_like(freqs)
+    # The sub goes to nothing, over a ramp rather than a cliff.
+    floor = SUB_HZ * 0.6
+    gain[freqs < floor] = 0.0
+    ramp = (freqs >= floor) & (freqs < SUB_HZ)
+    gain[ramp] = 0.5 - 0.5 * np.cos(np.pi * (freqs[ramp] - floor) / (SUB_HZ - floor))
+
+    shelf = 1.0
+    if share > LOW_SHARE_TARGET:
+        # The amplitude factor that leaves `LOW_SHARE_TARGET` of the power
+        # below `LOW_HZ`, holding everything above it exactly where it is.
+        rest = 1.0 - share
+        shelf = float(np.sqrt((LOW_SHARE_TARGET / (1.0 - LOW_SHARE_TARGET)) * rest / share))
+        gain[(freqs >= SUB_HZ) & (freqs < LOW_HZ)] *= shelf
+        gain[freqs < SUB_HZ] *= shelf
+        # An octave to come back up over, so the shelf has no edge on it.
+        knee = (freqs >= LOW_HZ) & (freqs < LOW_HZ * 2)
+        blend = 0.5 - 0.5 * np.cos(np.pi * (freqs[knee] - LOW_HZ) / LOW_HZ)
+        gain[knee] = shelf + (1.0 - shelf) * blend
+
+    out = np.fft.irfft(spectrum * gain, n=len(audio))
+    rms = float(np.sqrt((out**2).mean()))
+    if rms > 0:
+        out = out * (BALANCE_RMS / rms)
+    peak = float(np.abs(out).max())
+    if peak > BALANCE_PEAK:
+        out = out * (BALANCE_PEAK / peak)
+
+    note = (
+        f"low {share * 100:.0f}% -> {LOW_SHARE_TARGET * 100:.0f}% "
+        f"(shelf {20 * math.log10(max(shelf, 1e-6)):+.1f} dB), rms {BALANCE_RMS:.2f}"
+    )
+    return encode_wav(np.asarray(out, dtype=np.float32), sample_rate), note
+
+
 def analyse_and_fit(
     beat_wav: bytes,
     target_wav: bytes,
