@@ -138,7 +138,25 @@ def test_a_beat_job_can_bring_its_own_backing_track(client, started):
     assert started[0]["params"]["beat_prompt"] == ""
 
 
-def test_a_beat_job_can_describe_one_instead(client, started):
+@pytest.fixture
+def generator_on(monkeypatch):
+    """A deployment that ships the beat generator. Most do not."""
+    monkeypatch.setattr(api.beatgen, "enabled", lambda: True)
+
+
+def test_a_generated_beat_is_refused_where_the_generator_is_not_deployed(client, started):
+    """Refused at submit rather than three minutes into a pipeline with no
+    container to run it: the generator is only attached to the App on
+    deployments that switched it on."""
+    response = client.post(
+        "/submit", **upload(mode="beat", beat_source="generate", beat_prompt="boom bap")
+    )
+    assert response.status_code == 400
+    assert "not enabled" in response.json()["detail"]
+    assert started == []
+
+
+def test_a_beat_job_can_describe_one_instead(client, started, generator_on):
     response = client.post(
         "/submit", **upload(mode="beat", beat_source="generate", beat_prompt="boom bap, 90 BPM")
     )
@@ -168,13 +186,13 @@ def test_an_upload_source_with_no_file_is_a_400(client, started):
     assert started == []
 
 
-def test_a_generate_source_with_no_description_is_a_400(client, started):
+def test_a_generate_source_with_no_description_is_a_400(client, started, generator_on):
     response = client.post("/submit", **upload(mode="beat", beat_source="generate"))
     assert response.status_code == 400
     assert started == []
 
 
-def test_a_beat_job_with_both_sources_is_a_400_not_a_precedence_rule(client, started):
+def test_a_beat_job_with_both_sources_is_a_400_not_a_precedence_rule(client, started, generator_on):
     """Refused rather than resolved silently: no ordering between "the file I
     uploaded" and "the beat I described" is one a user would guess."""
     response = client.post(
@@ -275,7 +293,7 @@ def test_the_other_modes_ignore_a_beat_that_was_sent_anyway(client, started):
     assert started[0]["beat"] is None
 
 
-def test_a_beat_seed_reaches_the_pipeline(client, started):
+def test_a_beat_seed_reaches_the_pipeline(client, started, generator_on):
     client.post(
         "/submit",
         **upload(mode="beat", beat_source="generate", beat_prompt="trap", beat_seed="7"),

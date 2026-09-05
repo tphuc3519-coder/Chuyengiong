@@ -29,13 +29,36 @@ def test_deploy_registers_everything_the_pipeline_needs():
     } <= set(app.registered_functions)
     assert {
         "VoiceConverter",
-        "BeatGenerator",
         "Separator",
         "Synthesizer",
         "KokoroSynthesizer",
         "OpenJTalkSynthesizer",
         "Watermarker",
     } <= set(app.registered_classes)
+
+
+def test_the_beat_generator_is_not_in_a_deploy_that_did_not_ask_for_it():
+    """`modal deploy` builds every registered image in one pass, so an image
+    that fails to build does not fail its own function — it fails the deploy and
+    takes every unrelated change in the same push with it. That is not a
+    hypothetical: `beatgen_image` does not build, and three phases of working
+    code sat undeployed behind it while the live API answered from an older
+    revision.
+
+    So the rule is now structural: an image nobody has watched build is not
+    attached to the App unless the deployment switched it on."""
+    from modal_app import beatgen
+
+    assert not beatgen.enabled()
+    assert "BeatGenerator" not in set(app.registered_classes)
+
+
+def test_the_beat_generator_registers_when_it_is_switched_on(monkeypatch):
+    from modal_app import beatgen
+
+    monkeypatch.setattr(beatgen, "enabled", lambda: True)
+    assert beatgen.register().__name__ == "BeatGenerator"
+    assert "BeatGenerator" in set(app.registered_classes)
 
 
 def test_every_engine_a_language_reads_through_is_actually_deployed():

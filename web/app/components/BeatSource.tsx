@@ -5,6 +5,7 @@ import { useId } from "react";
 import { FileDrop } from "./FileDrop";
 import {
   ARRANGE_STYLES,
+  BEAT_GENERATOR_ENABLED,
   AUDIO_ACCEPT,
   BEAT_PROMPT_CHARS,
   BEAT_PROMPT_EXAMPLES,
@@ -70,17 +71,24 @@ export function BeatSource({
           <span className="segment-label">Tải beat lên</span>
           <span className="segment-hint">Beat bạn đã có sẵn quyền dùng</span>
         </button>
-        <button
-          type="button"
-          role="radio"
-          aria-checked={generating}
-          className={generating ? "segment is-active" : "segment"}
-          disabled={disabled}
-          onClick={() => onChange({ ...params, beatSource: "generate" })}
-        >
-          <span className="segment-label">Tự sinh beat</span>
-          <span className="segment-hint">Mô tả kiểu nhạc, máy làm beat mới</span>
-        </button>
+        {/*
+          Hidden rather than disabled where the deployment does not ship the
+          generator: the backend refuses the source outright, so a greyed-out
+          button would be advertising something that is not there.
+        */}
+        {BEAT_GENERATOR_ENABLED && (
+          <button
+            type="button"
+            role="radio"
+            aria-checked={generating}
+            className={generating ? "segment is-active" : "segment"}
+            disabled={disabled}
+            onClick={() => onChange({ ...params, beatSource: "generate" })}
+          >
+            <span className="segment-label">Tự sinh beat</span>
+            <span className="segment-hint">Mô tả kiểu nhạc, máy làm beat mới</span>
+          </button>
+        )}
         <button
           type="button"
           role="radio"

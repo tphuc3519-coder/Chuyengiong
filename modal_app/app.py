@@ -40,7 +40,18 @@ rate_dict = modal.Dict.from_name("vc-ratelimit", create_if_missing=True)
 #                    Audio Open's licence. Only the beat generator needs it, and
 #                    only generated beats need the generator — everything else
 #                    on the deployment works without it (`beatgen.BeatGenerator`)
-CONFIG_KEYS = ("ALLOWED_ORIGINS", "RATE_LIMIT_SALT", "WATERMARK", "JOBS_PER_HOUR", "HF_TOKEN")
+#   BEAT_GENERATOR   set to 1/true/yes/on to ship the beat generator. Off by
+#                    default because its image does not build yet, and a broken
+#                    image fails the whole deploy rather than its own function
+#                    (`beatgen.enabled`)
+CONFIG_KEYS = (
+    "ALLOWED_ORIGINS",
+    "RATE_LIMIT_SALT",
+    "WATERMARK",
+    "JOBS_PER_HOUR",
+    "HF_TOKEN",
+    "BEAT_GENERATOR",
+)
 
 
 def config_secret() -> modal.Secret:

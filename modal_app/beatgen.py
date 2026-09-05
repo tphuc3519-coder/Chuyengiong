@@ -57,11 +57,60 @@ MODEL_REPO = "stabilityai/stable-audio-open-1.0"
 # `stable-audio-tools` is the reference implementation and MIT licensed; it is
 # the weights that carry Stability's own terms. Pinned because its inference
 # entry point has moved between releases, exactly like seed-vc's.
+#
+# **This image does not build yet, and that is why the whole feature is behind
+# `enabled()`.** `modal deploy` builds every registered image in one pass, so a
+# broken one does not fail its own function — it fails the deploy, and with it
+# every unrelated change in the same push. That is exactly what happened: this
+# image was added in Phase 11 and Phases 11, 12 and 13 all sat undeployed
+# behind it while the live API answered from Phase 10 and returned a 422 for
+# modes it had never heard of.
+#
+# The failure is dependency resolution, not code:
+#
+#     python -m pip install einops==0.8.0 'protobuf>=3.20,<7' \
+#       stable-audio-tools==0.0.16  ->  container exit status: 1
+#
+# `stable-audio-tools` is a *training* package. It pulls pytorch-lightning,
+# wandb, gradio, encodec, laion-clap, k-diffusion and a dozen more, several of
+# which pin torch themselves — against a base image that already holds torch
+# 2.4.0 and numpy<2. Getting that to resolve is a real piece of work and it
+# needs the actual pip output (`modal image logs <id>`) rather than a guess.
+#
+# Until somebody has done it and seen the image build, this stays off.
 BEATGEN_REQUIREMENTS = [
     "stable-audio-tools==0.0.16",
     "einops==0.8.0",
     "protobuf>=3.20,<7",
 ]
+
+# Deployment config, read the same way `watermark.enabled()` reads WATERMARK —
+# except the default is the opposite, and deliberately: watermarking is on
+# unless it is turned off, and this is off unless it is turned on, because
+# nobody has watched the image above build.
+#
+# Turning it on means: set BEAT_GENERATOR=1 and HF_TOKEN on the deployment, and
+# be ready for the deploy to fail until `BEATGEN_REQUIREMENTS` is sorted out.
+BEAT_GENERATOR_ENV = "BEAT_GENERATOR"
+
+
+def enabled() -> bool:
+    """Whether this deployment ships the beat generator at all.
+
+    Read at import time by `deploy.py`, which is what keeps the image out of a
+    deploy that has not asked for it. Read again by `api.submit`, so a request
+    for a generated beat is refused with a sentence rather than accepted into a
+    pipeline that has no container to run it.
+    """
+    import os
+
+    return os.environ.get(BEAT_GENERATOR_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
 
 # What the model can produce in one pass. Stable Audio Open generates a fixed
 # window — about 47 seconds at 44.1 kHz — and asking for less does not make it
@@ -88,7 +137,18 @@ MAX_PROMPT_CHARS = 300
 # the single worst failure this branch has available to it.
 PROMPT_SUFFIX = "instrumental, no vocals, looping"
 
-beatgen_image = base_image.pip_install(*BEATGEN_REQUIREMENTS).env({"HF_HOME": MODEL_DIR})
+
+def beatgen_image():
+    """The image, built only when something asks for it.
+
+    A function and not a module-level object, so that a deployment with the
+    generator switched off never even constructs it. Modal builds the images
+    its registered objects reference and an orphan one should be ignored — but
+    "should be ignored" is a claim about somebody else's internals, and the
+    thing that went wrong here was a deploy failing on an image nobody wanted.
+    Not creating it is a guarantee; not attaching it is an expectation.
+    """
+    return base_image.pip_install(*BEATGEN_REQUIREMENTS).env({"HF_HOME": MODEL_DIR})
 
 
 class BeatGenError(RuntimeError):
@@ -125,17 +185,15 @@ def clamp_steps(steps: int | None) -> int:
     return max(MIN_STEPS, min(MAX_STEPS, value))
 
 
-@app.cls(
-    image=beatgen_image,
-    gpu="A10G",
-    volumes={MODEL_DIR: model_vol},
-    secrets=[config_secret()],
-    scaledown_window=300,
-    timeout=900,
-    max_containers=2,
-)
 class BeatGenerator:
-    """Stable Audio Open, loaded once per container."""
+    """Stable Audio Open, loaded once per container.
+
+    Not decorated at module scope, and that is the whole point of `register()`:
+    `@app.cls(image=...)` attaches the image to the App as soon as the module is
+    imported, and `modal deploy` then builds it whether or not this deployment
+    wants the feature. A deployment that has not switched the generator on
+    should not be building — or failing on — an image it will never run.
+    """
 
     @modal.enter()
     def load(self) -> None:
@@ -231,6 +289,34 @@ class BeatGenerator:
             f"({total_steps} steps): {text!r}"
         )
         return encode_wav(np.asarray(audio, dtype=np.float32), self.sample_rate)
+
+
+# The decorated class, once something has asked for it. `None` means this
+# deployment does not ship the generator — and `pipeline` never reaches for it,
+# because `api.submit` refused the request long before.
+_REGISTERED = None
+
+
+def register():
+    """Attach `BeatGenerator` to the App and return it. `deploy` calls it.
+
+    Idempotent, because `deploy` is imported by the tests as well as by the
+    deploy itself, and decorating the same class twice is not something Modal
+    enjoys. The class keeps its own name, so what lands in the deployment is
+    `BeatGenerator` exactly as it would have been with a decorator on it.
+    """
+    global _REGISTERED
+    if _REGISTERED is None:
+        _REGISTERED = app.cls(
+            image=beatgen_image(),
+            gpu="A10G",
+            volumes={MODEL_DIR: model_vol},
+            secrets=[config_secret()],
+            scaledown_window=300,
+            timeout=900,
+            max_containers=2,
+        )(BeatGenerator)
+    return _REGISTERED
 
 
 @app.local_entrypoint()
