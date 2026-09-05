@@ -2557,6 +2557,38 @@ còn Stability community terms để đọc. Chỉ còn một biến `BEAT_GENER
 MusicGen vẫn là ứng viên hiển nhiên không dùng được: weights CC-BY-NC, tức là
 làm nhạc để phát hành bằng một model không cho phép phát hành.
 
+### Hai chỗ tài liệu nói một đằng, code nói một nẻo
+
+Đoạn gọi ACE-Step viết từ tài liệu, chưa từng chạy — nên đối chiếu với source
+trước khi đẩy đi. Hai chỗ sai, cả hai đều chết ở giữa job:
+
+**Một, `__init__` không tải weights.** `__call__` mới tải, và tải lười:
+
+```python
+if not self.loaded:
+    logger.warning("Checkpoint not loaded, loading checkpoint...")
+    self.load_checkpoint(self.checkpoint_dir)
+```
+
+Để nguyên là hai lỗi cùng lúc. `snapshot_download` ~7 GB chạy trong job của
+người dùng chứ không phải lúc container khởi động; và tệ hơn, `model_vol
+.commit()` chạy **trước** khi có gì được ghi — nên Volume không bao giờ giữ
+được bản copy, và **mọi container nguội tải lại 7 GB từ đầu**. Gọi
+`load_checkpoint()` thẳng trong `@modal.enter()`.
+
+**Hai, `save_path` bị nạp chồng nghĩa.** Đưa vào một thư mục thì nó tự đặt tên
+có timestamp bên trong; đưa vào thứ khác thì nó coi đó là file và nối đuôi
+format vào. Đoán tên file là cách để job chết đúng ở bước cuối. Mà lời gọi đã
+trả lời sẵn:
+
+```python
+return output_paths + [input_params_json]
+```
+
+Nên đưa vào **thư mục**, rồi đọc đường dẫn từ chính giá trị trả về.
+
+Cả hai đều có test giữ.
+
 ### Còn phải verify — và lần này tôi đã sai hai lần rồi
 
 - [ ] **Image có build thật không.** Dry-run xanh là *giải được phụ thuộc*, chưa
@@ -2567,4 +2599,4 @@ làm nhạc để phát hành bằng một model không cho phép phát hành.
 - [ ] `ref_audio_strength` 0.65 cho `original`: có khác bản gốc đủ nhiều không
 - [ ] Và câu duy nhất đáng hỏi: **nó có đi tới đâu trong ba phút, hay vẫn lặp**
 
-**619 passed, 3 skipped.**
+**621 passed, 3 skipped.**

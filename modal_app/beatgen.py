@@ -298,21 +298,39 @@ class BeatGenerator:
     @modal.enter()
     def load(self) -> None:
         import os
+        import time
 
         import torch
         from acestep.pipeline_ace_step import ACEStepPipeline
 
         os.makedirs(CHECKPOINT_DIR, exist_ok=True)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        # `checkpoint_dir` on the Volume, so the ~7 GB download happens once
-        # for the deployment rather than once per cold container.
         self.pipeline = ACEStepPipeline(
             checkpoint_dir=CHECKPOINT_DIR,
             dtype="bfloat16" if self.device == "cuda" else "float32",
             torch_compile=False,
         )
+
+        # **`__init__` does not fetch the weights.** `__call__` does, lazily:
+        #
+        #     if not self.loaded:
+        #         logger.warning("Checkpoint not loaded, loading checkpoint...")
+        #         self.load_checkpoint(self.checkpoint_dir)
+        #
+        # Left alone that is two bugs at once. The ~7 GB `snapshot_download`
+        # would happen inside somebody's job rather than in container startup,
+        # and — worse — the `model_vol.commit()` below would run *before*
+        # anything had been written, so the Volume would never keep a copy and
+        # **every cold container would download it again**. Calling it here
+        # puts the fetch where a cold start belongs and the commit after the
+        # thing it is committing.
+        started = time.time()
+        self.pipeline.load_checkpoint(CHECKPOINT_DIR)
         model_vol.commit()
-        print(f"[BeatGenerator] {MODEL_REPO} device={self.device} dir={CHECKPOINT_DIR}")
+        print(
+            f"[BeatGenerator] {MODEL_REPO} ready in {time.time() - started:.1f}s "
+            f"device={self.device} dir={CHECKPOINT_DIR}"
+        )
 
     @modal.method()
     def generate(
@@ -359,13 +377,23 @@ class BeatGenerator:
 
         started = time.time()
         with tempfile.TemporaryDirectory() as tmp:
-            out_path = str(Path(tmp) / "beat.wav")
             ref_path = None
             if init_wav:
                 ref_path = str(Path(tmp) / "ref.wav")
                 Path(ref_path).write_bytes(init_wav)
 
-            self.pipeline(
+            # A **directory**, and the file name comes back rather than being
+            # guessed. `save_path` is overloaded — a directory gets a
+            # timestamped name built inside it, anything else is treated as the
+            # file itself and has the format appended — and the call already
+            # answers the question:
+            #
+            #     return output_paths + [input_params_json]
+            #
+            # Reading `output_paths[0]` is the only version of this that cannot
+            # go looking for a file the library decided to call something else.
+            result = self.pipeline(
+                save_path=tmp,
                 format="wav",
                 audio_duration=length,
                 prompt=text,
@@ -379,10 +407,16 @@ class BeatGenerator:
                 audio2audio_enable=bool(init_wav),
                 ref_audio_input=ref_path,
                 ref_audio_strength=strength,
-                save_path=out_path,
             )
-            written = Path(out_path)
-            if not written.exists() or not written.stat().st_size:
+            written = next(
+                (
+                    Path(item)
+                    for item in (result or [])
+                    if isinstance(item, str) and Path(item).is_file()
+                ),
+                None,
+            )
+            if written is None or not written.stat().st_size:
                 raise BeatGenError("the generator produced no audio")
             audio = decode_audio(written.read_bytes(), 44100)
 

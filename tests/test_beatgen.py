@@ -190,3 +190,49 @@ def test_generate_accepts_an_init_without_requiring_one():
     signature = inspect.signature(beatgen.BeatGenerator.generate._get_raw_f())
     assert signature.parameters["init_wav"].default is None
     assert signature.parameters["init_strength"].default is None
+
+
+# --- the two things the library does not do where it looks like it does ----
+
+
+def test_the_weights_are_fetched_in_startup_and_committed_after():
+    """`ACEStepPipeline.__init__` does **not** download the checkpoints.
+
+    `__call__` does, lazily:
+
+        if not self.loaded:
+            logger.warning("Checkpoint not loaded, loading checkpoint...")
+            self.load_checkpoint(self.checkpoint_dir)
+
+    Left alone that is two bugs at once. The ~7 GB `snapshot_download` happens
+    inside somebody's job instead of in container startup, and `model_vol
+    .commit()` runs *before* anything has been written — so the Volume never
+    keeps a copy and every cold container downloads it again.
+
+    Read as source order because there is no library here to run: the assertion
+    is that the fetch is called, and that the commit comes after it.
+    """
+    import inspect
+
+    # `@modal.enter()` wraps it, same as `@modal.method()` does `generate`.
+    body = inspect.getsource(beatgen.BeatGenerator.load._get_raw_f())
+    assert "load_checkpoint" in body, "the fetch is left to the first job"
+    assert body.index("load_checkpoint(") < body.index("model_vol.commit()"), (
+        "the Volume is committed before the weights land in it"
+    )
+
+
+def test_the_output_file_is_the_one_the_call_named():
+    """`save_path` is overloaded and guessing at it is how a job dies at the end.
+
+    A directory gets a timestamped name built inside it; anything else is
+    treated as the file itself with the format appended. The call already
+    answers the question — `return output_paths + [input_params_json]` — so the
+    path comes from the result rather than from a filename we invented.
+    """
+    import inspect
+
+    body = inspect.getsource(beatgen.BeatGenerator.generate._get_raw_f())
+    assert "result = self.pipeline(" in body
+    assert "beat.wav" not in body, "an output filename is being guessed at"
+    assert "save_path=tmp" in body, "save_path must be the directory, not a file"
