@@ -69,6 +69,42 @@ def test_the_first_beat_is_found_to_within_fifteen_milliseconds(offset):
     assert distance < 0.015
 
 
+def test_a_lag_supported_at_its_multiples_beats_one_that_is_not():
+    """The error that ruined a real backing track, as a unit test.
+
+    On a 154 BPM rock arrangement the autocorrelation peaked almost equally at
+    the beat period and at one and a half times it — a backbeat puts strong
+    onsets on both grids — and plain scoring picked the wrong one by 0.9%. A
+    3:2 error is the one that cannot be lived with: two bars of a bed at 103
+    span three bars of a song at 154, which is not drift, it is a different
+    metre.
+
+    Built here as a correlation rather than as audio, because what is being
+    tested is the scoring rule: a true period has support at 1x, 2x, 3x and 4x
+    of itself, while a lag half again as long shares only its even multiples.
+    """
+    period = 20
+    correlation = np.zeros(400)
+    for multiple in range(1, 20):
+        correlation[period * multiple] = 0.9
+    # …and a spurious peak at 1.5x, as strong as the real one.
+    correlation[period * 3 // 2] = 0.9
+
+    lags = np.arange(10, 60)
+    scores = an._comb_score(correlation, lags)
+    assert scores[lags == period][0] > scores[lags == period * 3 // 2][0]
+
+
+def test_the_comb_does_not_simply_prefer_longer_lags():
+    """The trap the first version fell into: lags are whole frames and periods
+    are not, so scoring at exact integer multiples rewards long lags — their
+    multiples land nearer the real peaks. It turned a 120 BPM click track into
+    60. The windowed search is what fixes it, and this is the guard."""
+    for bpm in (100, 120, 140):
+        found, _ = an.tempo(clicks(bpm))
+        assert found == pytest.approx(bpm, rel=0.01), f"{bpm} came back as {found}"
+
+
 def test_a_track_with_no_pulse_says_so_rather_than_guessing():
     """Silence, and a held tone. Both are honest zeros — `beats.py` reads that
     as "do not stretch this" rather than stretching to a made-up number."""

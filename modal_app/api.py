@@ -196,13 +196,11 @@ async def submit(
     # Absent means it is to be generated from `beat_prompt`, and `/submit`
     # refuses a `beat` job that has neither and one that has both.
     beat: Annotated[UploadFile | None, File()] = None,
-    # Which of the three: a file, a description, or the song's own harmony
-    # rebuilt from scratch. Named rather than inferred from which field arrived
-    # — `remake` sends neither, so there is nothing to infer it from.
+    # A file or a description. Named rather than inferred from which field
+    # arrived, so a request that forgot one gets a sentence about the source it
+    # chose rather than a guess.
     beat_source: Annotated[str, Form()] = "",
     beat_prompt: Annotated[str, Form()] = "",
-    # Which kind of arrangement `remake` plays. `auto` picks from the tempo.
-    arrange_style: Annotated[str, Form()] = "",
     # -1 is a different beat every time. A fixed value gets the same one back.
     beat_seed: Annotated[int, Form()] = -1,
     text: Annotated[str, Form()] = "",
@@ -250,8 +248,8 @@ async def submit(
     `beat` is `song` with the backing track replaced: it separates the same way,
     measures the original instrumental for tempo and key, and then mixes the
     converted voice over a different bed. `beat_source` says where that bed
-    comes from — an uploaded `beat` file, music generated from `beat_prompt`, or
-    the song's own chords rebuilt on synthesised instruments.
+    comes from — an uploaded `beat` file, or music generated from
+    `beat_prompt`.
 
     `rebeat` is that without the conversion: the singer is left exactly as they
     were and only the backing track changes. It is the one mode that needs no
@@ -280,7 +278,6 @@ async def submit(
                 "cfg_rate": cfg_rate,
                 "clarity": clarity,
                 "beat_source": beat_source,
-                "arrange_style": arrange_style,
                 "beat_prompt": beat_prompt,
                 "beat_seed": beat_seed,
                 "voice_profile": voice_profile,
@@ -349,13 +346,6 @@ async def submit(
                 raise HTTPException(400, "describe the beat to generate, or upload one")
             if beat is not None:
                 raise HTTPException(400, "send a beat file or a description of one, not both")
-        elif beat is not None:
-            # `remake` builds the bed out of the song itself, so a file sent with
-            # it would be silently ignored — which is the failure where somebody
-            # uploads a beat and wonders why they cannot hear it.
-            raise HTTPException(
-                400, "this source rebuilds the song's own backing track; no beat file is used"
-            )
 
     job_id = _start_job(mode, params, source_bytes, reference_bytes, client, beat_bytes)
     # The audit trail proper (plan §8 item 5): who asked, when, for what shape

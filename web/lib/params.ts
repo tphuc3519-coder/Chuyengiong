@@ -127,31 +127,13 @@ export const MAX_VOCAL_GAIN_DB = 12;
  * afterwards (`modal_app/beats.py`), so the prompt only has to get the
  * *character* right.
  *
- * `remake` — the song's own harmony, at its own tempo, played on instruments
- * synthesised from scratch. The only one that is still the same song, and the
- * only one whose copyright story has to be said out loud: it removes the sound
- * recording and not the composition, so what comes out is a cover. Covers are
- * licensable, cheaply and often compulsorily; masters usually are not. That is
- * the real gain and it is narrower than "tránh bản quyền" suggests.
+ * There was a third — `remake`, which read the song's own chords and played
+ * them back on synthesised instruments. It is gone: additive synthesis makes a
+ * drum machine, and it was being held against a human rock arrangement with
+ * recorded guitars and drums. That gap is not a tuning problem. `upload` is the
+ * source that reaches that bar, because there a person made the arrangement.
  */
-export type BeatSource = "upload" | "generate" | "remake";
-
-/**
- * How a remade backing track is played, mirrored from `STYLES` in
- * `modal_app/arrange.py`.
- *
- * `auto` picks from the measured tempo, which is a better guess than any fixed
- * default: 72 BPM wants a ballad and 150 does not.
- */
-export const ARRANGE_STYLES: { id: string; label: string; hint: string }[] = [
-  { id: "auto", label: "Tự chọn", hint: "Theo tốc độ đo được của bài" },
-  { id: "ballad", label: "Ballad", hint: "Chậm, hợp âm ngân dài" },
-  { id: "lofi", label: "Lo-fi", hint: "Trống lệch nhịp, pad ấm" },
-  { id: "boombap", label: "Boom bap", hint: "Trống mộc, hợp âm nảy" },
-  { id: "pop", label: "Pop", hint: "Đều nhịp, đầy đặn" },
-  { id: "trap", label: "Trap", hint: "808, hi-hat dày" },
-];
-export const DEFAULT_ARRANGE_STYLE = "auto";
+export type BeatSource = "upload" | "generate";
 
 /**
  * Whether this deployment ships the beat generator, mirrored from
@@ -304,8 +286,6 @@ export type Params = {
   /** `beat` only, and only when `beatSource` is `generate`. */
   beatPrompt: string;
   beatSeed: number;
-  /** `beat` only, and only when `beatSource` is `remake`. */
-  arrangeStyle: string;
   /** Classifier-free guidance, `CFG_RATE_MIN`…`CFG_RATE_MAX`. */
   cfgRate: number;
   /** How much of the output clarity chain to run, `CLARITY_MIN`…`CLARITY_MAX`. */
@@ -331,7 +311,6 @@ export function defaultParams(mode: Mode): Params {
     beatSource: "upload",
     beatPrompt: "",
     beatSeed: BEAT_RANDOM_SEED,
-    arrangeStyle: DEFAULT_ARRANGE_STYLE,
     cfgRate: DEFAULT_CFG_RATE,
     clarity: DEFAULT_CLARITY,
     semitoneShift: null,

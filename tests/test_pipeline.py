@@ -112,12 +112,12 @@ def test_an_unknown_beat_source_falls_back_to_the_one_needing_no_model():
     )
 
 
-def test_the_arrangement_style_is_carried_and_bounded():
-    from modal_app import arrange
-
-    assert pipeline.clean_params("beat")["arrange_style"] == arrange.DEFAULT_STYLE
-    assert pipeline.clean_params("beat", {"arrange_style": "lofi"})["arrange_style"] == "lofi"
-    assert len(pipeline.clean_params("beat", {"arrange_style": "x" * 99})["arrange_style"]) <= 24
+def test_the_only_beat_sources_are_the_two_that_reach_the_bar():
+    """`remake` — the song's own chords played back on synthesised instruments —
+    is gone. It could not reach the quality it was being held against, and a
+    third of a feature that never satisfies anybody is worse than two that do.
+    The comment on `BEAT_SOURCES` carries the measurement."""
+    assert set(pipeline.BEAT_SOURCES) == {"upload", "generate"}
 
 
 def test_a_beat_prompt_cannot_be_longer_than_the_generator_accepts():

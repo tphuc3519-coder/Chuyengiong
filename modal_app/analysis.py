@@ -57,6 +57,31 @@ BPM_MAX = 200.0
 # overrule evidence.
 TEMPO_PRIOR_BPM = 120.0
 TEMPO_PRIOR_OCTAVES = 1.0
+
+# A tempo hypothesis is scored at its multiples as well as at itself.
+#
+# This is the fix for the error that actually damages a backing track, and it
+# is worth naming precisely because it is *not* the octave error everybody
+# expects. On a real rock arrangement the autocorrelation peaks almost equally
+# at the beat period and at **one and a half times** it, because a backbeat
+# puts strong onsets on both grids. Measured on a 154 BPM song, plain
+# autocorrelation scored 103.4 BPM at 0.4817 and 152.0 at 0.4774 — it picked
+# the wrong one by 0.9%.
+#
+# A 3:2 error is the one that cannot be lived with. Two bars of a bed at 103
+# span three bars of a song at 154: it does not drift, it is simply in a
+# different metre. An octave error is benign by comparison — a bed at half
+# tempo lands on every other beat, which is what half-time is — and
+# `beats.fold_tempo` absorbs it anyway.
+#
+# Multiples separate the two cases exactly. A true period has support at 1x,
+# 2x, 3x and 4x of itself; a lag 1.5x too long shares only its even multiples,
+# so its odd ones collapse. On the same song: 152 scores 0.506/0.485/0.378/0.504
+# across the four, and 103 scores 0.493/0.378/0.252/0.505 — the difference is
+# not marginal once all four are counted. It leaves the octave ambiguity
+# untouched, which is correct: every multiple of 2P is also a multiple of P, so
+# no amount of comb scoring can tell them apart, and nothing should pretend to.
+TEMPO_HARMONICS = (1, 2, 3, 4)
 # Onset envelope smoothing window, in frames: the local mean that gets
 # subtracted before autocorrelation. ~0.35s, long enough to span a beat and
 # short enough to follow a build.
@@ -206,6 +231,40 @@ def _autocorrelate(envelope: np.ndarray) -> np.ndarray:
     return correlation / max(correlation[0], 1e-9)
 
 
+def _comb_score(correlation: np.ndarray, lags: np.ndarray) -> np.ndarray:
+    """Each lag's autocorrelation plus its multiples', weighted by `1/k`.
+
+    See `TEMPO_HARMONICS`. Normalised by the weights that actually landed
+    inside the correlation, so a long period near the end of a short recording
+    is not marked down for having fewer multiples to be supported at.
+
+    **Each multiple is looked for in a small window rather than at one sample**,
+    and without that the whole idea backfires. Lags are whole frames and a
+    period is not: a true period of 21.53 frames is searched at lag 22, whose
+    second multiple is 44 while the real peak sits at 43. The double-length
+    candidate at lag 43 has multiples 86, 129, 172 that all stay aligned — so
+    scoring at exact integer multiples systematically rewards *longer* lags, and
+    the first version of this turned a 120 BPM click track into 60.
+
+    The window is `ceil(k/2)` wide because that is exactly how far half a frame
+    of rounding can have travelled by the k-th multiple.
+    """
+    total = np.zeros(len(lags), dtype=np.float64)
+    weight = np.zeros(len(lags), dtype=np.float64)
+    for harmonic in TEMPO_HARMONICS:
+        tolerance = -(-harmonic // 2)  # ceil, and the reach of a rounded lag
+        centre = lags * harmonic
+        inside = centre + tolerance < len(correlation)
+        if not inside.any():
+            break
+        offsets = np.arange(-tolerance, tolerance + 1)
+        window = correlation[centre[inside][:, None] + offsets[None, :]]
+        share = 1.0 / harmonic
+        total[inside] += share * window.max(axis=1)
+        weight[inside] += share
+    return total / np.maximum(weight, 1e-9)
+
+
 def _refine(correlation: np.ndarray, lag: int) -> float:
     """The autocorrelation peak's position to better than one frame.
 
@@ -305,7 +364,7 @@ def tempo(audio: np.ndarray, sample_rate: int = ANALYSIS_RATE) -> tuple[float, f
     lags = np.arange(low, high + 1)
     candidates = 60.0 * frames_per_sec / lags
     prior = np.exp(-0.5 * (np.log2(candidates / TEMPO_PRIOR_BPM) / TEMPO_PRIOR_OCTAVES) ** 2)
-    scored = correlation[low : high + 1] * prior
+    scored = _comb_score(correlation, lags) * prior
     if not np.isfinite(scored).any() or scored.max() <= 0:
         return 0.0, 0.0
 

@@ -65,10 +65,14 @@ khác nhau ở ba chỗ trong UI:
 ## Chế độ "Đổi beat"
 
 `app/components/BeatSource.tsx`. Mode `beat` thêm đúng một bước vào form (2b) và
-giữ nguyên mọi bước khác: nguồn beat là radio group ba lựa chọn — tải lên, tự
-sinh, hoặc **phối lại chính bài này**. Là một lựa chọn có tên chứ không phải ba
-ô độc lập, vì mỗi nguồn có điều kiện riêng và "phối lại" không gửi cả file lẫn
-mô tả, nên không có gì để backend suy ra.
+giữ nguyên mọi bước khác: nguồn beat là radio group hai lựa chọn — tải lên hoặc
+tự sinh. Nơi deployment không bật phần sinh beat thì chỉ còn một nguồn, và
+nhóm radio biến mất hẳn thay vì hiển thị một lựa chọn duy nhất.
+
+Từng có lựa chọn thứ ba, "phối lại bài này". Nó bị gỡ: đem so với một bản phối
+rock do người làm, bản nó dựng ra có 55% năng lượng dưới 120 Hz và không có gì
+trên 4 kHz — khoảng cách đó là giữa tổng hợp sóng bằng số học và một thư viện
+sample thu thật, không phải chuyện tinh chỉnh.
 
 "Tải beat lên" là mặc định vì nó luôn chạy được: không cần GPU, không cần weights
 gated, và license của thứ ra lò là license người dùng đã chọn khi lấy file.
