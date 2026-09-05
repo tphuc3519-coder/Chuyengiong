@@ -604,3 +604,36 @@ def test_an_upload_source_never_reaches_the_generator(volume_root, monkeypatch, 
 
     monkeypatch.setattr(beatgen, "generator", no_gpu)
     assert pipeline._generate_beat(job_id, pipeline.clean_params("beat")) is None
+
+
+def test_only_a_generated_bed_is_re_balanced(volume_root, monkeypatch, job_store):
+    """An uploaded beat is somebody's finished production.
+
+    `beats.balance` exists because the generator's output is unmastered by
+    construction — a diffusion model has no reason to hand back a balanced
+    mix, and the first real job came back with 72% of its power under 120 Hz.
+    Running the same shelf over a beat a person mixed would be this pipeline
+    deciding it knows better than whoever mixed it.
+    """
+    from modal_app import beats
+
+    balanced = []
+    monkeypatch.setattr(
+        beats, "balance", lambda wav, *a, **k: balanced.append(wav) or (b"balanced-bed", "note")
+    )
+    monkeypatch.setattr(
+        beats,
+        "analyse_and_fit",
+        lambda beat, instrumental, *a, **k: (b"fitted-bed", "plan", "beat-track", "song-track"),
+    )
+    monkeypatch.setattr(jobs, "job_dict", job_store)
+
+    for index, (source, expected) in enumerate(
+        (("upload", b"fitted-bed"), ("generate", b"balanced-bed"), ("derive", b"balanced-bed"))
+    ):
+        job_id = chr(ord("d") + index) * 32
+        jobs.create(job_id, "beat", params={}, store=job_store)
+        params = pipeline.clean_params("beat", {"beat_source": source, "beat_prompt": "x"})
+        assert pipeline._beat_bed(job_id, params, b"instrumental", b"beat") == expected
+
+    assert balanced == [b"fitted-bed", b"fitted-bed"], "upload was re-balanced, or a source was not"

@@ -2378,3 +2378,95 @@ format là một diff không ai yêu cầu, rơi vào đúng PR nào đang mở 
 reformat nằm trong một commit nói rõ nó là bản reformat.
 
 **611 passed, 3 skipped.**
+
+---
+
+## 14.2 — Đo bản thật đầu tiên: đúng hoà thanh, sai hoàn toàn cân bằng
+
+Bản đầu tiên chạy được, và câu hỏi là "thấy nó phối siêu dở ko?".
+
+Tôi không nghe được file. Nhưng đo được, và đây là số đo, đặt cạnh bản phối rock
+người làm của cùng bài Blue Bird — cùng bộ chỉ số đã dùng ở 13.2:
+
+| | Ryu No Kage | Bản này | Synth Phase 12 (đã gỡ) |
+|---|---|---|---|
+| 40–120 Hz | 23.5 % | **71.9 %** | 55.5 % |
+| 2–6 kHz | 16.0 % | **5.3 %** | 5.2 % |
+| Rolloff 99% | 9 324 Hz | **10 218 Hz** | 4 027 Hz |
+| Peak | 0.763 | 1.206 | 1.280 |
+
+Đọc bảng này cẩn thận, vì nó nói hai điều ngược nhau.
+
+### Cái đã chạy được
+
+**Hoà thanh đúng.** Cho `chords.detect` đọc lại chính đầu ra: `A D A C#m F#m D A
+Bm`, toàn bộ diatonic trong Rê trưởng, và tông đo được của bài là D với margin
+0.248 — chắc chắn. Tempo 152 BPM. Đường vòng qua chart hoạt động.
+
+**Dải cao là thật.** Rolloff 99% ở 10.2 kHz, *cao hơn cả bản người làm*. Máy
+đánh trống của Phase 12 chết ở 4 kHz và đó là lý do nó bị gỡ. Diffusion cho ra
+nhạc cụ thật, đúng như kỳ vọng.
+
+### Cái hỏng, và nó không nằm ở phần mới
+
+**72% năng lượng nằm trong 40–120 Hz.** Một nốt trầm duy nhất gánh ba phần tư cả
+bài. Bin to nhất: 72.7 Hz — nốt Rê quãng 2. Còn dải 2–6 kHz, chỗ giọng hát nghe
+rõ được và chỗ snare có tiếng, chỉ còn 5.3% so với 16% của bản tham chiếu.
+
+Đó không phải "hơi nhiều bass". Đó là bùn, với người hát đứng đâu đó phía sau.
+
+Nguồn gốc thì thẳng thắn: `BeatGenerator.generate` chuẩn hoá đầu ra **theo
+đỉnh**. Chuẩn hoá theo đỉnh một tín hiệu mà thứ to nhất là một nốt trầm thì cả
+mức của bài bị nốt trầm đó quyết định, mọi thứ trên nó teo lại. Đầu ra của một
+model diffusion là chưa master theo định nghĩa — nó không có lý do gì trả về một
+bản mix cân bằng — nên phải có gì đó chỉnh, mà không có gì cả.
+
+### Một thứ suýt bị "sửa" dù không hỏng
+
+Peak 1.206 nhìn như clipping. Tôi đã định thêm limiter.
+
+Đo trước: encode một tín hiệu đúng −1 dBFS ra mp3 192k rồi decode lại chỉ ra
+0.873, tức mp3 không tự đội lên. Nhưng đếm tiếp thì **0.004% số mẫu** vượt −1
+dBFS, và crest factor 15.1 dB — hoàn toàn lành. Đó là vài đỉnh transient lẻ, không
+phải master bị nghiến. Limiter bị bỏ, không thêm dòng nào.
+
+### `beats.balance` — và vì sao nó chạy *sau* `fit`
+
+```
+low 69% -> 30% (shelf -7.1 dB), rms 0.14
+```
+
+Ba bước:
+
+1. Dưới `SUB_HZ` (30 Hz) bỏ hẳn. Bed không có gì để nói ở đó, mà rumble sống sót
+   tới `mixing` là rumble bị `loudnorm` **vặn to lên** — K-weighting gần như
+   không nghe thấy nó, nên nó ăn headroom mà không đổi được gì.
+2. Nếu quá `LOW_SHARE_TARGET` (30%) công suất nằm dưới 120 Hz thì kéo dải trầm
+   xuống đúng mức đó. Là *shelf* chứ không phải filter có góc: crossover cosine ở
+   cả hai đầu, vì tường gạch trong miền tần số là đáp ứng xung dài trong miền
+   thời gian.
+3. Mức đặt theo **RMS**, đỉnh chỉ làm trần. Đây là bước thay cho chuẩn hoá theo
+   đỉnh, và là bước chặn một nốt trầm quyết định độ to của cả bed.
+
+**Chạy sau `fit`, không phải trước** — và đó là cả lý do nó là hàm riêng chứ
+không nằm trong `beatgen`. `stretch` dịch tông bằng `asetrate`, tức dời toàn bộ
+phổ cùng lúc; đo một bed trước khi nó bị hạ năm cung là đo sai chỗ. Cái hàm này
+đọc được chính là cái mà bản mix sẽ nhận.
+
+**Chỉ bed do máy sinh mới đi qua đây.** Beat người dùng tải lên là bản phối hoàn
+chỉnh của ai đó, và chạy cùng cái shelf lên nó là pipeline tự cho rằng mình
+giỏi hơn người đã mix nó. Có test riêng cho điều đó.
+
+Chạy thử hàm thật lên đúng file đo được ở trên:
+
+```
+             <40Hz  40-120  120-2k    2-6k     >6k    peak
+trước         0.2%   71.8%   19.8%    5.3%    2.8%   1.206
+sau           0.1%   36.8%   42.0%   13.9%    7.2%   0.890
+Ryu              —   23.5%       —   16.0%       —   0.763
+```
+
+`LOW_SHARE_TARGET` là điểm xuất phát chứ không phải số đo. Nó cần một đôi tai
+trên job thật, y hệt hai giá trị `init_noise_level`.
+
+**617 passed, 3 skipped.**
