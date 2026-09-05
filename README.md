@@ -2288,9 +2288,9 @@ AttributeError: 'function' object has no attribute 'remote'
 Chỗ gây lỗi trông y hệt bốn dòng bên cạnh nó:
 
 ```python
-stems = Separator(model=...).separate.remote(...)      # chạy
+stems = Separator(model=...).separate.remote(...)  # chạy
 converted = VoiceConverter(mode=...).convert.remote(...)  # chạy
-beat = BeatGenerator().generate.remote(...)            # nổ
+beat = BeatGenerator().generate.remote(...)  # nổ
 ```
 
 ### `app.cls()` không decorate tại chỗ
@@ -2356,3 +2356,25 @@ ai thêm một class nữa rồi quên decorate, `test_deploy.py` đỏ trước
 dùng gặp.
 
 **610 passed, 3 skipped.**
+
+### Kèm: `ruff` được ghim cứng
+
+CI của chính commit này đỏ, và không phải vì code:
+
+```
+--> README.md:2291:52
+1 file would be reformatted, 56 files already formatted
+```
+
+`requirements.txt` để `ruff>=0.6`. Runner giải ra 0.16.6, mà 0.16 bắt đầu
+format cả Python nằm trong fence của Markdown — nên `ruff format --check` đỏ
+trên một cái README vừa viết, theo một luật chưa tồn tại lúc viết nó, trong khi
+đúng câu lệnh đó xanh ở máy local đang chạy 0.15.
+
+Một luật lint mới xuất hiện là một phát hiện đáng có. Một formatter tự đổi cách
+format là một diff không ai yêu cầu, rơi vào đúng PR nào đang mở tuần đó. Nên
+`ruff==0.16.6`, ghim cứng, khác với mọi dòng còn lại trong file — và có test giữ
+điều đó. Nâng thì nâng có chủ ý: sửa dòng ghim, chạy `ruff format .`, và bản
+reformat nằm trong một commit nói rõ nó là bản reformat.
+
+**611 passed, 3 skipped.**

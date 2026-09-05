@@ -3,7 +3,19 @@
 modal>=1.0,<2
 fastapi[standard]>=0.115
 pytest>=8.0
-ruff>=0.6
+
+# Pinned exactly, unlike everything else here, and for a reason a range cannot
+# cover: this is a *formatter*, and its output is allowed to change between
+# releases. It floated at `>=0.6`, CI resolved 0.16.6, and 0.16 began
+# formatting Python inside Markdown fences — so `ruff format --check` went red
+# on a README nobody had touched with a rule that did not exist when it was
+# written, while the same command passed locally on 0.15.
+#
+# A lint rule that appears is a finding worth having. A formatter that
+# reformats is a diff nobody asked for, arriving on whichever pull request
+# happens to be open that week. Upgrade it deliberately: bump this line, run
+# `ruff format .`, and the reformat lands in a commit that says so.
+ruff==0.16.6
 
 # Used by modal_app/audio_utils.py, which runs both in the container and in
 # the unit tests. Pinned below 2 to match the audio stack in the images.
