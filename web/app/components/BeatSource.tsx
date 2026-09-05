@@ -5,7 +5,6 @@ import { useId } from "react";
 import { FileDrop } from "./FileDrop";
 import {
   AUDIO_ACCEPT,
-  BEAT_GENERATOR_ENABLED,
   BEAT_PROMPT_CHARS,
   BEAT_PROMPT_EXAMPLES,
   BEAT_RANDOM_SEED,
@@ -37,22 +36,25 @@ export function BeatSource({
   beat,
   onBeat,
   onChange,
+  canGenerate,
   disabled,
 }: {
   params: Params;
   beat: File | null;
   onBeat: (file: File | null) => void;
   onChange: (params: Params) => void;
+  /** Whether this deployment ships the generator — asked at run time. */
+  canGenerate: boolean;
   disabled?: boolean;
 }) {
   const groupId = useId();
   const promptId = useId();
-  const generating = BEAT_GENERATOR_ENABLED && params.beatSource === "generate";
+  const generating = canGenerate && params.beatSource === "generate";
   const left = BEAT_PROMPT_CHARS - params.beatPrompt.length;
 
   return (
     <div>
-      {BEAT_GENERATOR_ENABLED && (
+      {canGenerate && (
         <>
           <span className="slider-label" id={groupId}>
             Beat mới lấy từ đâu
@@ -61,24 +63,24 @@ export function BeatSource({
             <button
               type="button"
               role="radio"
-              aria-checked={!generating}
-              className={generating ? "segment" : "segment is-active"}
-              disabled={disabled}
-              onClick={() => onChange({ ...params, beatSource: "upload" })}
-            >
-              <span className="segment-label">Tải beat lên</span>
-              <span className="segment-hint">Beat bạn đã có sẵn quyền dùng</span>
-            </button>
-            <button
-              type="button"
-              role="radio"
               aria-checked={generating}
               className={generating ? "segment is-active" : "segment"}
               disabled={disabled}
               onClick={() => onChange({ ...params, beatSource: "generate" })}
             >
-              <span className="segment-label">Tự sinh beat</span>
-              <span className="segment-hint">Mô tả kiểu nhạc, máy làm beat mới</span>
+              <span className="segment-label">Máy làm beat</span>
+              <span className="segment-hint">Mô tả kiểu nhạc, app tự sinh beat mới</span>
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={!generating}
+              className={generating ? "segment" : "segment is-active"}
+              disabled={disabled}
+              onClick={() => onChange({ ...params, beatSource: "upload" })}
+            >
+              <span className="segment-label">Tự đưa beat</span>
+              <span className="segment-hint">Beat bạn đã có sẵn quyền dùng</span>
             </button>
           </div>
         </>
@@ -133,8 +135,9 @@ export function BeatSource({
             đó, và nó phải nằm *trên* ô chọn file chứ không phải dưới.
           */}
           <p className="field-note">
-            App không tự sáng tác beat. Bạn đưa beat mới vào đây, app sẽ đo bài gốc rồi kéo beat cho
-            khớp và ghép giọng lên.
+            Bạn đưa beat mới vào đây, app sẽ đo bài gốc rồi kéo beat cho khớp và ghép giọng lên.
+            Muốn app tự làm ra beat thì chọn “Máy làm beat” ở trên — nếu không thấy lựa chọn đó thì
+            bản triển khai này chưa bật phần sinh beat.
           </p>
           <FileDrop
             file={beat}

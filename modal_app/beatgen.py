@@ -58,39 +58,47 @@ MODEL_REPO = "stabilityai/stable-audio-open-1.0"
 # the weights that carry Stability's own terms. Pinned because its inference
 # entry point has moved between releases, exactly like seed-vc's.
 #
-# **This image does not build yet, and that is why the whole feature is behind
-# `enabled()`.** `modal deploy` builds every registered image in one pass, so a
-# broken one does not fail its own function — it fails the deploy, and with it
-# every unrelated change in the same push. That is exactly what happened: this
-# image was added in Phase 11 and Phases 11, 12 and 13 all sat undeployed
-# behind it while the live API answered from Phase 10 and returned a 422 for
-# modes it had never heard of.
+# **This list once had `einops==0.8.0` in it and that one line failed every
+# deploy for three phases.** `stable-audio-tools` depends on `einops==0.7.0`
+# exactly, so pip had nothing to resolve:
 #
-# The failure is dependency resolution, not code:
+#     ERROR: Cannot install einops==0.8.0 and stable-audio-tools==0.0.16
+#     The conflict is caused by:
+#         stable-audio-tools 0.0.16 depends on einops==0.7.0
 #
-#     python -m pip install einops==0.8.0 'protobuf>=3.20,<7' \
-#       stable-audio-tools==0.0.16  ->  container exit status: 1
+# `modal deploy` builds every registered image in one pass, so that took the
+# whole deployment down with it rather than just this feature — which is why
+# `enabled()` exists below and why it stays.
 #
-# `stable-audio-tools` is a *training* package. It pulls pytorch-lightning,
-# wandb, gradio, encodec, laion-clap, k-diffusion and a dozen more, several of
-# which pin torch themselves — against a base image that already holds torch
-# 2.4.0 and numpy<2. Getting that to resolve is a real piece of work and it
-# needs the actual pip output (`modal image logs <id>`) rather than a guess.
+# What is pinned here and why:
 #
-# Until somebody has done it and seen the image build, this stays off.
+#  * torch and torchaudio are repeated at `base_image`'s versions so the
+#    resolver cannot pull a different build in behind them. Left alone it takes
+#    torchaudio 2.11 against torch 2.4, which installs and does not run.
+#  * transformers is held at 4.46.3 for the reason `tts.py` documents at
+#    length: 5.x wants torch >= 2.5 and, finding 2.4, prints one line to the
+#    build log and carries on with every model class replaced by a stub. Stable
+#    Audio Open conditions on T5, so that stub is the whole feature.
+#  * einops is *not* pinned, because the package pins it and the package wins.
 BEATGEN_REQUIREMENTS = [
     "stable-audio-tools==0.0.16",
-    "einops==0.8.0",
-    "protobuf>=3.20,<7",
+    "torch==2.4.0",
+    "torchaudio==2.4.0",
+    "transformers==4.46.3",
 ]
 
-# Deployment config, read the same way `watermark.enabled()` reads WATERMARK —
-# except the default is the opposite, and deliberately: watermarking is on
-# unless it is turned off, and this is off unless it is turned on, because
-# nobody has watched the image above build.
+# Installed *after* the list above, in its own layer, and that is not tidiness.
 #
-# Turning it on means: set BEAT_GENERATOR=1 and HF_TOKEN on the deployment, and
-# be ready for the deploy to fail until `BEATGEN_REQUIREMENTS` is sorted out.
+# `descript-audiotools` — which `stable-audio-tools` pulls in — caps protobuf
+# below 3.20 for a tensorboard logger nothing here touches. Modal's own agent
+# runs inside this image and reads an attribute protobuf grew in 3.20, so under
+# that cap every container dies before a line of this module runs. Inside the
+# same `pip_install` the resolver would have to satisfy the cap; in a later
+# layer it lands on top of it instead. pip prints a conflict warning, which is
+# the intended outcome — `conversion.py` does exactly this for seed-vc and
+# carries the longer version of the story.
+PROTOBUF_SPEC = "protobuf>=3.20,<7"
+
 BEAT_GENERATOR_ENV = "BEAT_GENERATOR"
 
 
@@ -148,7 +156,11 @@ def beatgen_image():
     thing that went wrong here was a deploy failing on an image nobody wanted.
     Not creating it is a guarantee; not attaching it is an expectation.
     """
-    return base_image.pip_install(*BEATGEN_REQUIREMENTS).env({"HF_HOME": MODEL_DIR})
+    return (
+        base_image.pip_install(*BEATGEN_REQUIREMENTS)
+        .pip_install(PROTOBUF_SPEC)
+        .env({"HF_HOME": MODEL_DIR})
+    )
 
 
 class BeatGenError(RuntimeError):

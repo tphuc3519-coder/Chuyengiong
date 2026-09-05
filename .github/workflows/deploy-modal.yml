@@ -40,6 +40,13 @@ jobs:
           # Empty means no per-IP cap; set the variable to a positive integer
           # (5 is what plan §9 asks for) to put one back.
           JOBS_PER_HOUR: ${{ vars.JOBS_PER_HOUR }}
+          # Empty means the beat generator is not shipped, which is the default:
+          # its image is heavy and, until somebody has watched it build, a
+          # broken one fails the whole deploy rather than its own function. Set
+          # the variable to 1 to include it — and set HF_TOKEN with it, because
+          # Stable Audio Open's weights are gated.
+          BEAT_GENERATOR: ${{ vars.BEAT_GENERATOR }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         # modal_app.deploy, not modal_app.api: a function is published only if
         # the module defining it was imported, and the cron plus the GPU class
         # live in modules the API never touches.

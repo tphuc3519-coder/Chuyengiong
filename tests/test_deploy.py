@@ -79,6 +79,22 @@ def test_every_job_mode_has_a_pipeline_that_is_deployed():
         assert pipeline.PIPELINES[mode].info.function_name in set(app.registered_functions)
 
 
+def test_every_config_key_is_actually_passed_by_the_deploy_workflow():
+    """`config_secret()` forwards whatever the *deploy machine* has in its
+    environment, and the deploy machine is a GitHub Actions runner. A key added
+    to `CONFIG_KEYS` but not to the workflow is therefore always empty — the
+    feature behind it is simply off, everywhere, with nothing to say so.
+
+    That has now happened twice, so it is a test rather than a habit."""
+    from pathlib import Path
+
+    from modal_app.app import CONFIG_KEYS
+
+    workflow = Path(".github/workflows/deploy-modal.yml").read_text()
+    for key in CONFIG_KEYS:
+        assert f"{key}: " in workflow, f"{key} is in CONFIG_KEYS and not in the deploy workflow"
+
+
 def test_the_cleanup_cron_sweeps_at_least_as_often_as_the_ttl():
     """Modal does not expose the schedule on a registered Function, so assert on
     the constant the decorator is given."""
