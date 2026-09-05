@@ -126,6 +126,13 @@ body {
   gap: 0.5rem;
 }
 
+/* One per row. The mode row's hints are three or four words and read fine side
+   by side; the beat sources have to explain a licensing trade in a sentence,
+   and at three across that sentence wraps to four lines of six characters. */
+.segmented-stack {
+  grid-template-columns: 1fr;
+}
+
 .segment {
   min-height: var(--tap);
   padding: 0.7rem;

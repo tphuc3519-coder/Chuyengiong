@@ -36,6 +36,7 @@ import time
 from . import audit, jobs, storage, voices, watermark
 from .app import DATA_DIR, api_image, app, data_vol
 from .audio_utils import clamp_cfg_rate, clamp_diffusion_steps, clamp_semitone_shift
+from .beats import BeatError
 from .enhance import clamp_clarity
 from .mixing import clamp_gain_db
 from .prosody import DEFAULT_EMOTION, clamp_expressiveness, clean_emotion
@@ -126,8 +127,23 @@ BEAT_PROMPT_CHARS = 300
 # energy below 120 Hz and had nothing at all above 4 kHz. Deleting it was the
 # honest move; `upload` is the source that reaches the bar, because there a
 # person made the arrangement.
-BEAT_SOURCES = ("upload", "generate")
+BEAT_SOURCES = ("upload", "generate", "derive")
 DEFAULT_BEAT_SOURCE = "upload"
+# The two that cost a GPU. `upload` already has its audio on the Volume.
+GENERATING_SOURCES = ("generate", "derive")
+
+# What `derive` starts the model from, and the only choice in this branch that
+# is a legal question rather than a musical one.
+#
+#  * `sketch` — this repository's oscillators playing the chart `chords.detect`
+#    read off the song. The model never hears the recording, so what comes back
+#    is a cover of the composition.
+#  * `original` — the separated instrumental itself. Musically closer and a
+#    derivative work of somebody's master, which is the thing this whole branch
+#    exists to avoid. Never the default; the UI asks for it explicitly and says
+#    what it is.
+BEAT_INITS = ("sketch", "original")
+DEFAULT_BEAT_INIT = "sketch"
 
 # Job records are read by a browser that is polling; keep failure text short
 # enough to render and free of stack traces.
@@ -196,6 +212,12 @@ def clean_params(mode: str, raw: dict | None = None) -> dict:
         source = raw.get("beat_source")
         params["beat_source"] = source if source in BEAT_SOURCES else DEFAULT_BEAT_SOURCE
         params["beat_prompt"] = str(raw.get("beat_prompt") or "").strip()[:BEAT_PROMPT_CHARS]
+        init = str(raw.get("beat_init") or "").strip().lower()
+        # Clamped, not refused — but note which way it clamps. An unrecognised
+        # value lands on `sketch`, so the failure mode of a typo or an old
+        # client is the conservative branch rather than the one that re-renders
+        # somebody's master.
+        params["beat_init"] = init if init in BEAT_INITS else DEFAULT_BEAT_INIT
         # -1 is "a different beat every time", which is what somebody
         # auditioning one wants. A fixed seed is how they get the same one back
         # after changing something else about the job.
@@ -449,7 +471,7 @@ def run_beat_pipeline(job_id: str, params: dict) -> str:
             storage.put(job_id, INSTRUMENTAL, instrumental)
             data_vol.commit()
 
-        beat = _generate_beat(job_id, params)
+        beat = _generate_beat(job_id, params, instrumental)
 
         jobs.update(job_id, jobs.CONVERTING)
         converted = _done_already(job_id, CONVERTED)
@@ -518,20 +540,84 @@ def _beat_bed(job_id: str, params: dict, instrumental: bytes, beat: bytes | None
     return bed
 
 
-def _generate_beat(job_id: str, params: dict) -> bytes | None:
+def _init_audio(job_id: str, params: dict, instrumental: bytes) -> tuple[bytes, float, str]:
+    """What `derive` starts the sampler from, and how much of it should survive.
+
+    Returns `(wav, noise_level, prompt)`. The prompt comes back because this is
+    where the song's own tempo and key are known: a user who typed nothing gets
+    a description written from the measurement rather than a refusal.
+
+    **The sketch branch is the reason this feature is not just "feed it the
+    song".** `chords.detect` reads a chart — a sequence of triads, which is the
+    composition — and `sketch.render` plays that chart on oscillators that have
+    never heard the recording. What reaches the model is audio generated here,
+    so the output is a cover rather than a derivative of somebody's master. The
+    `original` branch skips all of that and hands over the separated
+    instrumental, which sounds better and is exactly the derivative work the
+    detour exists to avoid; it is off by default and the UI names it.
+    """
+    from . import beatgen, chords, sketch
+    from .analysis import analyse_bytes
+    from .audio_utils import decode_audio, encode_wav
+
+    track = analyse_bytes(instrumental)
+    prompt = params["beat_prompt"] or beatgen.describe(track)
+    seconds = beatgen.DEFAULT_SECONDS
+
+    if params["beat_init"] == "original":
+        audio = decode_audio(instrumental, sketch.SAMPLE_RATE)
+        # A quarter of the way in rather than at the top. Songs open with
+        # intros — a held pad, a count-in, four bars of nothing — and an init
+        # taken from one asks the model to re-render a song that has not
+        # started. A quarter in is the first verse of almost anything.
+        start = int(0.25 * len(audio))
+        window = audio[start : start + int(seconds * sketch.SAMPLE_RATE)]
+        if len(window) < sketch.SAMPLE_RATE:
+            window = audio[: int(seconds * sketch.SAMPLE_RATE)]
+        return encode_wav(window, sketch.SAMPLE_RATE), beatgen.ORIGINAL_NOISE_LEVEL, prompt
+
+    chart = chords.detect_bytes(instrumental, track)
+    print(f"[derive] {job_id}: {track} / {chart}")
+    jobs.record_params(job_id, {"beat_chart": str(chart)})
+    return (
+        sketch.render_wav(chart, track, seconds, seed=max(0, params["beat_seed"])),
+        beatgen.SKETCH_NOISE_LEVEL,
+        prompt,
+    )
+
+
+def _generate_beat(job_id: str, params: dict, instrumental: bytes | None = None) -> bytes | None:
     """The described beat, made on a GPU. `None` for the sources that need none.
 
     An uploaded beat is already on the Volume under this name, put there by
     `_start_job`.
+
+    `derive` is the same call with an `init_audio` attached, which is the entire
+    difference between "a beat that fits the key" and "a beat that follows the
+    chords". It needs the instrumental, so both beat branches pass theirs — they
+    have separated it by this point anyway, for the measurement.
     """
     beat = _done_already(job_id, BEAT)
-    if beat is not None or params["beat_source"] != "generate":
+    if beat is not None or params["beat_source"] not in GENERATING_SOURCES:
         return beat
 
     jobs.update(job_id, jobs.GENERATING)
     from .beatgen import BeatGenerator
 
-    beat = BeatGenerator().generate.remote(prompt=params["beat_prompt"], seed=params["beat_seed"])
+    init_wav: bytes | None = None
+    noise: float | None = None
+    prompt = params["beat_prompt"]
+    if params["beat_source"] == "derive":
+        if not instrumental:
+            raise BeatError("nothing to derive a beat from: the instrumental is missing")
+        init_wav, noise, prompt = _init_audio(job_id, params, instrumental)
+
+    beat = BeatGenerator().generate.remote(
+        prompt=prompt,
+        seed=params["beat_seed"],
+        init_wav=init_wav,
+        init_noise_level=noise,
+    )
     storage.put(job_id, BEAT, beat)
     data_vol.commit()
     return beat
@@ -569,7 +655,7 @@ def run_rebeat_pipeline(job_id: str, params: dict) -> str:
             storage.put(job_id, INSTRUMENTAL, instrumental)
             data_vol.commit()
 
-        beat = _generate_beat(job_id, params)
+        beat = _generate_beat(job_id, params, instrumental)
 
         jobs.update(job_id, jobs.MIXING)
         bed = _beat_bed(job_id, params, instrumental, beat)

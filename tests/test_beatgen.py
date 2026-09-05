@@ -83,3 +83,61 @@ def test_the_prompt_limit_matches_the_one_the_pipeline_enforces():
     from modal_app import pipeline
 
     assert pipeline.BEAT_PROMPT_CHARS == beatgen.MAX_PROMPT_CHARS
+
+
+# --- init_audio: what turns a described beat into a derived one -------------
+
+
+def test_the_noise_level_is_clamped_away_from_zero():
+    """Zero is not the bottom of the range, and that is not an off-by-one.
+
+    `init_noise_level` becomes the sampler's `sigma_max`, so at zero there is
+    no noise to remove and the sampler returns its input unchanged — which on
+    the `original` init means handing back the master recording as the new
+    beat."""
+    assert beatgen.clamp_noise_level(0) == beatgen.INIT_NOISE_MIN
+    assert beatgen.clamp_noise_level(-5) == beatgen.INIT_NOISE_MIN
+    assert beatgen.clamp_noise_level(1e9) == beatgen.INIT_NOISE_MAX
+    assert beatgen.clamp_noise_level("loud") == beatgen.SKETCH_NOISE_LEVEL
+    assert beatgen.clamp_noise_level(None) == beatgen.SKETCH_NOISE_LEVEL
+    assert beatgen.clamp_noise_level(None, beatgen.ORIGINAL_NOISE_LEVEL) == (
+        beatgen.ORIGINAL_NOISE_LEVEL
+    )
+    assert beatgen.clamp_noise_level(40) == 40.0
+
+
+def test_the_two_init_sources_sit_at_opposite_ends_of_the_range():
+    """A sketch is four oscillators: almost none of it should survive, only the
+    harmony and where the bar is. The original instrumental is already a real
+    arrangement, and re-rendering it that hard throws away the thing it was
+    passed in for."""
+    assert beatgen.SKETCH_NOISE_LEVEL > beatgen.ORIGINAL_NOISE_LEVEL
+    for level in (beatgen.SKETCH_NOISE_LEVEL, beatgen.ORIGINAL_NOISE_LEVEL):
+        assert beatgen.INIT_NOISE_MIN <= level <= beatgen.INIT_NOISE_MAX
+
+
+def test_a_prompt_can_be_written_from_a_measurement_alone():
+    """`derive` has a tempo and a key before it has a word from the user, so an
+    empty description is a reason to write the obvious prompt rather than to
+    refuse the job."""
+    from modal_app.analysis import Track
+
+    track = Track(
+        bpm=153.6, beat_offset_sec=0.0, key=9, minor=True, key_margin=0.1, duration_sec=180.0
+    )
+    written = beatgen.describe(track)
+    assert "154 BPM" in written
+    assert "Am" in written
+    # And it has to survive the same cleaning every other prompt goes through.
+    assert beatgen.clean_prompt(written).endswith(beatgen.PROMPT_SUFFIX)
+
+
+def test_generate_accepts_an_init_without_requiring_one():
+    """The signature is the contract `pipeline` relies on: `upload` and
+    `generate` pass nothing, `derive` passes two more arguments."""
+    import inspect
+
+    # `@modal.method()` wraps the function; the signature lives on the original.
+    signature = inspect.signature(beatgen.BeatGenerator.generate._get_raw_f())
+    assert signature.parameters["init_wav"].default is None
+    assert signature.parameters["init_noise_level"].default is None

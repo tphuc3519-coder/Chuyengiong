@@ -13,7 +13,7 @@
  * * `download` goes straight to Modal again — same size argument as the upload.
  */
 
-import { convertsVoice, type Mode, type Params } from "./params";
+import { convertsVoice, needsBeatFile, type Mode, type Params } from "./params";
 
 export type Status =
   | "queued"
@@ -207,15 +207,22 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
   } else if (input.source) {
     form.set("input", input.source, input.source.name);
   }
-  // Named rather than inferred: `remake` sends neither a file nor a prompt, so
-  // there would be nothing for the backend to infer it from.
+  // Named rather than inferred: two of the three sources send no file, and
+  // `derive` may send no description either, so there would be nothing for the
+  // backend to infer it from.
   if (input.mode === "beat" || input.mode === "rebeat") {
-    form.set("beat_source", input.params.beatSource);
-    if (input.params.beatSource === "generate") {
+    const source = input.params.beatSource;
+    form.set("beat_source", source);
+    if (needsBeatFile(source)) {
+      if (input.beat) form.set("beat", input.beat, input.beat.name);
+    } else {
+      // Sent on both generating sources. On `derive` it is allowed to be empty
+      // — the backend writes one from the song's tempo and key — and sending
+      // the empty string is what says "nothing was typed" rather than leaving
+      // the field out.
       form.set("beat_prompt", input.params.beatPrompt);
       form.set("beat_seed", String(input.params.beatSeed));
-    } else if (input.beat) {
-      form.set("beat", input.beat, input.beat.name);
+      if (source === "derive") form.set("beat_init", input.params.beatInit);
     }
   }
   if (input.reference) form.set("reference", input.reference, input.referenceName);

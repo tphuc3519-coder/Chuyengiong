@@ -210,6 +210,11 @@ async def submit(
     # chose rather than a guess.
     beat_source: Annotated[str, Form()] = "",
     beat_prompt: Annotated[str, Form()] = "",
+    # `derive` only: what the generator starts from. `sketch` plays the song's
+    # chords on this app's own oscillators; `original` hands over the separated
+    # instrumental, which is a derivative of the master and is why the default
+    # is the other one.
+    beat_init: Annotated[str, Form()] = "",
     # -1 is a different beat every time. A fixed value gets the same one back.
     beat_seed: Annotated[int, Form()] = -1,
     text: Annotated[str, Form()] = "",
@@ -257,8 +262,9 @@ async def submit(
     `beat` is `song` with the backing track replaced: it separates the same way,
     measures the original instrumental for tempo and key, and then mixes the
     converted voice over a different bed. `beat_source` says where that bed
-    comes from — an uploaded `beat` file, or music generated from
-    `beat_prompt`.
+    comes from — an uploaded `beat` file, music generated from `beat_prompt`,
+    or `derive`, which reads the song's own chord chart and has the generator
+    play it back as a different arrangement.
 
     `rebeat` is that without the conversion: the singer is left exactly as they
     were and only the backing track changes. It is the one mode that needs no
@@ -288,6 +294,7 @@ async def submit(
                 "clarity": clarity,
                 "beat_source": beat_source,
                 "beat_prompt": beat_prompt,
+                "beat_init": beat_init,
                 "beat_seed": beat_seed,
                 "voice_profile": voice_profile,
                 "separation_model": separation_model,
@@ -340,21 +347,24 @@ async def submit(
             if beat is None:
                 raise HTTPException(400, "this mode needs a beat file, or a different source")
             beat_bytes = await _read_upload(beat, MAX_BEAT_BYTES, "beat")
-        elif source_of_beat == "generate":
+        else:
             # Refused here rather than three minutes into a pipeline that has
             # no container to run it: `deploy.py` only registers the generator
-            # when the deployment asks for it, so on most deployments this
-            # source does not exist at all.
+            # when the deployment asks for it, so on most deployments these
+            # sources do not exist at all.
             if not beatgen.enabled():
                 raise HTTPException(
                     400,
-                    "generated beats are not enabled on this deployment; "
-                    "upload a beat or rebuild the song's own backing track",
+                    "generated beats are not enabled on this deployment; upload a beat instead",
                 )
-            if not params.get("beat_prompt"):
-                raise HTTPException(400, "describe the beat to generate, or upload one")
             if beat is not None:
                 raise HTTPException(400, "send a beat file or a description of one, not both")
+            # A description is the whole input on `generate` and there is
+            # nothing to fall back on. `derive` has the song: an empty box
+            # there means "use what you measured", and `pipeline` writes the
+            # prompt from the tempo and key rather than refusing.
+            if source_of_beat == "generate" and not params.get("beat_prompt"):
+                raise HTTPException(400, "describe the beat to generate, or upload one")
 
     job_id = _start_job(mode, params, source_bytes, reference_bytes, client, beat_bytes)
     # The audit trail proper (plan §8 item 5): who asked, when, for what shape
@@ -372,6 +382,7 @@ async def submit(
         # How the bed got here, never what it was asked to sound like.
         beat_bytes=len(beat_bytes) if beat_bytes else None,
         beat_source=params.get("beat_source"),
+        beat_init=params.get("beat_init"),
         language=params.get("language"),
         emotion=params.get("emotion"),
         profile=params.get("voice_profile") or None,

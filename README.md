@@ -2045,6 +2045,9 @@ chuyển hợp âm.
 Hợp với rap, hip-hop, nhạc điện tử. Bài mà giọng đi giai điệu nhiều thì vẫn chỏi
 ở những ô nhịp đổi hợp âm, và không prompt nào sửa được điều đó.
 
+*(Phase 14 sửa đúng câu này. Đoạn trên giữ nguyên vì nó vẫn đúng với nguồn
+`generate`.)*
+
 ### Bật "máy làm beat" trên deployment
 
 Hai biến, đặt trong **Settings → Secrets and variables → Actions** của repo:
@@ -2078,3 +2081,195 @@ Nếu deploy đỏ: xoá biến `BEAT_GENERATOR` đi là mọi thứ còn lại 
 - [ ] `HF_TOKEN` phải có, weights của Stable Audio Open là gated
 - [ ] beat sinh ra có thật sự không có giọng hát trong đó không
 - [ ] nghe thử: nó có hơn hẳn máy đánh trống Phase 12 không, và hơn tới đâu
+
+---
+
+## Phase 14 — Phối lại bài, không phải sáng tác cạnh bài
+
+Phase 13.3 làm cho "máy làm beat" hiện ra được. Rồi câu hỏi tiếp theo, đúng và
+đau:
+
+> *"tôi bảo là dựa trên beat gốc thì bạn tạo ra beat mới khác khác nhưng vẫn hợp
+> tone, mà cái này là như nào"*
+
+Đúng. Nút đó chưa bao giờ làm việc ấy.
+
+```
+Trước:  bạn gõ mô tả ──► model sáng tác từ số 0 ──┐
+        bài gốc ──► đo BPM + tông ───────────────┴──► beats.fit kéo cho khớp
+                    (model chưa từng nghe bài)
+```
+
+Nó **hợp tông** thật, nhưng chỉ vì `beats.fit` ép nó khớp *sau khi* sinh xong.
+Model không biết bài đang chạy hợp âm gì, nên ở mỗi ô nhịp đổi hợp âm nó chỏi —
+đúng cái giới hạn mà mục "Cái này vẫn không phải phối lại bài của bạn" ở trên đã
+ghi ra và coi là không sửa được.
+
+Sửa được. Chỉ là chỗ sửa không nằm ở prompt.
+
+### `init_audio`: cho sampler xuất phát từ nhạc chứ không từ nhiễu
+
+`generate_diffusion_cond` trong `stable-audio-tools` nhận `init_audio` và
+`init_noise_level`. Cho vào một đoạn audio, sampler bắt đầu từ bản đã nhiễu hoá
+của đoạn đó thay vì từ nhiễu thuần: đầu ra **giữ hoà thanh, giữ tốc độ, giữ vạch
+ô nhịp** của đầu vào, còn nhạc cụ thì được vẽ lại từ đầu.
+
+Đọc trong code của thư viện, `init_noise_level` chính là `sigma_max` cho lần
+chạy đó:
+
+```python
+if init_audio is not None:
+    sampler_kwargs["sigma_max"] = init_noise_level
+```
+
+Nên nó là **một cái núm duy nhất quyết định giữ lại bao nhiêu**. Sinh thường
+dùng 500 (không giữ gì); UI variation của chính thư viện mặc định 0.1 (giữ gần
+hết).
+
+Câu hỏi thật sự không phải "dùng `init_audio` hay không". Là **đưa cái gì vào**.
+
+### Hai đường, và chúng khác nhau ở luật chứ không ở nhạc
+
+Cách hiển nhiên: tách nhạc nền bài gốc ra rồi đưa thẳng vào. Nó chạy, và cái ra
+là **tác phẩm phái sinh của chính bản ghi** — đúng thứ mà cả nhánh "đổi beat"
+sinh ra để tránh, và đúng kiểu biến đổi mà hệ thống nhận diện audio được xây để
+xuyên qua. Nhạc hay hơn, bản quyền tệ hơn.
+
+Đường vòng phá được chuỗi đó:
+
+```
+nhạc nền ──► chords.detect ──► Chart (vòng hợp âm = phần *sáng tác*)
+                                  │
+                          sketch.render ──► synth thô, xấu, đúng hợp âm
+                                  │
+                       init_audio ──► Stable Audio Open ──► nhạc cụ thật
+                                  │
+                             beats.fit ──► khớp bài
+```
+
+`chords.detect` đọc ra một **chuỗi hợp âm**, tức là phần sáng tác chứ không phải
+bản ghi. `sketch.render` đánh chuỗi đó bằng oscillator chưa bao giờ nghe bài.
+Thứ chạm tới model là audio do repo này sinh ra. Đầu ra vì thế là một bản
+**cover** — quyền tác giả, thứ xin phép được và ở nhiều nơi là cưỡng chế cấp
+phép — chứ không phải bản sao master của ai.
+
+Đường thẳng vẫn có, sau một ô tick, mặc định tắt, và UI gọi đúng tên nó.
+
+### `sketch.py` — và vì sao `arrange.py` bị xoá lại quay về được
+
+Phase 13.2 xoá `arrange.py` với kết luận thẳng: additive synthesis ra máy đánh
+trống, đem so với bản phối rock người làm thì thua bằng một khoảng cách không
+tune được.
+
+Kết luận đó vẫn đúng. Nhưng nó là kết luận về **synth làm sản phẩm cuối**.
+
+Sau diffusion thì synth không còn là sản phẩm. Nó là *câu lệnh*. Không ai nghe
+`sketch.py`. Nó chỉ phải **nói rõ hợp âm và vuông vắn nhịp**, rồi biến đi. Đó là
+một cái bar hoàn toàn khác, và là bar mà bốn oscillator đạt được.
+
+Ba chỗ `sketch.py` khác `arrange.py`, mỗi chỗ vì công việc đã đổi:
+
+* **Không reverb.** Đuôi vang là texture, mà texture chính là thứ model được
+  giao vẽ lại. Reverb ở đây sẽ bị bôi vào đầu ra như một thứ cần giữ.
+* **Không pad, và hợp âm đẩy lên trước.** `arrange.py` để chord ở 0.28 dưới kick
+  0.9 vì bed thật để vậy. Ở đây gần như ngược lại — `CHORD_GAIN` 0.85 trên
+  `KICK_GAIN` 0.42. Model không nghe rõ triad thì nó tự bịa một cái.
+* **Mono, không swing, không fill.** `prepare_audio` tự resample và đổi kênh nên
+  stereo là công toi; còn swing với fill là để loop bớt giống máy, mà cái này
+  được phép giống máy.
+
+**Test mạnh nhất của module này là một vòng khứ hồi.** Dựng chart Am–F–C–G, cho
+`chords.detect` đọc lại chính bản render (qua đúng đường decode 22.05 kHz thật,
+có bass kêu bên dưới), và đòi lấy lại đúng bốn hợp âm đó. Nếu bộ dò hợp âm không
+đọc nổi sketch thì model cũng không, và cả đường vòng qua `chords.detect` không
+mua được gì.
+
+```
+tests/test_sketch.py::test_a_chord_recogniser_gets_the_chart_back_out_of_the_sketch
+```
+
+### Hai giá trị nhiễu, và chúng chưa được đo
+
+`SKETCH_NOISE_LEVEL = 65`, `ORIGINAL_NOISE_LEVEL = 28`.
+
+Sketch là bốn oscillator: gần như không có gì trong đó nên sống sót, chỉ hoà
+thanh, tốc độ và vị trí vạch nhịp — nên nó ở gần đầu tự do. Nhạc nền gốc đã là
+bản phối thật; vẽ lại mạnh tay thế thì vứt mất chính thứ nó được đưa vào để giữ
+— nên nó thấp hơn nhiều.
+
+**Không con số nào trong hai con số này được đo.** Từ đây không đo được: muốn
+biết thì cần một GPU và một đôi tai. Chúng là tham số, và ghi ra đây là để lần
+sau có người sửa thì biết mình đang sửa cái gì.
+
+Sàn kẹp là `0.1` chứ không phải `0` — không phải lỗi lệch một. `sigma_max` bằng
+0 thì sampler không có nhiễu nào để gỡ và trả lại nguyên đầu vào, mà trên nhánh
+`original` thì "trả lại nguyên đầu vào" nghĩa là đưa lại chính bản master làm
+beat mới.
+
+### Kẹp về phía an toàn, không phải về phía mặc định
+
+`beat_init` không hợp lệ thì rơi về `sketch`, không phải về `original`:
+
+```python
+params["beat_init"] = init if init in BEAT_INITS else DEFAULT_BEAT_INIT
+```
+
+Gõ sai, client cũ, form viết tay — mọi đường đều dẫn về nhánh không sao chép gì.
+Đây là chỗ duy nhất trong repo mà một giá trị bị kẹp theo hướng *luật* chứ không
+theo hướng *chạy được*, nên nó có test riêng.
+
+### Nguồn beat: từ hai thành ba
+
+| | Model nghe gì | Đi theo hợp âm bài | Sản phẩm là |
+|---|---|---|---|
+| `upload` | — | — | file của bạn, đã khớp bài |
+| `generate` | không gì | không | nhạc mới, không liên quan bài |
+| `derive` + `sketch` | synth của app | **có** | cover phần sáng tác |
+| `derive` + `original` | nhạc nền gốc | có | phái sinh của bản ghi |
+
+`derive` là mặc định, vì đó là điều mode này hứa. `generate` vẫn còn cho ai muốn
+một beat không dính gì tới bài. `upload` vẫn là nguồn duy nhất chạm được bar
+"người phối", vì ở đó có người phối thật.
+
+### Prompt: ô trống là một câu trả lời
+
+Trên `generate`, mô tả là toàn bộ đầu vào — trống là 400.
+
+Trên `derive` thì không. Ở đó đã có bài, và `beatgen.describe()` viết prompt từ
+đúng cái đã đo:
+
+```
+"154 BPM, key of Am, drums and bass"
+```
+
+Từ chối một job vì ô trống, trong khi phép đo đã nằm sẵn trong tay, là từ chối
+dùng thứ mình vừa đo. Ô mô tả ở nhánh này chỉ còn quyết định **nhạc cụ và chất
+nhạc** — hợp âm với tốc độ đã lấy từ bài rồi, và UI nói đúng câu đó.
+
+### Test
+
+`tests/test_sketch.py` (10) mới, `tests/test_chords.py` (12) khôi phục, cộng
+thêm ở `test_beatgen.py`, `test_api.py`, `test_pipeline.py`. Những cái đáng giữ:
+
+* bộ dò hợp âm đọc lại được chart ra khỏi sketch — hợp đồng thật với model
+* `beat_init` không hợp lệ kẹp về `sketch`, kiểm cả `"ORIGINAL_"` và `"  "`
+* `clamp_noise_level(0)` là `INIT_NOISE_MIN` chứ không phải 0
+* `derive` không cần mô tả, `generate` thì cần
+* `derive` cùng lúc gửi file beat là 400, như mọi cặp nguồn khác
+* các dải tempo của `STYLES` rời nhau và phủ kín, nên câu trả lời không phụ
+  thuộc thứ tự dict
+* sketch để lại headroom — init mà clip thì model có méo tiếng để bắt chước
+
+**605 passed, 3 skipped.**
+
+### Còn phải verify bằng tai và bằng GPU
+
+- [ ] `init_noise_level` 65 cho sketch: nghe ra vẫn còn đúng vòng hợp âm không,
+      hay model đã đi mất
+- [ ] `init_noise_level` 28 cho `original`: có thật sự khác bản gốc đủ nhiều
+      không, hay chỉ là bản gốc bị lọc
+- [ ] `chords.detect` trên nhạc thật — độ tin cậy đo được ở Phase 12 là
+      0.003–0.09 với ngưỡng 0.04, tức là ngưỡng đó đang đúng *vì may*
+- [ ] bài đổi hợp âm nhiều: `derive` có thật sự hết chỏi so với `generate` không
+- [ ] cửa sổ 47 giây của model so với bài 3 phút — `beats.fit` lặp nó, và lặp
+      một vòng 8 ô nhịp lên cả bài là điều chưa nghe thử bao giờ

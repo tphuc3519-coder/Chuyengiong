@@ -32,6 +32,16 @@ export function effectiveBeatSource(params: Params, canGenerate: boolean): BeatS
 }
 
 /**
+ * Whether this source needs a file from the user before the job can start.
+ *
+ * `upload` is the only one that does — the other two are made on a GPU. Kept
+ * here beside the type so a fourth source cannot be added without an answer.
+ */
+export function needsBeatFile(source: BeatSource): boolean {
+  return source === "upload";
+}
+
+/**
  * `beat` is `song` with the backing track replaced rather than kept: same
  * separation, same conversion, and then the original instrumental is measured
  * for tempo and key and thrown away. What goes back under the voice is a beat
@@ -151,13 +161,37 @@ export const MAX_VOCAL_GAIN_DB = 12;
  * afterwards (`modal_app/beats.py`), so the prompt only has to get the
  * *character* right.
  *
- * There was a third — `remake`, which read the song's own chords and played
- * them back on synthesised instruments. It is gone: additive synthesis makes a
+ * `derive` — the same generator, told what to play. The song's chord chart is
+ * read off the separated instrumental, played back on the app's own
+ * oscillators, and that sketch is handed to the model as a starting point: what
+ * comes out follows the song's harmony and bar lines with different
+ * instruments on top. This is the source for a song whose vocal carries a
+ * melody, which is exactly where `generate` clashes.
+ *
+ * There was a fourth — `remake` — which read the same chords and shipped the
+ * synthesised playback *as the beat*. It is gone: additive synthesis makes a
  * drum machine, and it was being held against a human rock arrangement with
- * recorded guitars and drums. That gap is not a tuning problem. `upload` is the
- * source that reaches that bar, because there a person made the arrangement.
+ * recorded guitars and drums. `derive` is not that feature returning. The
+ * synthesis is now the instruction rather than the output, and nobody hears it.
  */
-export type BeatSource = "upload" | "generate";
+export type BeatSource = "upload" | "generate" | "derive";
+
+/**
+ * `derive` only: what the generator is started from.
+ *
+ * The one control on this page that is a licensing question rather than a
+ * musical one, which is why it is a checkbox with a sentence rather than a
+ * slider.
+ *
+ * `sketch` — the app's own oscillators playing the chord chart it read. The
+ * model never hears the recording, so what comes back is a cover of the
+ * *composition*: the songwriter's right, which is licensable.
+ *
+ * `original` — the separated instrumental itself. Musically the closest match,
+ * and a derivative work of somebody's master recording, which is the thing
+ * this whole mode exists to avoid. Never the default.
+ */
+export type BeatInit = "sketch" | "original";
 
 export const BEAT_PROMPT_CHARS = 300;
 export const BEAT_PROMPT_EXAMPLES = [
@@ -293,8 +327,14 @@ export const DEFAULT_EXPRESSIVENESS = 1;
 export type Params = {
   /** `beat` only: where the replacement backing track comes from. */
   beatSource: BeatSource;
-  /** `beat` only, and only when `beatSource` is `generate`. */
+  /**
+   * `beat` only. Required on `generate`, optional on `derive` — there an empty
+   * box means "use what you measured", and the backend writes the prompt from
+   * the song's own tempo and key.
+   */
   beatPrompt: string;
+  /** `derive` only: what the generator starts from. */
+  beatInit: BeatInit;
   beatSeed: number;
   /** Classifier-free guidance, `CFG_RATE_MIN`…`CFG_RATE_MAX`. */
   cfgRate: number;
@@ -318,10 +358,14 @@ export type Params = {
 
 export function defaultParams(mode: Mode): Params {
   return {
-    // `generate` is the default because it is what the mode promises: the app
-    // makes the beat. Where the deployment does not ship the generator the page
-    // clamps this to `upload` — see `effectiveBeatSource`.
-    beatSource: "generate",
+    // `derive` is the default because it is what the mode promises: a beat made
+    // for *this song*, not a beat made from a sentence. Where the deployment
+    // does not ship the generator the page clamps this to `upload` — see
+    // `effectiveBeatSource`.
+    beatSource: "derive",
+    // The conservative half of the licensing choice, and the page asks before
+    // it changes.
+    beatInit: "sketch",
     beatPrompt: "",
     beatSeed: BEAT_RANDOM_SEED,
     cfgRate: DEFAULT_CFG_RATE,

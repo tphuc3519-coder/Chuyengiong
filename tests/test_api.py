@@ -200,6 +200,51 @@ def test_a_beat_job_with_both_sources_is_a_400_not_a_precedence_rule(client, sta
     assert started == []
 
 
+def test_derive_needs_no_description_because_it_reads_one_off_the_song(
+    client, started, generator_on
+):
+    """The one difference in validation between the two generating sources.
+
+    `generate` has nothing but the sentence, so an empty box is a 400. `derive`
+    has the song: `pipeline._init_audio` writes the prompt from the measured
+    tempo and key, and refusing the job would be refusing to use a measurement
+    already taken."""
+    response = client.post("/submit", **upload(mode="beat", beat_source="derive"))
+    assert response.status_code == 200
+    assert started[0]["params"]["beat_source"] == "derive"
+    assert started[0]["params"]["beat_prompt"] == ""
+
+
+def test_derive_defaults_to_the_init_that_copies_nothing(client, started, generator_on):
+    """Never the master unless it was asked for by name."""
+    response = client.post("/submit", **upload(mode="beat", beat_source="derive"))
+    assert response.status_code == 200
+    assert started[0]["params"]["beat_init"] == "sketch"
+
+
+def test_derive_can_be_told_to_start_from_the_songs_own_instrumental(client, started, generator_on):
+    response = client.post(
+        "/submit", **upload(mode="beat", beat_source="derive", beat_init="original")
+    )
+    assert response.status_code == 200
+    assert started[0]["params"]["beat_init"] == "original"
+
+
+def test_derive_is_refused_where_the_generator_is_not_deployed(client, started):
+    """Same gate as `generate`, and for the same reason: both end at a GPU
+    container that most deployments do not have."""
+    response = client.post("/submit", **upload(mode="beat", beat_source="derive"))
+    assert response.status_code == 400
+    assert "not enabled" in response.json()["detail"]
+    assert started == []
+
+
+def test_derive_with_a_beat_file_is_a_400_like_every_other_pair(client, started, generator_on):
+    response = client.post("/submit", **beat_upload(beat_source="derive"))
+    assert response.status_code == 400
+    assert started == []
+
+
 def test_an_unknown_source_falls_back_to_the_one_that_needs_no_model(client, started):
     response = client.post("/submit", **beat_upload(beat_source="telepathy"))
     assert response.status_code == 200
