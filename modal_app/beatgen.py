@@ -424,6 +424,42 @@ def register():
     return _REGISTERED
 
 
+def generator():
+    """The `BeatGenerator` that has `.remote` on it. **Not the class above.**
+
+    This function exists because of one crash, and it is worth spelling out
+    because the shape that caused it looks completely fine:
+
+        AttributeError: 'function' object has no attribute 'remote'
+
+    `app.cls(...)` does not decorate `BeatGenerator` in place — it *returns a
+    new object* and leaves the class alone. So the module-level name stays a
+    plain Python class, `BeatGenerator().generate` is an ordinary bound method,
+    and `.remote` on it is an attribute that was never there. Every call site
+    that reached for the imported name got that, and the first person to run a
+    generated beat got it three minutes into a job.
+
+    Preferring `_REGISTERED` is not enough on its own either. `register()` is
+    called by `deploy.py`, in the deploy process; `run_beat_pipeline` runs in a
+    container that carries no `BEAT_GENERATOR` in its environment and has no
+    reason to have imported `deploy` at all, so `_REGISTERED` there is `None`.
+    That is why the fallback is a lookup by name against the deployed App
+    rather than another attempt to register locally: the class is already
+    deployed, and this is how a container refers to one it did not define.
+
+    Fails loudly if there is nothing deployed under that name, which is the
+    honest error — `api.submit` refuses these jobs when `enabled()` is false,
+    so getting here at all means the deployment claimed to have one.
+    """
+    if _REGISTERED is not None:
+        return _REGISTERED
+    import modal
+
+    from .app import APP_NAME
+
+    return modal.Cls.from_name(APP_NAME, BeatGenerator.__name__)
+
+
 @app.local_entrypoint()
 def make_beat(
     prompt: str,
@@ -437,6 +473,10 @@ def make_beat(
         modal run -m modal_app.beatgen --prompt "boom bap hip hop beat, 90 BPM"
         modal run -m modal_app.beatgen --prompt "lo-fi house, 124 BPM" --seed 7
 
+    Drives the *deployed* class, through `generator()` — so it needs a deploy
+    with `BEAT_GENERATOR` on, and it is a smoke test of what users actually hit
+    rather than of a copy built for the occasion.
+
     What to listen for is not whether it is at the BPM you asked for — it will
     not be, and `beats.py` fixes that — but whether it is the *kind* of music
     you asked for, and whether anybody is singing on it.
@@ -444,6 +484,6 @@ def make_beat(
     from pathlib import Path
 
     Path(output).write_bytes(
-        BeatGenerator().generate.remote(prompt=prompt, seconds=seconds, steps=steps, seed=seed)
+        generator()().generate.remote(prompt=prompt, seconds=seconds, steps=steps, seed=seed)
     )
     print(f"wrote {output}")

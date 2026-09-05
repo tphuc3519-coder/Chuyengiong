@@ -602,7 +602,7 @@ def _generate_beat(job_id: str, params: dict, instrumental: bytes | None = None)
         return beat
 
     jobs.update(job_id, jobs.GENERATING)
-    from .beatgen import BeatGenerator
+    from . import beatgen
 
     init_wav: bytes | None = None
     noise: float | None = None
@@ -612,7 +612,10 @@ def _generate_beat(job_id: str, params: dict, instrumental: bytes | None = None)
             raise BeatError("nothing to derive a beat from: the instrumental is missing")
         init_wav, noise, prompt = _init_audio(job_id, params, instrumental)
 
-    beat = BeatGenerator().generate.remote(
+    # `beatgen.generator()`, never the imported class: `app.cls()` returns a new
+    # object rather than decorating that one, so the name in the module has no
+    # `.remote` on it. See the docstring there.
+    beat = beatgen.generator()().generate.remote(
         prompt=prompt,
         seed=params["beat_seed"],
         init_wav=init_wav,
