@@ -136,13 +136,19 @@ export function apiBase(): Promise<string> {
 /**
  * What the deployment can do, asked rather than assumed.
  *
- * `beat_generator` was a build-time constant here for one commit — two flags,
- * in two repositories, that had to be flipped together. A UI offering a source
- * the API refuses is a worse failure than either flag being wrong alone, so the
- * browser asks now.
+ * `BEAT_GENERATOR_ENABLED` was a build-time constant in `params.ts` for one
+ * commit — two flags, in two repositories, that had to be flipped together. A
+ * UI offering a source the API refuses is a worse failure than either flag
+ * being wrong alone, so the deployment is asked instead.
  *
- * Fetched once per page load. A deployment too old to answer simply has no
- * generator, which is the same conclusion by a different route.
+ * The asking is same-origin, and the actual probe of `${apiBase}/health`
+ * happens inside that route. It used to happen right here, in the browser, and
+ * a cross-origin request that is blocked or dropped is indistinguishable from a
+ * deployment without the generator — which is how a working backend showed up
+ * as a missing button.
+ *
+ * Fetched once per page load, and never throws: not knowing means not
+ * offering, and the form still works.
  */
 export type Capabilities = { beatGenerator: boolean };
 
@@ -151,12 +157,10 @@ let capabilitiesPromise: Promise<Capabilities> | null = null;
 export function capabilities(): Promise<Capabilities> {
   capabilitiesPromise ??= (async () => {
     try {
-      const base = await apiBase();
-      const response = await fetch(`${base}/health`, { cache: "no-store" });
+      const response = await fetch("/api/capabilities", { cache: "no-store" });
       const body = await response.json();
-      return { beatGenerator: Boolean(body?.beat_generator) };
+      return { beatGenerator: Boolean(body?.beatGenerator) };
     } catch {
-      // Never throws: not knowing means not offering, and the form still works.
       return { beatGenerator: false };
     }
   })();

@@ -2000,9 +2000,34 @@ Ba cái còn lại có lý do riêng, đã đo bằng `pip install --dry-run`:
 hai nơi, phải lật cùng lúc. Một UI mời một nguồn mà API từ chối còn tệ hơn việc
 một trong hai cờ sai.
 
-Giờ `/health` trả về `beat_generator`, và trình duyệt hỏi một lần mỗi lần tải
-trang. Bản triển khai cũ quá đến mức không trả lời được thì coi như không có
-generator — cùng một kết luận, bằng đường khác.
+Giờ `/health` trả về `beat_generator`, và **`/api/capabilities` hỏi hộ trình
+duyệt** một lần mỗi lần tải trang.
+
+Bản đầu tiên để chính trình duyệt gọi `GET ${apiBase}/health`, và nó im lặng
+đúng một vòng: cờ đã bật, image đã build, `/health` trả `true` — mà trang vẫn
+chỉ hiện ô kéo-thả file. Một request cross-origin có hai kiểu chết, CORS và
+mạng, mà cả hai rơi vào cùng cái `catch` với "bản này không có generator". Ba
+sự thật khác nhau, một chữ `false`, không cách nào phân biệt từ trong UI.
+
+Nên phép thử chuyển về phía server: trình duyệt gọi cùng origin, không
+preflight, không cache chen vào, còn phía server gọi Modal thẳng.
+
+**Và nó là route riêng, không nhét vào `/api/config`.** Đây là chỗ suýt sai lần
+thứ hai. `submit` chờ `/api/config` trước khi đẩy byte đầu tiên lên, nên mọi thứ
+chậm thêm vào đó là thời gian chết giữa lúc bấm nút và lúc upload chạy. Mà
+`api()` không đặt `min_containers`: container nguội thì `/health` trả lời sau
+hàng chục giây. Ghép hai thứ vào một route thì hoặc deadline ngắn (giết đúng
+lần mở trang đầu tiên trong ngày) hoặc deadline dài (giết upload). Tách ra thì
+không ai phải chọn: `/api/capabilities` không có gì chờ nó ngoài cái nút nguồn
+beat, nên nó được 12 giây và hai lần thử — lần đầu chính là lần đánh thức
+container.
+
+Probe hỏng thì `beatGenerator: false`, và route này không có mã lỗi nào cả:
+nguồn "tải beat lên" vẫn chạy được mà không cần generator, nên chẳng có gì để
+trình duyệt làm với một cái 5xx ngoài việc ẩn đúng cái nút nó vốn sẽ ẩn.
+
+Bản triển khai cũ quá đến mức không trả lời được thì coi như không có generator
+— cùng một kết luận, bằng đường khác.
 
 Và nguồn beat mặc định đổi thành **"Máy làm beat"**, vì đó là điều mode này hứa.
 `effectiveBeatSource()` kẹp nó về `upload` ở nơi không có generator — tính ra chứ
