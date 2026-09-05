@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { Advanced } from "./components/Advanced";
+import { BeatSource } from "./components/BeatSource";
 import { ConsentGate } from "./components/ConsentGate";
 import { FileDrop } from "./components/FileDrop";
 import { ModeSelect } from "./components/ModeSelect";
@@ -44,6 +45,7 @@ import { useConversion } from "@/lib/useConversion";
  */
 const SOURCE_LABEL: Record<Exclude<Mode, "tts">, string> = {
   song: "Bài hát",
+  beat: "Bài hát",
   vocal: "Giọng hát đã tách",
   speech: "Đoạn thoại",
 };
@@ -53,6 +55,10 @@ export default function Page() {
   const [source, setSource] = useState<File | null>(null);
   const [text, setText] = useState("");
   const [reference, setReference] = useState<File | null>(null);
+  // `beat` mode only, and only when the user brought their own rather than
+  // describing one. Kept beside `source` rather than inside `params` because
+  // it is a file, and `params` is the thing that survives a mode switch.
+  const [beat, setBeat] = useState<File | null>(null);
   const [consent, setConsent] = useState(false);
 
   const [remaining, setRemaining] = useState<number | null>(null);
@@ -66,7 +72,13 @@ export default function Page() {
   // paragraph lands here.
   const tooLong = mode === "tts" && text.length > maxCharsFor(params.language);
   const hasSource = mode === "tts" ? text.trim().length > 0 : source !== null;
-  const ready = hasSource && !tooLong && reference !== null && consent && !busy;
+  // The `beat` branch needs exactly one of the two, and the backend refuses a
+  // job carrying neither — so the button waits for it rather than letting the
+  // upload find out.
+  const hasBeat =
+    mode !== "beat" ||
+    (params.beatSource === "generate" ? params.beatPrompt.trim().length > 0 : beat !== null);
+  const ready = hasSource && hasBeat && !tooLong && reference !== null && consent && !busy;
 
   // `/submit` reports what is left of the hourly allowance, and `reset` wipes
   // the run state — so keep it here, where it survives into the next attempt.
@@ -95,6 +107,7 @@ export default function Page() {
       // backend never reads `text`.
       source: mode === "tts" ? null : source,
       text,
+      beat: mode === "beat" && params.beatSource === "upload" ? beat : null,
       reference,
       referenceName: reference.name || "reference.wav",
       consent,
@@ -172,6 +185,19 @@ export default function Page() {
             )}
           </fieldset>
 
+          {mode === "beat" && (
+            <fieldset className="step">
+              <legend>2b · Beat mới</legend>
+              <BeatSource
+                params={params}
+                beat={beat}
+                onBeat={setBeat}
+                onChange={setParams}
+                disabled={busy}
+              />
+            </fieldset>
+          )}
+
           <fieldset className="step">
             <legend>3 · Giọng mẫu</legend>
             <ReferencePicker file={reference} onFile={setReference} />
@@ -230,11 +256,15 @@ export default function Page() {
                 ? mode === "tts"
                   ? "Gõ văn bản cần đọc để tiếp tục."
                   : "Chọn file nguồn để tiếp tục."
-                : tooLong
-                  ? `Văn bản dài quá giới hạn của ngôn ngữ đang chọn (${maxCharsFor(params.language)} ký tự) — cắt bớt để tiếp tục.`
-                  : !reference
-                    ? "Thêm giọng mẫu — tải lên, ghi âm, hoặc chọn giọng có sẵn."
-                    : "Tick ô đồng thuận để tiếp tục."}
+                : !hasBeat
+                  ? params.beatSource === "generate"
+                    ? "Mô tả beat muốn sinh để tiếp tục."
+                    : "Chọn file beat thay thế để tiếp tục."
+                  : tooLong
+                    ? `Văn bản dài quá giới hạn của ngôn ngữ đang chọn (${maxCharsFor(params.language)} ký tự) — cắt bớt để tiếp tục.`
+                    : !reference
+                      ? "Thêm giọng mẫu — tải lên, ghi âm, hoặc chọn giọng có sẵn."
+                      : "Tick ô đồng thuận để tiếp tục."}
             </p>
           )}
         </form>

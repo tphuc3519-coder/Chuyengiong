@@ -7,9 +7,14 @@
  * when a number moves there, move it here too.
  */
 
-export type Mode = "song" | "vocal" | "speech" | "tts";
+export type Mode = "song" | "beat" | "vocal" | "speech" | "tts";
 
 /**
+ * `beat` is `song` with the backing track replaced rather than kept: same
+ * separation, same conversion, and then the original instrumental is measured
+ * for tempo and key and thrown away. What goes back under the voice is either a
+ * beat the user uploaded or one generated from a description.
+ *
  * `vocal` is `song` without the separator, and that is the whole difference.
  *
  * Separation is not free in either direction: it costs a GPU pass, and what it
@@ -21,6 +26,7 @@ export type Mode = "song" | "vocal" | "speech" | "tts";
  */
 export const MODES: { id: Mode; label: string; hint: string }[] = [
   { id: "song", label: "Bài hát", hint: "Tách nhạc nền, đổi giọng, ghép lại" },
+  { id: "beat", label: "Đổi beat", hint: "Thay nhạc nền bằng beat khác hoặc beat tự sinh" },
   { id: "vocal", label: "Giọng hát", hint: "File đã tách sẵn — đổi giọng, giữ nguyên" },
   { id: "speech", label: "Giọng nói", hint: "Đổi giọng trực tiếp, nhanh hơn" },
   { id: "tts", label: "Văn bản", hint: "Gõ chữ, đọc lên bằng giọng mẫu" },
@@ -31,12 +37,20 @@ export const MODES: { id: Mode; label: string; hint: string }[] = [
  * `tts` is speech by the time the pitch is applied — the text has already been
  * read out loud — so it lives under the same limit.
  */
-export const MAX_SEMITONE_SHIFT: Record<Mode, number> = { song: 12, vocal: 12, speech: 8, tts: 8 };
+export const MAX_SEMITONE_SHIFT: Record<Mode, number> = {
+  song: 12,
+  beat: 12,
+  vocal: 12,
+  speech: 8,
+  tts: 8,
+};
 
 export const DIFFUSION_STEPS_MIN = 10;
 export const DIFFUSION_STEPS_MAX = 100;
 export const DEFAULT_DIFFUSION_STEPS: Record<Mode, number> = {
   song: 50,
+  // Same checkpoint as a song: it is a song, with a different bed under it.
+  beat: 50,
   // A vocal take converts with the singing checkpoint, so it wants the same
   // number of steps a song does.
   vocal: 50,
@@ -71,6 +85,32 @@ export const CLARITY_MAX = 1;
 export const DEFAULT_CLARITY = 0.5;
 
 export const MAX_VOCAL_GAIN_DB = 12;
+
+/**
+ * The `beat` branch, mirrored from `modal_app/beatgen.py` and
+ * `modal_app/pipeline.py`.
+ *
+ * Two sources and exactly one of them: the backend refuses a job that has both
+ * or neither, because no precedence between "the file I uploaded" and "the
+ * beat I described" is one anybody would guess.
+ *
+ * On what the description is for: the model will not land on the BPM it is
+ * asked for, and it does not need to. The generated beat is measured and
+ * fitted to the song afterwards (`modal_app/beats.py`), so the prompt only has
+ * to get the *character* right — the arithmetic is the backend's.
+ */
+export type BeatSource = "upload" | "generate";
+
+export const BEAT_PROMPT_CHARS = 300;
+export const BEAT_PROMPT_EXAMPLES = [
+  "boom bap, 90 BPM, piano buồn, trống mộc",
+  "lo-fi hip hop, 85 BPM, guitar sạch, tiếng vinyl",
+  "trap, 140 BPM, 808 nặng, hi-hat nhanh",
+  "house, 124 BPM, bass tròn, synth ấm",
+];
+
+/** -1 là mỗi lần một beat khác; số cố định lấy lại đúng beat cũ. */
+export const BEAT_RANDOM_SEED = -1;
 
 /**
  * The ceiling this labels the counter with — plan §9's number.
@@ -193,6 +233,11 @@ export const EXPRESSIVENESS_MAX = 1.5;
 export const DEFAULT_EXPRESSIVENESS = 1;
 
 export type Params = {
+  /** `beat` only: where the replacement backing track comes from. */
+  beatSource: BeatSource;
+  /** `beat` only, and only when `beatSource` is `generate`. */
+  beatPrompt: string;
+  beatSeed: number;
   /** Classifier-free guidance, `CFG_RATE_MIN`…`CFG_RATE_MAX`. */
   cfgRate: number;
   /** How much of the output clarity chain to run, `CLARITY_MIN`…`CLARITY_MAX`. */
@@ -215,6 +260,9 @@ export type Params = {
 
 export function defaultParams(mode: Mode): Params {
   return {
+    beatSource: "upload",
+    beatPrompt: "",
+    beatSeed: BEAT_RANDOM_SEED,
     cfgRate: DEFAULT_CFG_RATE,
     clarity: DEFAULT_CLARITY,
     semitoneShift: null,

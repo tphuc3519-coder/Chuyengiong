@@ -36,7 +36,11 @@ rate_dict = modal.Dict.from_name("vc-ratelimit", create_if_missing=True)
 #                    means on, which is the default (`watermark.enabled`)
 #   JOBS_PER_HOUR    a positive integer puts the per-IP cap back; empty means
 #                    no cap, which is where this now starts (`ratelimit.max_jobs`)
-CONFIG_KEYS = ("ALLOWED_ORIGINS", "RATE_LIMIT_SALT", "WATERMARK", "JOBS_PER_HOUR")
+#   HF_TOKEN         a Hugging Face token whose account has accepted Stable
+#                    Audio Open's licence. Only the beat generator needs it, and
+#                    only generated beats need the generator — everything else
+#                    on the deployment works without it (`beatgen.BeatGenerator`)
+CONFIG_KEYS = ("ALLOWED_ORIGINS", "RATE_LIMIT_SALT", "WATERMARK", "JOBS_PER_HOUR", "HF_TOKEN")
 
 
 def config_secret() -> modal.Secret:

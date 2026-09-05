@@ -19,6 +19,7 @@ export type Status =
   | "queued"
   | "separating"
   | "synthesizing"
+  | "generating"
   | "converting"
   | "mixing"
   | "done"
@@ -147,6 +148,8 @@ export type SubmitInput = {
   /** The file to convert, or null on `tts` — there `text` is the input. */
   source: File | null;
   text?: string;
+  /** `beat` mode only, and only when the user brought their own. */
+  beat?: File | null;
   reference: File | Blob;
   referenceName: string;
   consent: boolean;
@@ -168,6 +171,16 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
     form.set("expressiveness", String(input.params.expressiveness));
   } else if (input.source) {
     form.set("input", input.source, input.source.name);
+  }
+  // Exactly one of the two, and the backend refuses both or neither: no
+  // ordering between an uploaded beat and a described one is guessable.
+  if (input.mode === "beat") {
+    if (input.params.beatSource === "generate") {
+      form.set("beat_prompt", input.params.beatPrompt);
+      form.set("beat_seed", String(input.params.beatSeed));
+    } else if (input.beat) {
+      form.set("beat", input.beat, input.beat.name);
+    }
   }
   form.set("reference", input.reference, input.referenceName);
   form.set("mode", input.mode);
@@ -297,6 +310,7 @@ export const STATUS_LABEL: Record<Status, string> = {
   queued: "Đang xếp hàng",
   separating: "Đang tách nhạc nền",
   synthesizing: "Đang đọc văn bản",
+  generating: "Đang sinh beat",
   converting: "Đang đổi giọng",
   mixing: "Đang ghép lại",
   done: "Xong",

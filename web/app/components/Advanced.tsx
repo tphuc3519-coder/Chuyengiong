@@ -54,11 +54,11 @@ export function Advanced({
   const auto = params.semitoneShift === null;
   // What "no explicit shift" means differs by mode, because the backend only
   // measures one for speech (`AUTO_DETECT_MODES` in `pipeline.py`, which `tts`
-  // reaches by converting as speech). Both singing branches keep the key
+  // reaches by converting as speech). Every singing branch keeps the key
   // instead: a song's vocal is mixed back over an instrumental nothing
-  // transposes, and a vocal take has a key of its own that the singer is not
-  // asking to have moved to wherever the reference happens to speak.
-  const keepsKey = mode === "song" || mode === "vocal";
+  // transposes, a vocal take has a key of its own, and on `beat` it is the bed
+  // that gets moved to the singer rather than the other way round.
+  const keepsKey = mode !== "speech" && mode !== "tts";
 
   return (
     <div className="advanced">
@@ -206,11 +206,13 @@ export function Advanced({
 
           <span className="slider-hint">
             {auto
-              ? mode === "song"
-                ? "Nhạc nền không được dịch theo, nên một lượng dịch lẻ sẽ đặt giọng vào tông khác bản phối. Để nguyên là an toàn."
-                : keepsKey
-                  ? "Bản hát có key của nó. Để nguyên thì giai điệu giữ đúng tông đã thu."
-                  : "Đo F0 trung vị của giọng trong bài và của giọng mẫu rồi lấy chênh lệch. Chỉ tính trên đoạn có tiếng."
+              ? mode === "beat"
+                ? "Beat mới được kéo về tông của giọng chứ không ngược lại, nên giọng cứ để nguyên."
+                : mode === "song"
+                  ? "Nhạc nền không được dịch theo, nên một lượng dịch lẻ sẽ đặt giọng vào tông khác bản phối. Để nguyên là an toàn."
+                  : keepsKey
+                    ? "Bản hát có key của nó. Để nguyên thì giai điệu giữ đúng tông đã thu."
+                    : "Đo F0 trung vị của giọng trong bài và của giọng mẫu rồi lấy chênh lệch. Chỉ tính trên đoạn có tiếng."
               : keepsKey
                 ? "Nam→nữ thường +12, nữ→nam thường −12. Bội số của 12 là một quãng tám, giữ nguyên key; các giá trị khác sẽ lệch tông."
                 : `Giọng nói giới hạn ±${pitchLimit}: dịch xa hơn nghe méo thanh điệu.`}
@@ -281,7 +283,7 @@ export function Advanced({
           </span>
         </label>
 
-        {mode === "song" && (
+        {(mode === "song" || mode === "beat") && (
           <label className="slider">
             <span className="slider-label">
               Âm lượng giọng

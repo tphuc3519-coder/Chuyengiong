@@ -2,7 +2,7 @@
 
     GET  /health
     GET  /voices
-    POST /submit            multipart: input | text, reference, mode, params, consent
+    POST /submit            multipart: input | text, reference, beat, mode, params, consent
     GET  /status/{job_id}
     GET  /download/{job_id}
 
@@ -45,6 +45,8 @@ from .tts import DEFAULT_LANGUAGE, DEFAULT_SPEAKING_RATE, TtsError, check_text
 MAX_INPUT_BYTES = 60 * 1024 * 1024
 # The reference is 5–30 seconds of speech. 20 MB is generous even for wav.
 MAX_REFERENCE_BYTES = 20 * 1024 * 1024
+# A replacement backing track. Same ceiling as the input it is replacing.
+MAX_BEAT_BYTES = MAX_INPUT_BYTES
 UPLOAD_CHUNK = 1024 * 1024
 
 web = FastAPI(title="voice-convert API", version="0.4.0")
@@ -126,7 +128,14 @@ def _check_quota(client: str) -> None:
     )
 
 
-def _start_job(mode: str, params: dict, source: bytes, reference: bytes, client: str) -> str:
+def _start_job(
+    mode: str,
+    params: dict,
+    source: bytes,
+    reference: bytes,
+    client: str,
+    beat: bytes | None = None,
+) -> str:
     """Persist the uploads, register the job, hand it to the pipeline.
 
     Files first, record second, spawn last: every state in between is one the
@@ -137,10 +146,17 @@ def _start_job(mode: str, params: dict, source: bytes, reference: bytes, client:
     goes to the Volume either way, and for the same reason: the sweep that
     expires a job's audio after six hours has to take what the user wrote with
     it, and a job record is not where that belongs.
+
+    `beat` is the replacement backing track on the `beat` branch, when one was
+    uploaded rather than described. It expires with everything else.
     """
     job_id = storage.new_job_id()
     storage.put(job_id, pipeline.TEXT if mode == "tts" else pipeline.INPUT, source)
     storage.put(job_id, pipeline.REFERENCE, reference)
+    if beat is not None:
+        # Under the name the pipeline looks for, so an uploaded beat and a
+        # generated one are the same artifact by the time anything reads it.
+        storage.put(job_id, pipeline.BEAT, beat)
     data_vol.commit()
 
     jobs.create(job_id, mode, params=params)
@@ -168,6 +184,13 @@ async def submit(
     # instead, and which of the two is required is decided by `mode` below
     # rather than by the signature.
     source: Annotated[UploadFile | None, File(alias="input")] = None,
+    # The `beat` branch's replacement backing track, when the user has one.
+    # Absent means it is to be generated from `beat_prompt`, and `/submit`
+    # refuses a `beat` job that has neither and one that has both.
+    beat: Annotated[UploadFile | None, File()] = None,
+    beat_prompt: Annotated[str, Form()] = "",
+    # -1 is a different beat every time. A fixed value gets the same one back.
+    beat_seed: Annotated[int, Form()] = -1,
     text: Annotated[str, Form()] = "",
     language: Annotated[str, Form()] = DEFAULT_LANGUAGE,
     speaking_rate: Annotated[float, Form()] = DEFAULT_SPEAKING_RATE,
@@ -209,6 +232,11 @@ async def submit(
     track out, converts the vocal stem and mixes it back; `vocal` converts what
     it is given and returns that, which is the right branch for a recording
     that is already just a voice.
+
+    `beat` is `song` with the backing track replaced: it separates the same way,
+    measures the original instrumental for tempo and key, and then mixes the
+    converted voice over a different bed — either the `beat` file, or one
+    generated from `beat_prompt`. Exactly one of those two is required.
     """
     client = ratelimit.client_key(
         ratelimit.address_from_headers(
@@ -231,6 +259,8 @@ async def submit(
                 "vocal_gain_db": vocal_gain_db,
                 "cfg_rate": cfg_rate,
                 "clarity": clarity,
+                "beat_prompt": beat_prompt,
+                "beat_seed": beat_seed,
                 "voice_profile": voice_profile,
                 "separation_model": separation_model,
                 "source_ext": safe_ext(source.filename if source else None),
@@ -258,7 +288,23 @@ async def submit(
         source_bytes = await _read_upload(source, MAX_INPUT_BYTES, "input")
     reference_bytes = await _read_upload(reference, MAX_REFERENCE_BYTES, "reference")
 
-    job_id = _start_job(mode, params, source_bytes, reference_bytes, client)
+    # Exactly one beat source, and only this layer can tell: `clean_params` sees
+    # the prompt but never the upload. Both is refused rather than resolved by a
+    # precedence rule nobody would guess, and neither is refused because the
+    # branch has nothing to put under the voice.
+    beat_bytes = None
+    if mode == "beat":
+        described = bool(params.get("beat_prompt"))
+        if beat is not None and described:
+            raise HTTPException(400, "send a beat file or a description of one, not both")
+        if beat is None and not described:
+            raise HTTPException(
+                400, "this mode needs a beat: upload one, or describe the beat to make"
+            )
+        if beat is not None:
+            beat_bytes = await _read_upload(beat, MAX_BEAT_BYTES, "beat")
+
+    job_id = _start_job(mode, params, source_bytes, reference_bytes, client, beat_bytes)
     # The audit trail proper (plan §8 item 5): who asked, when, for what shape
     # of job, and that the gate above was passed — no file names, no audio.
     audit.record(
@@ -271,6 +317,9 @@ async def submit(
         # said — the same rule the audio has been under all along.
         input_bytes=len(source_bytes),
         reference_bytes=len(reference_bytes),
+        # How the bed got here, never what it was asked to sound like.
+        beat_bytes=len(beat_bytes) if beat_bytes else None,
+        generated_beat=bool(params.get("beat_prompt")) or None,
         language=params.get("language"),
         emotion=params.get("emotion"),
         profile=params.get("voice_profile") or None,

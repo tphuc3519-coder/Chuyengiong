@@ -76,6 +76,41 @@ def test_an_unusable_voice_name_becomes_no_voice_rather_than_an_error():
     assert pipeline.clean_params("speech", {"voice_profile": "mai"})["voice_profile"] == "mai"
 
 
+def test_the_beat_branch_separates_like_a_song_and_carries_its_own_params():
+    """It is `song` with the instrumental replaced, so it runs the separator and
+    converts as singing — and the key is left alone, because the bed is being
+    fitted to the singer rather than the singer to the bed."""
+    params = pipeline.clean_params("beat", {"beat_prompt": "  boom bap, 90 BPM  "})
+    assert jobs.CONVERSION_MODE["beat"] == "singing"
+    assert params["separation_model"] == "roformer"
+    assert params["beat_prompt"] == "boom bap, 90 BPM"
+    assert params["beat_seed"] == -1
+    assert pipeline.clean_params("beat", {"semitone_shift": 20})["semitone_shift"] == 12
+
+
+def test_an_absent_beat_prompt_means_a_beat_was_uploaded():
+    """Empty is a real state on this branch and not a missing value. `api.submit`
+    is where the two sources are required to be exactly one of them, because it
+    is the only layer that can see an upload."""
+    assert pipeline.clean_params("beat")["beat_prompt"] == ""
+
+
+def test_a_beat_prompt_cannot_be_longer_than_the_generator_accepts():
+    params = pipeline.clean_params("beat", {"beat_prompt": "x" * 5000})
+    assert len(params["beat_prompt"]) == pipeline.BEAT_PROMPT_CHARS
+
+
+def test_a_nonsense_seed_falls_back_to_a_different_beat_every_time():
+    assert pipeline.clean_params("beat", {"beat_seed": "lucky"})["beat_seed"] == -1
+    assert pipeline.clean_params("beat", {"beat_seed": 7})["beat_seed"] == 7
+
+
+def test_only_the_branches_that_start_from_a_mix_run_the_separator():
+    assert set(pipeline.SEPARATING_MODES) == {"song", "beat"}
+    for mode in pipeline.SEPARATING_MODES:
+        assert "separation_model" in pipeline.clean_params(mode)
+
+
 def test_the_vocal_branch_converts_as_singing_and_keeps_the_key():
     """It is the `song` branch without the separator, so it gets the singing
     checkpoint's wider pitch range — and, like a song, it is not measured

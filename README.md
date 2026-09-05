@@ -2,7 +2,7 @@
 
 Voice conversion web app: đưa vào một bài hát (hoặc một bản hát đã tách sẵn,
 hoặc đoạn thoại, hoặc một đoạn văn bản) + một giọng mẫu, nhận về bản đã đổi sang
-giọng đó, nhạc nền giữ nguyên.
+giọng đó — nhạc nền giữ nguyên, hoặc thay hẳn bằng một beat khác.
 
 Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/implementation-plan.md).
 
@@ -21,6 +21,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 8 | Text to speech theo giọng mẫu (có tiếng Nhật) | 🟡 code xong, chờ nghe thật trên container |
 | 9 | Đọc có ngữ điệu — ngắt nghỉ, lên xuống, cảm xúc | 🟡 code xong, chờ nghe thật trên container |
 | 10 | Giọng trong hơn, bớt "AI" — làm sạch giọng mẫu, hậu kỳ, train giọng riêng, mode không tách nhạc | 🟡 code xong, chờ nghe thật trên GPU |
+| 11 | Đổi beat — đo BPM/tông, khớp beat có sẵn hoặc sinh beat mới | 🟡 code xong, chờ nghe thật trên GPU |
 
 ## Cấu trúc
 
@@ -35,6 +36,9 @@ modal_app/
 ├── prosody.py      # đọc thế nào: ngắt nghỉ theo dấu câu, ngữ điệu, cảm xúc — Python thuần
 ├── reference.py    # làm sạch giọng mẫu trước khi nó thành timbre — numpy thuần, test được
 ├── enhance.py      # chuỗi lọc "độ trong" cho giọng đã convert — ffmpeg thuần
+├── analysis.py     # đo BPM, vị trí phách và tông của một bản nhạc — numpy thuần
+├── beats.py        # cắt/dịch/kéo/lặp một beat cho khớp bài — ffmpeg thuần
+├── beatgen.py      # sinh beat mới từ mô tả (Stable Audio Open) trên GPU
 ├── training.py     # fine-tune Seed-VC cho một giọng riêng trên GPU (công cụ vận hành)
 ├── voices.py       # giọng đã train nằm ở đâu, tên nào hợp lệ — không import gì cả
 ├── mixing.py       # ffmpeg: mix vocal + nhạc nền, encode mp3
@@ -1398,3 +1402,178 @@ chối tiêu GPU cho một bản ghi quá ngắn để học được ai).
       mode nằm ở đây)
 - [ ] jitter ±3%/±0.25 nửa cung: có nghe ra "người hơn" hay chỉ là không nghe
       thấy gì — nếu là vế sau thì tăng dần chứ đừng bỏ
+
+---
+
+## Phase 11 — Đổi beat
+
+Câu hỏi mở ra phase này là *"có cách nào đổi beat để tránh bản quyền không,
+kiểu làm ra một beat mới luôn"*. Câu trả lời có hai nửa và nửa đầu quan trọng
+hơn nửa sau.
+
+### Sửa beat cũ không thoát được, và đây là lý do
+
+Đổi tone, đổi tempo, EQ hay thêm hiệu ứng lên một bản beat có sẵn tạo ra **tác
+phẩm phái sinh** — vẫn thuộc quyền của chủ sở hữu gốc. Về kỹ thuật cũng không
+thoát: các hệ nhận dạng dấu vân tay được thiết kế để sống sót qua đúng những
+phép biến đổi đó.
+
+Và một chuyện hay bị bỏ sót: **một bài hát có ít nhất hai quyền tách rời** —
+bản ghi (master) và tác phẩm (giai điệu + lời). Tách nhạc nền rồi thay beat chỉ
+đụng tới cái thứ nhất. Nếu phần hát vẫn đi đúng giai điệu và lời bài gốc thì
+phần đó vẫn nguyên vẹn là của người ta, dù beat có mới 100%; app này đổi
+*timbre* người hát chứ không đổi giai điệu.
+
+Nên mode `beat` sạch khi phần vocal là rap hoặc lời của chính người dùng, hoặc
+khi họ đã có license cho bản cover. Nó **không** là cách hợp thức hoá việc ghép
+giọng lên đúng giai điệu bài gốc, và README nói thẳng ra vì UI không phải chỗ
+để giải thích luật.
+
+### Kiến trúc: đo trước, rồi mới làm
+
+Chỗ khó không phải sinh ra beat mà là **khớp nó với phần hát đã có**. Nên phase
+này chia ba module theo đúng ba việc khác nhau, và hai trong ba không cần GPU:
+
+```
+bài ──► tách ──► vocal ─────────────► convert ──────────────┐
+             └─► instrumental ──► analysis.py (BPM, tông)   │
+                                          │                  ├──► mix ──► mp3
+beat tải lên ────────────────► beats.py ──┘                  │
+mô tả ──► beatgen.py ────────► beats.py ─────────────────────┘
+```
+
+Bản instrumental gốc được tách ra, **đo**, rồi vứt đi. Nó là mốc thời gian và
+mốc tông, không phải một phần của output. Đo trên instrumental chứ không đo
+trên vocal là cố ý: giọng hát tách riêng gần như không có nhịp để bắt — trống
+mới là thứ giữ nhịp — và đoán tông từ một bè giai điệu là đoán mò.
+
+### `analysis.py` — BPM và tông, numpy thuần
+
+**Tempo.** Spectral flux → autocorrelation → nội suy parabol → **khớp lại lưới
+phách bằng bình phương tối thiểu**. Bước cuối là bước đáng nói: autocorrelation
+cho chu kỳ sai vài phần mười phần trăm, nghe thì không ra gì và trên bài 3 phút
+là **nửa giây trôi** giữa beat và giọng — mà trôi là kiểu sai duy nhất người
+nghe không bỏ qua được. Đi dọc lưới, tìm onset mạnh nhất gần mỗi phách dự đoán,
+rồi fit một đường thẳng qua chúng: hệ số góc là chu kỳ, tung độ gốc là pha, cả
+hai giờ được ước lượng từ cả trăm phách thay vì từ một đỉnh tương quan.
+
+Đo trong CI trên click track: **sai số BPM < 0.02%, sai số vị trí phách < 11ms.**
+
+Hai cái bẫy đã cắn và đã viết lại thành hằng số có tên:
+
+* **`ONSET_LEAD_FRAMES`** — spectral flux báo onset *sớm* hơn tiếng thật, và
+  lượng sớm đó suy ra được chứ không phải fudge: entry `i` so frame `i+1` với
+  frame `i`, nên phần mẫu chỉ có ở một bên là `[i*HOP + FRAME, (i+1)*HOP +
+  FRAME)`. Không trừ đi thì mọi phách lệch sớm 70ms.
+* **`PULSE_FLOOR`** — không có gate thì `tempo()` **luôn** trả lời. Một hợp âm
+  organ ngân dài ra 108 BPM: flux của nó là bụi số học, và autocorrelation của
+  bụi thì cũng tuần hoàn như mọi thứ khác. Envelope được chia cho mức phổ trung
+  bình nên ngưỡng là một tỷ lệ, không phải một mức: click track ~6000, hợp âm
+  ~3000, tiếng ngân 3, nhiễu trắng 21. Ngưỡng 50 nằm giữa một khoảng trống rộng
+  hai bậc — và đặt thấp có chủ ý, vì bỏ sót một nhịp chỉ làm beat mất khớp
+  tempo, còn bịa ra một nhịp làm beat mất tempo.
+
+**Tông.** Chroma 12 bậc → tương quan với 24 profile Krumhansl-Schmuckler. Trả
+về kèm **biên độ thắng** (`key_margin`), vì điểm yếu đã biết của phương pháp
+này đúng là chỗ quan trọng nhất: một tông và tông tương đối của nó dùng chung
+cả bảy nốt, nên trên bài đi qua cả hai thì hai đáp án tương quan gần bằng nhau.
+Margin nhỏ nghĩa là **đừng dịch tông dựa trên cái này**.
+
+### `beats.py` — bốn quyết định, ffmpeg thuần
+
+* **Cắt loop tròn ô nhịp.** File tải lên không kết thúc đúng chỗ hết ô nhịp, nên
+  lặp thẳng là đặt một mối nối vào giữa một phách. Cắt từ phách đầu của nó tới
+  ô nhịp trọn vẹn cuối cùng tốn một giây audio và mua được điểm lặp nằm đúng chỗ
+  tai người chờ nó.
+* **Dịch tông theo tông tương đối, không theo chủ âm.** Loop thứ đặt dưới bài
+  trưởng không muốn về chủ âm trưởng đó — nó muốn về tông thứ tương đối, vốn
+  dùng chung cả bảy nốt. Dịch về chủ âm là lệch một quãng ba thứ và nghe đúng
+  như thế.
+* **Khớp tempo theo quãng tám gần nhất.** Beat 140 BPM dưới bài 70 BPM là *đã*
+  đúng nhịp; bắt nó chia đôi là phá beat để sửa một lỗi nó không có. Gập tỷ lệ
+  theo bội 2 cho tới khi gần 1 nhất giữ mọi phép kéo trong khoảng 0.71x–1.41x,
+  là khoảng WSOLA còn nghe ra nhạc.
+* **Tách cao độ khỏi tempo.** `asetrate` là đổi tốc độ băng — nó nhân cả hai. Nên
+  `atempo` sau đó phải trả lại đúng phần cao độ đã lấy: `atempo = tỷ_lệ / cao_độ`.
+  Sai dấu chỗ này thì đúng tông sai tempo, hoặc ngược lại.
+
+Đo end-to-end trong CI: beat 90 BPM đặt dưới bài 120 BPM ra đúng 120 BPM, phách
+đầu lệch dưới 30ms.
+
+### `beatgen.py` — và vì sao chọn model là một phần của câu trả lời
+
+MusicGen là ứng viên hiển nhiên và weights của nó là **CC-BY-NC**: dùng nó để
+làm nhạc phát hành được là điều chính license của thứ đang làm ra nhạc không
+cho phép — tự mâu thuẫn đúng ở chỗ dễ bỏ qua nhất. Stable Audio Open được cấp
+phép cho dùng thương mại theo community license của Stability, và — phần quan
+trọng ở đây — được train trên Freesound và Free Music Archive, tức là trên audio
+đã được cấp phép cho việc đó. Nguồn gốc của model là một phần nguồn gốc của thứ
+nó làm ra.
+
+Weights **gated** trên Hugging Face: phải có tài khoản đã chấp nhận điều khoản
+và một `HF_TOKEN` đặt lên deployment. Đó là một phần của license chứ không phải
+chướng ngại để đi vòng, và `load()` báo thẳng khi thiếu thay vì để 401 nổ ra từ
+trong thư viện, trên GPU, giữa job của ai đó.
+
+Prompt **không cần chính xác**, đó là hệ quả dễ chịu của việc viết `beats.py`
+trước: xin 90 BPM ra 94 cũng không sao, beat sinh xong được đo lại rồi khớp,
+nên mô tả chỉ cần đúng *chất* nhạc. `PROMPT_SUFFIX` gắn thêm "instrumental, no
+vocals" vào mọi prompt — một giọng hát do model sinh ra nằm dưới một giọng đã
+convert là thứ tệ nhất nhánh này có thể tạo ra.
+
+### Giới hạn không prompt nào sửa được
+
+Một loop sinh ra có thể đúng tông và đúng tempo; nó **không thể biết vòng hợp
+âm** của bài nó sắp nằm dưới. Chỗ nào giọng hát đi qua các hợp âm khác nhau, một
+loop ngồi trên một hợp âm sẽ chỏi ở đúng những ô nhịp đó.
+
+Nên nó chạy tốt với rap, hip-hop và phần lớn nhạc điện tử — nơi phần nền là một
+loop và phần giọng thiên về nhịp — và tệ dần khi giọng càng đi giai điệu. Đó là
+tính chất của việc đặt một loop dưới một giai điệu, không phải một tham số chờ
+được chỉnh. UI nói đúng câu đó ngay dưới ô mô tả.
+
+### Ba chỗ đáng chú ý
+
+**Đúng một nguồn beat, và chỉ `api.py` biết được điều đó.** `clean_params` thấy
+prompt nhưng không bao giờ thấy upload. Có cả hai thì bị từ chối chứ không giải
+quyết bằng một luật ưu tiên — không có thứ tự nào giữa "file tôi vừa tải lên" và
+"beat tôi vừa mô tả" mà người dùng đoán được.
+
+**Trạng thái `generating` là trạng thái thật.** Chỉ nhánh `beat` vào nó, và chỉ
+khi beat được mô tả chứ không phải tải lên — beat tải lên không cần GPU nào và
+đi thẳng sang `converting`.
+
+**`beat` không tự dò cao độ giọng.** Bed đang được kéo về tông của người hát,
+nên dịch luôn người hát là khớp hai thứ vào nhau cùng lúc.
+
+### Test
+
+`tests/test_analysis.py`, `tests/test_beats.py`, `tests/test_beatgen.py`, cộng
+phần thêm trong `test_pipeline`, `test_api`, `test_jobs`, `test_deploy`. Tất cả
+chạy trong CI không cần GPU, và cái đáng nói là **chúng đo chứ không mô tả**:
+click track đúng 100 BPM thì phải ra 100 BPM, vòng hợp âm chỉ dùng nốt của Đô
+trưởng thì phải ra Đô trưởng, và beat 90 BPM sau khi khớp phải đo lại được đúng
+120 BPM. Dung sai không phải trang trí — 0.5% sai số tempo là nửa giây trôi trên
+một bài 3 phút, nên test đòi phần mười phần trăm, và đó là lý do `_fit_grid` tồn
+tại.
+
+### Còn phải verify bằng tai và bằng GPU
+
+- [ ] **`analysis.py` trên nhạc thật.** Toàn bộ số đo ở trên là trên tín hiệu
+      tổng hợp. Click track không có swing, không có ghost note, không có đoạn
+      chuyển — ba thứ làm beat tracking sai trên nhạc thật
+- [ ] tông của một bài pop thật: `key_margin` có đủ lớn để dịch tông không, hay
+      thực tế nó luôn dưới ngưỡng và beat không bao giờ được dịch
+- [ ] `PULSE_FLOOR = 50` trên một bản ballad phối thưa — đây là chỗ dễ báo
+      "không có nhịp" nhất, và hậu quả là beat giữ nguyên tempo của nó
+- [ ] beat 90 BPM dưới bài 128 BPM: tỷ lệ 1.42 là gần mép của khoảng gập, nghe
+      còn ra nhạc không
+- [ ] **`beatgen.py` chưa từng chạy một lần nào** — weights gated, cần `HF_TOKEN`
+      và một GPU. `stable-audio-tools==0.0.16` được gọi theo đúng ví dụ của
+      Stability, nhưng gọi đúng không phải là đã chạy
+- [ ] beat sinh ra có thật sự không có giọng hát trong đó không —
+      `PROMPT_SUFFIX` là một lời nhắc cho model, không phải một ràng buộc
+- [ ] điểm lặp: cắt tròn ô nhịp có đủ để mối nối không nghe thấy không, hay còn
+      cần crossfade ở chỗ lặp
+- [ ] rap/hip-hop so với ballad — giả thuyết "loop hợp với nhạc nhịp, chỏi với
+      nhạc giai điệu" cần được nghe chứ không phải được lập luận
