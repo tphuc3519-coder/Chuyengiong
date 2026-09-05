@@ -53,6 +53,13 @@ EVENTS = (SUBMIT, DONE, FAILED, DOWNLOAD, EXPIRE)
 #   model           separation model id
 #   steps           diffusion steps
 #   shift           semitones applied, measured or given
+#   cfg             how hard the sampler was pushed towards the reference
+#   clarity         how much of the output filter chain ran
+#   profile         *name* of the trained voice used, never the audio it learnt
+#   language        which language was read, never the text that was read
+#   emotion         which delivery it was read with — a setting, not content
+#   beat_bytes      size of an uploaded replacement backing track
+#   beat_source     where a replacement backing track came from, not what it said
 #   watermark       whether the output carries an AudioSeal watermark
 #   seconds         wall clock of the pipeline run
 #   reason          exception *class* name on failure, never its message
@@ -69,6 +76,13 @@ FIELDS = (
     "model",
     "steps",
     "shift",
+    "cfg",
+    "clarity",
+    "profile",
+    "language",
+    "emotion",
+    "beat_bytes",
+    "beat_source",
     "watermark",
     "seconds",
     "reason",

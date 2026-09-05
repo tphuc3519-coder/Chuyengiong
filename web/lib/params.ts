@@ -90,16 +90,45 @@ export const MAX_VOCAL_GAIN_DB = 12;
  * The `beat` branch, mirrored from `modal_app/beatgen.py` and
  * `modal_app/pipeline.py`.
  *
- * Two sources and exactly one of them: the backend refuses a job that has both
- * or neither, because no precedence between "the file I uploaded" and "the
- * beat I described" is one anybody would guess.
+ * Three genuinely different things, named rather than inferred from which
+ * field happened to be filled in — `remake` sends neither a file nor a
+ * description, so there would be nothing to infer it from.
  *
- * On what the description is for: the model will not land on the BPM it is
- * asked for, and it does not need to. The generated beat is measured and
- * fitted to the song afterwards (`modal_app/beats.py`), so the prompt only has
- * to get the *character* right — the arithmetic is the backend's.
+ * `upload` — a file the user already has the right to use. No GPU, no model,
+ * and the licence of what comes out is the licence they came with.
+ *
+ * `generate` — music invented from a description. Nothing to do with the
+ * original song, which is the point and also the limit: it cannot know the
+ * song's chord progression. The model will not land on the BPM it is asked
+ * for either, and does not need to — the result is measured and fitted
+ * afterwards (`modal_app/beats.py`), so the prompt only has to get the
+ * *character* right.
+ *
+ * `remake` — the song's own harmony, at its own tempo, played on instruments
+ * synthesised from scratch. The only one that is still the same song, and the
+ * only one whose copyright story has to be said out loud: it removes the sound
+ * recording and not the composition, so what comes out is a cover. Covers are
+ * licensable, cheaply and often compulsorily; masters usually are not. That is
+ * the real gain and it is narrower than "tránh bản quyền" suggests.
  */
-export type BeatSource = "upload" | "generate";
+export type BeatSource = "upload" | "generate" | "remake";
+
+/**
+ * How a remade backing track is played, mirrored from `STYLES` in
+ * `modal_app/arrange.py`.
+ *
+ * `auto` picks from the measured tempo, which is a better guess than any fixed
+ * default: 72 BPM wants a ballad and 150 does not.
+ */
+export const ARRANGE_STYLES: { id: string; label: string; hint: string }[] = [
+  { id: "auto", label: "Tự chọn", hint: "Theo tốc độ đo được của bài" },
+  { id: "ballad", label: "Ballad", hint: "Chậm, hợp âm ngân dài" },
+  { id: "lofi", label: "Lo-fi", hint: "Trống lệch nhịp, pad ấm" },
+  { id: "boombap", label: "Boom bap", hint: "Trống mộc, hợp âm nảy" },
+  { id: "pop", label: "Pop", hint: "Đều nhịp, đầy đặn" },
+  { id: "trap", label: "Trap", hint: "808, hi-hat dày" },
+];
+export const DEFAULT_ARRANGE_STYLE = "auto";
 
 export const BEAT_PROMPT_CHARS = 300;
 export const BEAT_PROMPT_EXAMPLES = [
@@ -238,6 +267,8 @@ export type Params = {
   /** `beat` only, and only when `beatSource` is `generate`. */
   beatPrompt: string;
   beatSeed: number;
+  /** `beat` only, and only when `beatSource` is `remake`. */
+  arrangeStyle: string;
   /** Classifier-free guidance, `CFG_RATE_MIN`…`CFG_RATE_MAX`. */
   cfgRate: number;
   /** How much of the output clarity chain to run, `CLARITY_MIN`…`CLARITY_MAX`. */
@@ -263,6 +294,7 @@ export function defaultParams(mode: Mode): Params {
     beatSource: "upload",
     beatPrompt: "",
     beatSeed: BEAT_RANDOM_SEED,
+    arrangeStyle: DEFAULT_ARRANGE_STYLE,
     cfgRate: DEFAULT_CFG_RATE,
     clarity: DEFAULT_CLARITY,
     semitoneShift: null,

@@ -90,9 +90,34 @@ def test_the_beat_branch_separates_like_a_song_and_carries_its_own_params():
 
 def test_an_absent_beat_prompt_means_a_beat_was_uploaded():
     """Empty is a real state on this branch and not a missing value. `api.submit`
-    is where the two sources are required to be exactly one of them, because it
-    is the only layer that can see an upload."""
+    is where each source's requirements are checked, because it is the only
+    layer that can see an upload."""
     assert pipeline.clean_params("beat")["beat_prompt"] == ""
+
+
+def test_the_beat_source_is_named_rather_than_inferred():
+    """Three genuinely different things, and `remake` sends neither a file nor a
+    description — so there is nothing to infer it from."""
+    assert pipeline.clean_params("beat")["beat_source"] == pipeline.DEFAULT_BEAT_SOURCE
+    for source in pipeline.BEAT_SOURCES:
+        assert pipeline.clean_params("beat", {"beat_source": source})["beat_source"] == source
+
+
+def test_an_unknown_beat_source_falls_back_to_the_one_needing_no_model():
+    """Upload needs no GPU and no weights, so it is the safe answer — and
+    `api.submit` refuses it anyway when no file came with it."""
+    assert (
+        pipeline.clean_params("beat", {"beat_source": "telepathy"})["beat_source"]
+        == pipeline.DEFAULT_BEAT_SOURCE
+    )
+
+
+def test_the_arrangement_style_is_carried_and_bounded():
+    from modal_app import arrange
+
+    assert pipeline.clean_params("beat")["arrange_style"] == arrange.DEFAULT_STYLE
+    assert pipeline.clean_params("beat", {"arrange_style": "lofi"})["arrange_style"] == "lofi"
+    assert len(pipeline.clean_params("beat", {"arrange_style": "x" * 99})["arrange_style"]) <= 24
 
 
 def test_a_beat_prompt_cannot_be_longer_than_the_generator_accepts():

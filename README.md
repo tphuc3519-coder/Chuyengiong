@@ -22,6 +22,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 9 | Đọc có ngữ điệu — ngắt nghỉ, lên xuống, cảm xúc | 🟡 code xong, chờ nghe thật trên container |
 | 10 | Giọng trong hơn, bớt "AI" — làm sạch giọng mẫu, hậu kỳ, train giọng riêng, mode không tách nhạc | 🟡 code xong, chờ nghe thật trên GPU |
 | 11 | Đổi beat — đo BPM/tông, khớp beat có sẵn hoặc sinh beat mới | 🟡 code xong, chờ nghe thật trên GPU |
+| 12 | Phối lại bài gốc — đọc vòng hợp âm rồi dựng lại bằng tiếng tự tổng hợp | 🟡 code xong, chờ nghe thật |
 
 ## Cấu trúc
 
@@ -37,6 +38,8 @@ modal_app/
 ├── reference.py    # làm sạch giọng mẫu trước khi nó thành timbre — numpy thuần, test được
 ├── enhance.py      # chuỗi lọc "độ trong" cho giọng đã convert — ffmpeg thuần
 ├── analysis.py     # đo BPM, vị trí phách và tông của một bản nhạc — numpy thuần
+├── chords.py       # đọc vòng hợp âm, giới hạn trong tông đã đo — numpy thuần
+├── arrange.py      # dựng lại bản phối mới từ vòng hợp âm — tổng hợp bằng numpy
 ├── beats.py        # cắt/dịch/kéo/lặp một beat cho khớp bài — ffmpeg thuần
 ├── beatgen.py      # sinh beat mới từ mô tả (Stable Audio Open) trên GPU
 ├── training.py     # fine-tune Seed-VC cho một giọng riêng trên GPU (công cụ vận hành)
@@ -1577,3 +1580,142 @@ tại.
       cần crossfade ở chỗ lặp
 - [ ] rap/hip-hop so với ballad — giả thuyết "loop hợp với nhạc nhịp, chỏi với
       nhạc giai điệu" cần được nghe chứ không phải được lập luận
+
+---
+
+## Phase 12 — Phối lại bài gốc
+
+Phase 11 cho hai cách thay nhạc nền và cả hai đều **không phải cùng một bài**:
+beat tải lên là nhạc của người khác, beat sinh ra là nhạc chưa từng có. Yêu cầu
+còn thiếu là cái ở giữa — *"đổi từ beat gốc sang beat khác tone y chang nhưng
+phối nhạc khác"*: giữ nguyên tông và vòng hợp âm của bài, thay toàn bộ tiếng.
+
+### Nó gỡ được gì, và không gỡ được gì
+
+Nói trước vì cả tính năng xoay quanh điểm này, và vì UI không phải chỗ giải
+thích luật.
+
+Dựng lại bản phối gỡ được quyền **bản ghi**: không còn một mẫu nào của master
+gốc trong output, nên fingerprint của *bản thu* không còn gì để khớp.
+
+Nó **không** gỡ được quyền **tác phẩm**. Hợp âm vẫn là hợp âm của họ và giọng
+bên trên vẫn hát đúng giai điệu của họ — đó chính là định nghĩa của một bản
+cover, và là thứ publisher claim. Cái được thật sự hẹp hơn chữ "tránh bản
+quyền" nhiều: **cover thì xin license được, rẻ, và ở nhiều nơi là license bắt
+buộc** (bên giữ quyền không được từ chối); còn license bản ghi thì tuỳ hứng
+người giữ và thường là không.
+
+Đó là một bước tiến thật. Nó không phải là miễn phí.
+
+### `chords.py` — đọc vòng hợp âm, và một quyết định làm nó dùng được
+
+Chroma từng nửa ô nhịp → so với template các hợp âm ba nốt → gộp các đoạn giống
+nhau. Phần đáng nói không phải thuật toán mà là **giới hạn danh sách**.
+
+Một bộ nhận diện hợp âm tổng quát chọn trong 24 hợp âm và đúng một tỷ lệ khá;
+những cái nó sai thì sai **tuỳ tiện**, và một hợp âm lệch nửa cung nằm dưới
+giọng hát là một cái còi báo động. Giới hạn trong **bảy hợp âm diatonic của tông
+đã đo**, bộ nhận diện đang chọn giữa những hợp âm đều *thuộc về* bài — nên cái
+sai của nó nằm trong tông: đoán vi trong khi thật ra là IV thì hai trong ba nốt
+vẫn đúng, nghe như một cách phối lại chứ không như một lỗi.
+
+Đó là đánh đổi có chủ ý: ít lựa chọn hơn, đổi lấy việc không có kiểu sai thảm
+hoạ nào. Bài đi ra ngoài tông (một IV thứ mượn, một dominant phụ) sẽ nhận hợp âm
+diatonic gần nhất — đúng bằng thứ một nhạc công đọc chart trong tông đó sẽ chơi.
+
+**Không chắc thì trả về chart rỗng.** Dưới `MIN_CONFIDENCE`, `detect` trả về
+rỗng và `arrange` đọc đó là "chỉ chơi trống và bass". Trống nằm dưới giọng thì
+không thể sai tông; hợp âm đoán bừa thì rất có thể.
+
+Đo trong CI: `C Am F G` ra `C Am F G`, `Am F G Am` ra `Am F G Am`, và mọi hợp âm
+tìm được đều nằm trong tông đã đo.
+
+### `arrange.py` — chơi lại chart đó bằng tiếng tự tổng hợp
+
+Trống, bass, hợp âm, pad — mọi mẫu đều sinh từ số học trong file này, không một
+sample nào copy từ đâu.
+
+Toàn bộ là **cộng hợp (additive) hoặc tạo hình nhiễu trong miền tần số**, không
+có bộ lọc hồi tiếp nào, và lý do là số học chứ không phải khẩu vị: một filter
+cộng hưởng là vòng lặp hồi tiếp từng mẫu, mà trong numpy nghĩa là một vòng lặp
+Python chạy qua một triệu mẫu. Chọn thẳng biên độ từng hoạ âm cho ra đúng phổ đó
+trong một biểu thức vector hoá — và không bao giờ aliasing, vì không có gì trên
+Nyquist được sinh ra để mà gập xuống.
+
+Vài chỗ đáng ghi lại:
+
+* **Kick là một sin có cao độ rơi từ 110 Hz xuống 45 Hz.** Viết sweep thành
+  `sin(2πf(t)·t)` là sai — nó bẻ gấp đôi quãng cần bẻ. Phải tích phân tần số rồi
+  mới lấy sin.
+* **Voicing được kéo về một quãng tám cố định.** Không thì chart ở B được chơi
+  cao hơn chart ở C đúng một quãng tám, nghe rõ và chẳng liên quan gì tới âm
+  nhạc.
+* **Reverb là vài tap trễ chứ không phải convolution.** Một IR 26k mẫu chập với
+  bài 4 phút là FFT 16 triệu điểm và một phần tư gigabyte; bốn phép nhân-cộng ở
+  các độ trễ cố định là số lẻ, và trên một bản nền nằm dưới giọng thì nghe gần
+  như nhau.
+* **Swing đẩy các nốt móc kép lẻ trễ lại**, và mỗi ô nhịp thứ tư có thêm một
+  cặp snare. Hai dòng code, và là gần hết phần khác nhau giữa một cái loop và
+  một bản phối.
+* **Năm kiểu phối, khoảng tempo rời nhau.** `auto` chọn theo tốc độ đã đo — 72
+  BPM muốn ballad, 150 thì không. Khoảng rời nhau và phủ kín để `choose_style`
+  có đúng một câu trả lời, không phụ thuộc vào việc ai đó chèn style vào giữa
+  dict.
+
+### Trần chất lượng, nói thẳng
+
+Thứ ra lò là một **bản phối lập trình sạch sẽ**, không phải một bản production.
+Tổng hợp cộng hợp và vài cú nhiễu qua mạng trễ cho ra thứ sạch, đúng tông, đúng
+nhịp; nó không cho ra tiếng trống của một bản thu ai đó ngồi mix một tuần.
+
+Với hip-hop, lo-fi và mọi bài mà phần nền chỉ để đỡ giọng thì dùng được thật.
+Với bài mà *bản phối* mới là cái hay, nó sẽ nghe đúng như bản chất của nó.
+
+### Ba nguồn beat, và tại sao phải gọi tên
+
+`beat_source` là một lựa chọn có tên chứ không suy ra từ trường nào được điền:
+`remake` **không gửi cả file lẫn mô tả**, nên không có gì để suy ra. Mỗi nguồn có
+điều kiện riêng và `api.py` kiểm — vì chỉ tầng đó nhìn thấy file upload:
+
+| Nguồn | Cần | Từ chối |
+|---|---|---|
+| `upload` | file beat | thiếu file |
+| `generate` | mô tả | thiếu mô tả, hoặc gửi kèm cả file |
+| `remake` | không gì cả | gửi kèm file (nếu bỏ qua im lặng thì người dùng sẽ ngồi hỏi sao không nghe thấy beat mình vừa tải lên) |
+
+### Sửa kèm: allowlist của audit đã bỏ sót từ Phase 8
+
+`audit.FIELDS` là danh sách trắng, và `language`, `emotion` chưa bao giờ nằm
+trong đó — nên từ Phase 8 tới giờ mọi dòng audit đều ghi tên chúng vào `dropped`
+thay vì ghi giá trị. Nó suy biến an toàn đúng như thiết kế, nên không ai thấy;
+phát hiện ra khi các field mới của Phase 11 và 12 rơi vào đúng cái bẫy đó. Đã
+thêm `cfg`, `clarity`, `profile`, `language`, `emotion`, `beat_bytes`,
+`beat_source` — toàn là *cài đặt*, không có gì là nội dung của người dùng.
+
+### Test
+
+`tests/test_chords.py`, `tests/test_arrange.py`, cộng phần thêm trong
+`test_pipeline` và `test_api`. Không cần GPU, và vẫn đo chứ không mô tả: dựng
+một ô nhịp C-E-G thì phải đọc ra C, mọi hợp âm tìm được phải nằm trong tông đã
+đo, bản phối dựng ra phải đo lại được đúng tempo đã cho, và chart rỗng phải cho
+ra một bộ trống thật chứ không phải im lặng.
+
+### Còn phải verify bằng tai
+
+- [ ] **`chords.py` trên nhạc thật.** Vòng hợp âm tổng hợp không có đảo âm,
+      không có nốt ngoài hợp âm, không có phần đệm — ba thứ làm chord detection
+      sai trên bản thu thật. Đây là mục quan trọng nhất
+- [ ] tỷ lệ bài thật rơi xuống dưới `MIN_CONFIDENCE` — nếu đa số thì tính năng
+      thực tế là "trống và bass", và phải nói lại điều đó trong UI
+- [ ] **bản phối nghe có dùng được không.** Đây là câu hỏi quyết định phase này
+      đáng giữ hay không, và không có cách nào trả lời bằng test
+- [ ] năm kiểu phối: khoảng tempo có chia đúng chỗ không, hay `auto` chọn sai
+      trên bài thật
+- [ ] mức giữa các bè (`KICK_GAIN` … `PAD_GAIN`) — đặt bằng suy luận, chưa bằng
+      tai, và bản nền phải nằm *dưới* giọng chứ không tranh chỗ
+- [ ] chỗ nối khi chart lặp lại: hợp âm cuối về hợp âm đầu có nghe thành một
+      vòng không, hay nghe như bị cắt
+- [ ] thời gian dựng trên bài 4-5 phút thật — test đo 60 giây mất dưới 20 giây,
+      nhưng nó chạy trong bước `mixing` trên container CPU cùng lúc với những
+      việc khác
+- [ ] swing 0.18 của lo-fi có quá tay không

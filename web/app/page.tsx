@@ -77,6 +77,7 @@ export default function Page() {
   // upload find out.
   const hasBeat =
     mode !== "beat" ||
+    params.beatSource === "remake" ||
     (params.beatSource === "generate" ? params.beatPrompt.trim().length > 0 : beat !== null);
   const ready = hasSource && hasBeat && !tooLong && reference !== null && consent && !busy;
 

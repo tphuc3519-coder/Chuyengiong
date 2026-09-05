@@ -172,11 +172,15 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
   } else if (input.source) {
     form.set("input", input.source, input.source.name);
   }
-  // Exactly one of the two, and the backend refuses both or neither: no
-  // ordering between an uploaded beat and a described one is guessable.
+  // Named rather than inferred: `remake` sends neither a file nor a prompt, so
+  // there would be nothing for the backend to infer it from.
   if (input.mode === "beat") {
+    form.set("beat_source", input.params.beatSource);
     if (input.params.beatSource === "generate") {
       form.set("beat_prompt", input.params.beatPrompt);
+      form.set("beat_seed", String(input.params.beatSeed));
+    } else if (input.params.beatSource === "remake") {
+      form.set("arrange_style", input.params.arrangeStyle);
       form.set("beat_seed", String(input.params.beatSeed));
     } else if (input.beat) {
       form.set("beat", input.beat, input.beat.name);

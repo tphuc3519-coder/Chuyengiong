@@ -49,18 +49,25 @@ preview lẫn production.
 ## Chế độ "Đổi beat"
 
 `app/components/BeatSource.tsx`. Mode `beat` thêm đúng một bước vào form (2b) và
-giữ nguyên mọi bước khác: nguồn beat là radio group hai lựa chọn, vì backend từ
-chối job mang cả hai — không có thứ tự nào giữa "file tôi vừa tải lên" và "beat
-tôi vừa mô tả" mà người dùng đoán được, nên nó là một lựa chọn chứ không phải
-hai ô độc lập.
+giữ nguyên mọi bước khác: nguồn beat là radio group ba lựa chọn — tải lên, tự
+sinh, hoặc **phối lại chính bài này**. Là một lựa chọn có tên chứ không phải ba
+ô độc lập, vì mỗi nguồn có điều kiện riêng và "phối lại" không gửi cả file lẫn
+mô tả, nên không có gì để backend suy ra.
 
 "Tải beat lên" là mặc định vì nó luôn chạy được: không cần GPU, không cần weights
 gated, và license của thứ ra lò là license người dùng đã chọn khi lấy file.
 
-Dòng chữ dưới ô mô tả không phải disclaimer — nó là thứ dễ làm người dùng thất
-vọng nhất: beat sinh ra không biết vòng hợp âm của bài, nên nó hợp với rap và
-nhạc điện tử và chỏi dần khi giọng đi giai điệu nhiều. Nói trước rẻ hơn để mỗi
-người tự phát hiện một lần.
+Dòng chữ dưới mỗi lựa chọn không phải disclaimer — mỗi dòng là thứ dễ làm đúng
+người chọn nó thất vọng nhất, và nói trước một lần rẻ hơn để mỗi người tự phát
+hiện một lần.
+
+Với **tự sinh**: beat sinh ra không biết vòng hợp âm của bài, nên nó hợp với rap
+và nhạc điện tử và chỏi dần khi giọng đi giai điệu nhiều.
+
+Với **phối lại**: nó gỡ được quyền _bản ghi_ chứ không gỡ được quyền _tác phẩm_ —
+hợp âm vẫn của bài gốc, giọng vẫn hát giai điệu đó, nên kết quả là một bản cover.
+Đây là chỗ duy nhất trong app nói về bản quyền bằng chữ, và nó nói vì người dùng
+chọn cái nút này chính là để giải quyết chuyện đó.
 
 ## Chế độ "Giọng hát"
 
