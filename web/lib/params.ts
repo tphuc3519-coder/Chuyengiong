@@ -44,8 +44,20 @@ export function convertsVoice(mode: Mode): boolean {
  */
 export const MODES: { id: Mode; label: string; hint: string }[] = [
   { id: "song", label: "Bài hát", hint: "Tách nhạc nền, đổi giọng, ghép lại" },
-  { id: "rebeat", label: "Đổi beat", hint: "Giữ nguyên giọng gốc, chỉ thay nhạc nền" },
-  { id: "beat", label: "Đổi beat + giọng", hint: "Vừa thay nhạc nền vừa đổi sang giọng mẫu" },
+  // Cả hai hint đều mở đầu bằng "Bạn đưa beat vào", và đó là chỗ quan trọng
+  // nhất trong file này. App không sáng tác beat — nó khớp beat bạn có sẵn vào
+  // bài. Nhãn "Đổi beat" mà không nói điều đó thì đọc như một lời hứa app sẽ tự
+  // làm ra beat, rồi ngay bước sau lại đi hỏi xin beat.
+  {
+    id: "rebeat",
+    label: "Đổi beat",
+    hint: "Bạn đưa beat vào · giữ nguyên giọng gốc",
+  },
+  {
+    id: "beat",
+    label: "Đổi beat + giọng",
+    hint: "Bạn đưa beat vào · đổi sang giọng mẫu",
+  },
   { id: "vocal", label: "Giọng hát", hint: "File đã tách sẵn — đổi giọng, giữ nguyên" },
   { id: "speech", label: "Giọng nói", hint: "Đổi giọng trực tiếp, nhanh hơn" },
   { id: "tts", label: "Văn bản", hint: "Gõ chữ, đọc lên bằng giọng mẫu" },
