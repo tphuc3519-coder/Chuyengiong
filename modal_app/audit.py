@@ -60,6 +60,10 @@ EVENTS = (SUBMIT, DONE, FAILED, DOWNLOAD, EXPIRE)
 #   emotion         which delivery it was read with — a setting, not content
 #   beat_bytes      size of an uploaded replacement backing track
 #   beat_source     where a replacement backing track came from, not what it said
+#   beat_init       what a derived beat was started from — the one field here
+#                   that is a licensing question, so it is the one worth having
+#                   in the record: `original` means the model was shown the
+#                   song's own instrumental
 #   watermark       whether the output carries an AudioSeal watermark
 #   seconds         wall clock of the pipeline run
 #   reason          exception *class* name on failure, never its message
@@ -83,6 +87,7 @@ FIELDS = (
     "emotion",
     "beat_bytes",
     "beat_source",
+    "beat_init",
     "watermark",
     "seconds",
     "reason",

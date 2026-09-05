@@ -96,8 +96,9 @@ def test_an_absent_beat_prompt_means_a_beat_was_uploaded():
 
 
 def test_the_beat_source_is_named_rather_than_inferred():
-    """Three genuinely different things, and `remake` sends neither a file nor a
-    description — so there is nothing to infer it from."""
+    """Three genuinely different things, and two of them send no file — so
+    there is nothing to infer the source from. `derive` sends no description
+    either: it reads one off the song."""
     assert pipeline.clean_params("beat")["beat_source"] == pipeline.DEFAULT_BEAT_SOURCE
     for source in pipeline.BEAT_SOURCES:
         assert pipeline.clean_params("beat", {"beat_source": source})["beat_source"] == source
@@ -112,12 +113,34 @@ def test_an_unknown_beat_source_falls_back_to_the_one_needing_no_model():
     )
 
 
-def test_the_only_beat_sources_are_the_two_that_reach_the_bar():
-    """`remake` — the song's own chords played back on synthesised instruments —
-    is gone. It could not reach the quality it was being held against, and a
-    third of a feature that never satisfies anybody is worse than two that do.
-    The comment on `BEAT_SOURCES` carries the measurement."""
-    assert set(pipeline.BEAT_SOURCES) == {"upload", "generate"}
+def test_every_beat_source_is_one_of_the_three_that_reach_the_bar():
+    """`remake` — the song's own chords played back on synthesised instruments,
+    and nothing after them — is gone. It could not reach the quality it was
+    being held against.
+
+    `derive` is not that feature returning. The same chart now goes to Stable
+    Audio Open as `init_audio` and comes back played on real instruments, which
+    is the difference between synthesis being the output and synthesis being
+    the instruction."""
+    assert set(pipeline.BEAT_SOURCES) == {"upload", "generate", "derive"}
+
+
+def test_only_the_sources_with_no_file_of_their_own_cost_a_gpu():
+    assert set(pipeline.GENERATING_SOURCES) == {"generate", "derive"}
+    assert "upload" not in pipeline.GENERATING_SOURCES
+
+
+def test_an_unrecognised_init_clamps_to_the_branch_that_copies_nothing():
+    """Which way this clamps is the whole point.
+
+    `original` shows the model the song's own master; `sketch` shows it this
+    repository's oscillators. A typo, an old client or a hand-written form
+    should land on the one that cannot produce a derivative work."""
+    assert pipeline.DEFAULT_BEAT_INIT == "sketch"
+    for value in ("", "ORIGINAL_", "nonsense", None, "  "):
+        assert pipeline.clean_params("beat", {"beat_init": value})["beat_init"] == "sketch"
+    assert pipeline.clean_params("beat", {"beat_init": "original"})["beat_init"] == "original"
+    assert pipeline.clean_params("beat", {"beat_init": " Original "})["beat_init"] == "original"
 
 
 def test_a_beat_prompt_cannot_be_longer_than_the_generator_accepts():

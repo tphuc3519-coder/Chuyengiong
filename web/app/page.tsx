@@ -87,8 +87,16 @@ export default function Page() {
   // the stored choice would leave a window where the form believed one thing
   // and the request said another.
   const beatSource = effectiveBeatSource(params, canGenerate);
+  // What each source still needs before the job can start. `derive` needs
+  // nothing: it has the song, and an empty description there means "use the
+  // tempo and key you measured" rather than a blank the user has to fill.
   const hasBeat =
-    !beatMode || (beatSource === "generate" ? params.beatPrompt.trim().length > 0 : beat !== null);
+    !beatMode ||
+    (beatSource === "upload"
+      ? beat !== null
+      : beatSource === "generate"
+        ? params.beatPrompt.trim().length > 0
+        : true);
   const ready =
     hasSource && hasBeat && !tooLong && (!needsVoice || reference !== null) && consent && !busy;
 
@@ -290,7 +298,7 @@ export default function Page() {
                 : !hasBeat
                   ? beatSource === "generate"
                     ? "Mô tả beat muốn sinh để tiếp tục."
-                    : "Chọn file beat thay thế để tiếp tục."
+                    : "Chọn file beat mới để tiếp tục."
                   : tooLong
                     ? `Văn bản dài quá giới hạn của ngôn ngữ đang chọn (${maxCharsFor(params.language)} ký tự) — cắt bớt để tiếp tục.`
                     : !reference
