@@ -2,6 +2,7 @@
 
     song:    input ──► separate ──► vocal ──► convert ──► mix ──► output.mp3
                             └────► instrumental ───────────┘
+    vocal:   input ─────────────────────────► convert ──► encode ──► output.mp3
     speech:  input ─────────────────────────► convert ──► encode ──► output.mp3
     tts:     input.txt ──► synthesize ──────► convert ──► encode ──► output.mp3
 
@@ -26,9 +27,10 @@ from __future__ import annotations
 
 import time
 
-from . import audit, jobs, storage, watermark
+from . import audit, jobs, storage, voices, watermark
 from .app import DATA_DIR, api_image, app, data_vol
-from .audio_utils import clamp_diffusion_steps, clamp_semitone_shift
+from .audio_utils import clamp_cfg_rate, clamp_diffusion_steps, clamp_semitone_shift
+from .enhance import clamp_clarity
 from .mixing import clamp_gain_db
 from .prosody import DEFAULT_EMOTION, clamp_expressiveness, clean_emotion
 from .separation import DEFAULT_SEPARATION_MODEL, check_model, safe_ext
@@ -106,6 +108,17 @@ def clean_params(mode: str, raw: dict | None = None) -> dict:
         "semitone_shift": None if shift is None else clamp_semitone_shift(shift, conversion_mode),
         "diffusion_steps": clamp_diffusion_steps(raw.get("diffusion_steps") or 0, conversion_mode),
         "vocal_gain_db": clamp_gain_db(raw.get("vocal_gain_db") or 0),
+        # How hard the sampler is pushed towards the reference voice, and how
+        # much of `enhance`'s chain runs on the result. Both are `None`-means-
+        # default rather than falsy-means-default: 0 is a real setting for each
+        # of them and `or` would swallow it.
+        "cfg_rate": clamp_cfg_rate(raw.get("cfg_rate")),
+        "clarity": clamp_clarity(raw.get("clarity")),
+        # A trained voice to convert with, or "" for zero shot. Cleaned rather
+        # than checked: whether a profile exists is a question for the GPU
+        # container that has the Volume mounted, and an unusable *name* is not
+        # worth failing a job over when zero shot is right there.
+        "voice_profile": voices.clean_name(raw.get("voice_profile")),
         "source_ext": safe_ext(raw.get("source_ext")),
         # Not a client setting: `WATERMARK` is deployment config, resolved once
         # when the job is created so the record says what was actually done to
@@ -157,6 +170,12 @@ def _finished(
         seconds=time.monotonic() - started,
         shift=params.get("semitone_shift"),
         steps=params.get("diffusion_steps"),
+        cfg=params.get("cfg_rate"),
+        clarity=params.get("clarity"),
+        # The *name* of a trained voice, which is a setting like any other.
+        # Never the audio it was trained on, which left the server with the
+        # rest of the run's working files.
+        profile=params.get("voice_profile") or None,
         model=params.get("separation_model"),
         # The language and the style, never the text: what was said is the
         # user's, the same way the audio is (plan §8 item 5). How it was read is
@@ -270,13 +289,16 @@ def run_song_pipeline(job_id: str, params: dict) -> str:
             # gets measured — silence detection and F0 on a full mix would both be
             # reading the backing track as well as the singer.
             shift = _resolve_shift(job_id, params, vocal, reference, "singing")
-            converted = VoiceConverter(mode="singing").convert.remote(
+            converted = VoiceConverter(
+                mode="singing", voice=params.get("voice_profile", "")
+            ).convert.remote(
                 source_wav=vocal,
                 reference_wav=reference,
                 # One shift for the whole track, computed by the caller. Never
                 # per chunk, never re-detected here — see the Phase 1 rules.
                 semitone_shift=shift,
                 diffusion_steps=params["diffusion_steps"],
+                inference_cfg_rate=params["cfg_rate"],
             )
             storage.put(job_id, CONVERTED, converted)
             data_vol.commit()
@@ -291,6 +313,10 @@ def run_song_pipeline(job_id: str, params: dict) -> str:
                     instrumental,
                     vocal_gain_db=params["vocal_gain_db"],
                     watermark=_watermark(job_id, params),
+                    # On the vocal alone — `mixing.mix` puts it ahead of the
+                    # `amix`, so the backing track is the separator's output
+                    # untouched.
+                    clarity=params["clarity"],
                 ),
             )
             data_vol.commit()
@@ -305,12 +331,25 @@ def run_song_pipeline(job_id: str, params: dict) -> str:
         raise
 
 
-@app.function(image=api_image, volumes={DATA_DIR: data_vol}, timeout=PIPELINE_TIMEOUT, retries=0)
-def run_speech_pipeline(job_id: str, params: dict) -> str:
-    """convert → encode. No separation and no mix: `queued → converting → done`."""
+def _convert_uploaded(job_id: str, params: dict, mode: str) -> str:
+    """convert → encode, for the two branches that have nothing to separate.
+
+    `queued → converting → done`, from a file the user uploaded, with no stem
+    and no mix. The only thing `speech` and `vocal` disagree about is which
+    checkpoint converts them — `jobs.CONVERSION_MODE` answers that — and that
+    difference reaches all the way down: the singing checkpoint is F0
+    conditioned and runs at 44.1 kHz, and it also means `_resolve_shift` leaves
+    the key alone rather than moving the singer into the reference's speaking
+    register (`AUTO_DETECT_MODES`).
+
+    Written once rather than twice because everything else here is exactly the
+    same code, and the version of this that was copied would have been the
+    version where one of the two quietly stopped being watermarked.
+    """
     from .conversion import VoiceConverter
     from .mixing import to_mp3
 
+    conversion_mode = jobs.CONVERSION_MODE[mode]
     started = time.monotonic()
     data_vol.reload()
     try:
@@ -319,29 +358,64 @@ def run_speech_pipeline(job_id: str, params: dict) -> str:
         if converted is None:
             source = storage.get(job_id, INPUT)
             reference = storage.get(job_id, REFERENCE)
-            # No separation on this branch, so the input already is the voice.
-            shift = _resolve_shift(job_id, params, source, reference, "speech")
-            converted = VoiceConverter(mode="speech").convert.remote(
+            # No separation on these branches, so the input already is the voice.
+            shift = _resolve_shift(job_id, params, source, reference, conversion_mode)
+            converted = VoiceConverter(
+                mode=conversion_mode, voice=params.get("voice_profile", "")
+            ).convert.remote(
                 source_wav=source,
                 reference_wav=reference,
                 semitone_shift=shift,
                 diffusion_steps=params["diffusion_steps"],
+                inference_cfg_rate=params["cfg_rate"],
             )
             storage.put(job_id, CONVERTED, converted)
         # The mp3 encode is cheap and needs no separate state; the bar sits at
         # `converting` until the file is on the Volume.
         if not storage.exists(job_id, OUTPUT):
-            storage.put(job_id, OUTPUT, to_mp3(converted, watermark=_watermark(job_id, params)))
+            storage.put(
+                job_id,
+                OUTPUT,
+                to_mp3(
+                    converted,
+                    watermark=_watermark(job_id, params),
+                    clarity=params["clarity"],
+                ),
+            )
         data_vol.commit()
 
         jobs.update(job_id, jobs.DONE)
-        _finished(job_id, "speech", params, started)
+        _finished(job_id, mode, params, started)
         return job_id
     except Exception as exc:
         jobs.fail(job_id, _error_text(exc))
         data_vol.commit()
-        _finished(job_id, "speech", params, started, exc)
+        _finished(job_id, mode, params, started, exc)
         raise
+
+
+@app.function(image=api_image, volumes={DATA_DIR: data_vol}, timeout=PIPELINE_TIMEOUT, retries=0)
+def run_speech_pipeline(job_id: str, params: dict) -> str:
+    """A recording of somebody talking, converted with the speech checkpoint."""
+    return _convert_uploaded(job_id, params, "speech")
+
+
+@app.function(image=api_image, volumes={DATA_DIR: data_vol}, timeout=PIPELINE_TIMEOUT, retries=0)
+def run_vocal_pipeline(job_id: str, params: dict) -> str:
+    """A vocal take, converted with the singing checkpoint and nothing else done.
+
+    The `song` branch without the separator: no stem extraction, no instrumental
+    to mix back, and the result is the converted voice on its own. For anything
+    already dry — an a cappella, a recorded take, a stem somebody else split —
+    that is both faster and *better*, because a separator's output carries
+    artefacts the converter would otherwise be asked to reproduce as if they
+    were part of the singing.
+
+    Handing this branch a full mix is allowed and is not what it is for: the
+    backing track goes through Seed-VC along with the voice, which is a thing
+    worth hearing once and not a way to convert a song.
+    """
+    return _convert_uploaded(job_id, params, "vocal")
 
 
 @app.function(image=api_image, volumes={DATA_DIR: data_vol}, timeout=PIPELINE_TIMEOUT, retries=0)
@@ -385,15 +459,26 @@ def run_tts_pipeline(job_id: str, params: dict) -> str:
             # measures an uploaded one: the MMS speaker has one register per
             # language and it is nobody's in particular.
             shift = _resolve_shift(job_id, params, spoken, reference, "speech")
-            converted = VoiceConverter(mode="speech").convert.remote(
+            converted = VoiceConverter(
+                mode="speech", voice=params.get("voice_profile", "")
+            ).convert.remote(
                 source_wav=spoken,
                 reference_wav=reference,
                 semitone_shift=shift,
                 diffusion_steps=params["diffusion_steps"],
+                inference_cfg_rate=params["cfg_rate"],
             )
             storage.put(job_id, CONVERTED, converted)
         if not storage.exists(job_id, OUTPUT):
-            storage.put(job_id, OUTPUT, to_mp3(converted, watermark=_watermark(job_id, params)))
+            storage.put(
+                job_id,
+                OUTPUT,
+                to_mp3(
+                    converted,
+                    watermark=_watermark(job_id, params),
+                    clarity=params["clarity"],
+                ),
+            )
         data_vol.commit()
 
         jobs.update(job_id, jobs.DONE)
@@ -411,6 +496,7 @@ def run_tts_pipeline(job_id: str, params: dict) -> str:
 # a KeyError here instead of a job quietly running the wrong pipeline.
 PIPELINES = {
     "song": run_song_pipeline,
+    "vocal": run_vocal_pipeline,
     "speech": run_speech_pipeline,
     "tts": run_tts_pipeline,
 }

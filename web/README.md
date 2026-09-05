@@ -46,9 +46,20 @@ chứ không hardcode vào client bundle — nên nó được phục vụ **lú
 bị nhúng thẳng vào bundle lúc build. Hệ quả tiện: cùng một build chạy được cho cả
 preview lẫn production.
 
+## Chế độ "Giọng hát"
+
+Mode `vocal` là `song` bỏ bước tách nhạc nền, và khác biệt duy nhất ở frontend
+là nhãn của bước 2 (`SOURCE_LABEL` trong `app/page.tsx`) — cùng một ô chọn file,
+cùng giọng mẫu, cùng slider. Nó tồn tại vì tách nguồn tốn cả GPU lẫn chất lượng:
+stem đi ra mang theo transient bị nhoè và bóng mờ của bản phối, rồi những thứ đó
+được convert cùng với giọng. File đã là giọng thì không nên trả cái giá đó.
+
+Nó ăn theo `song` ở chỗ giữ nguyên tone (`keepsKey` trong `Advanced.tsx`) và ở
+số bước diffusion mặc định — cả hai đều convert bằng checkpoint `singing`.
+
 ## Chế độ "Văn bản"
 
-`app/components/TextInput.tsx`. Mode thứ ba (`tts`) gõ chữ thay cho chọn file —
+`app/components/TextInput.tsx`. Mode `tts` gõ chữ thay cho chọn file —
 bước 2 của form đổi, phần còn lại giữ nguyên, vì backend đọc chữ ra rồi mới đưa
 qua đúng bước chuyển giọng của mode `speech`.
 

@@ -3,6 +3,10 @@
 import { useId, useState } from "react";
 
 import {
+  CFG_RATE_MAX,
+  CFG_RATE_MIN,
+  CLARITY_MAX,
+  CLARITY_MIN,
   DIFFUSION_STEPS_MAX,
   DIFFUSION_STEPS_MIN,
   EMOTIONS,
@@ -14,6 +18,7 @@ import {
   SPEAKING_RATE_MIN,
   clamp,
   formatExpressiveness,
+  formatPercent,
   formatRate,
   formatSemitones,
   type Mode,
@@ -49,10 +54,11 @@ export function Advanced({
   const auto = params.semitoneShift === null;
   // What "no explicit shift" means differs by mode, because the backend only
   // measures one for speech (`AUTO_DETECT_MODES` in `pipeline.py`, which `tts`
-  // reaches by converting as speech). A song's vocal is mixed back over an
-  // instrumental nothing transposes, so leaving the key alone is the answer
-  // there rather than a measurement.
-  const keepsKey = mode === "song";
+  // reaches by converting as speech). Both singing branches keep the key
+  // instead: a song's vocal is mixed back over an instrumental nothing
+  // transposes, and a vocal take has a key of its own that the singer is not
+  // asking to have moved to wherever the reference happens to speak.
+  const keepsKey = mode === "song" || mode === "vocal";
 
   return (
     <div className="advanced">
@@ -200,11 +206,13 @@ export function Advanced({
 
           <span className="slider-hint">
             {auto
-              ? keepsKey
+              ? mode === "song"
                 ? "Nhạc nền không được dịch theo, nên một lượng dịch lẻ sẽ đặt giọng vào tông khác bản phối. Để nguyên là an toàn."
-                : "Đo F0 trung vị của giọng trong bài và của giọng mẫu rồi lấy chênh lệch. Chỉ tính trên đoạn có tiếng."
+                : keepsKey
+                  ? "Bản hát có key của nó. Để nguyên thì giai điệu giữ đúng tông đã thu."
+                  : "Đo F0 trung vị của giọng trong bài và của giọng mẫu rồi lấy chênh lệch. Chỉ tính trên đoạn có tiếng."
               : keepsKey
-                ? "Nam→nữ thường +12, nữ→nam thường −12. Bội số của 12 là một quãng tám, giữ đúng key với nhạc nền; các giá trị khác sẽ lệch."
+                ? "Nam→nữ thường +12, nữ→nam thường −12. Bội số của 12 là một quãng tám, giữ nguyên key; các giá trị khác sẽ lệch tông."
                 : `Giọng nói giới hạn ±${pitchLimit}: dịch xa hơn nghe méo thanh điệu.`}
           </span>
         </div>
@@ -228,6 +236,48 @@ export function Advanced({
           <span className="slider-hint">
             Cao hơn thì mượt hơn nhưng chậm hơn tuyến tính. Trên {DIFFUSION_STEPS_MAX} gần như không
             cải thiện thêm.
+          </span>
+        </label>
+
+        <label className="slider">
+          <span className="slider-label">
+            Bám giọng mẫu
+            <output>{formatPercent(params.cfgRate)}</output>
+          </span>
+          <input
+            type="range"
+            min={CFG_RATE_MIN}
+            max={CFG_RATE_MAX}
+            step={0.05}
+            value={params.cfgRate}
+            disabled={disabled}
+            onChange={(event) => onChange({ ...params, cfgRate: Number(event.target.value) })}
+          />
+          <span className="slider-hint">
+            Kéo lên thì giống giọng mẫu hơn nhưng cũng lộ chất máy hơn — model càng bị ép theo mẫu
+            thì nhiễu của nó cũng bị ép theo. Kéo xuống thì còn lại nhiều nét của giọng gốc trong
+            file. Ở giữa là chỗ hợp với hầu hết bài.
+          </span>
+        </label>
+
+        <label className="slider">
+          <span className="slider-label">
+            Độ trong
+            <output>{params.clarity <= CLARITY_MIN ? "tắt" : formatPercent(params.clarity)}</output>
+          </span>
+          <input
+            type="range"
+            min={CLARITY_MIN}
+            max={CLARITY_MAX}
+            step={0.05}
+            value={params.clarity}
+            disabled={disabled}
+            onChange={(event) => onChange({ ...params, clarity: Number(event.target.value) })}
+          />
+          <span className="slider-hint">
+            {params.clarity <= CLARITY_MIN
+              ? "0% là không lọc gì cả — đúng file model trả ra, không thêm không bớt."
+              : "Cắt ù dưới 70 Hz, hạ nhiễu nền, bớt đục quanh 300 Hz và mở tiếng ở 3–4 kHz cho rõ chữ. Chỉ áp lên giọng, nhạc nền không đụng tới."}
           </span>
         </label>
 

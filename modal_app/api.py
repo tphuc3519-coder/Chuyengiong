@@ -1,6 +1,7 @@
 """FastAPI web endpoints, served from Modal as a single ASGI app.
 
     GET  /health
+    GET  /voices
     POST /submit            multipart: input | text, reference, mode, params, consent
     GET  /status/{job_id}
     GET  /download/{job_id}
@@ -32,8 +33,8 @@ import modal
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import audit, jobs, pipeline, ratelimit, storage
-from .app import APP_NAME, DATA_DIR, api_image, app, config_secret, data_vol
+from . import audit, jobs, pipeline, ratelimit, storage, voices
+from .app import APP_NAME, DATA_DIR, MODEL_DIR, api_image, app, config_secret, data_vol, model_vol
 from .audio_utils import AudioError
 from .prosody import DEFAULT_EMOTION, DEFAULT_EXPRESSIVENESS
 from .separation import DEFAULT_SEPARATION_MODEL, SeparationError, safe_ext
@@ -76,6 +77,23 @@ web.add_middleware(
 async def health() -> dict:
     """Liveness probe. Deliberately touches no Volume and no GPU."""
     return {"status": "ok", "app": APP_NAME}
+
+
+@web.get("/voices")
+async def voice_profiles() -> dict:
+    """Trained voices on this deployment, as `{name: [mode, …]}`.
+
+    A directory listing, which is why it is served from here rather than from a
+    GPU container: `voices.py` imports nothing, so the model Volume being
+    mounted is the entire cost. Empty is the normal answer — a deployment that
+    has never run `modal_app.training` has no profiles, and every job on it
+    converts zero-shot exactly as before.
+
+    The Volume is reloaded first: training runs in a different container, and
+    without it this one would answer from whatever it saw when it started.
+    """
+    model_vol.reload()
+    return {"voices": voices.profiles(MODEL_DIR)}
 
 
 async def _read_upload(upload: UploadFile, limit: int, label: str) -> bytes:
@@ -159,21 +177,38 @@ async def submit(
     emotion: Annotated[str, Form()] = DEFAULT_EMOTION,
     expressiveness: Annotated[float, Form()] = DEFAULT_EXPRESSIVENESS,
     mode: Annotated[str, Form()] = "song",
+    # A trained voice to convert with (`modal_app.training`), or absent for the
+    # zero-shot conversion every job used before profiles existed. A name that
+    # is not usable as one is ignored rather than refused — see
+    # `pipeline.clean_params` — while a name that is usable and has no profile
+    # fails the job in the GPU container, which is where that can be known.
+    voice_profile: Annotated[str, Form()] = "",
     # Absent means auto-detect (plan §7), which is not the same as 0 — that is
     # a client explicitly asking for no shift. The pipeline measures the vocal
     # stem when this is None and reports the result through `/status`.
     semitone_shift: Annotated[int | None, Form()] = None,
     diffusion_steps: Annotated[int, Form()] = 0,
     vocal_gain_db: Annotated[float, Form()] = 0.0,
+    # How much of the sample voice to take (classifier-free guidance) and how
+    # much of the clarity chain to run on the result. `None` for both means
+    # "the default", which is not the same as 0 — 0 is a client explicitly
+    # asking for no guidance and for no post-processing.
+    cfg_rate: Annotated[float | None, Form()] = None,
+    clarity: Annotated[float | None, Form()] = None,
     separation_model: Annotated[str, Form()] = DEFAULT_SEPARATION_MODEL,
     consent: Annotated[bool, Form()] = False,
 ) -> dict:
     """Start a job. Returns as soon as it is queued.
 
-    `mode` decides what the job starts from: `song` and `speech` take the
-    uploaded `input` file, `tts` takes `text` and reads it out in the reference
-    voice. `reference` is required either way — it is the voice, which is the
-    whole product.
+    `mode` decides what the job starts from: `song`, `vocal` and `speech` take
+    the uploaded `input` file, `tts` takes `text` and reads it out in the
+    reference voice. `reference` is required either way — it is the voice, which
+    is the whole product.
+
+    `song` and `vocal` differ only in the separator: `song` splits the backing
+    track out, converts the vocal stem and mixes it back; `vocal` converts what
+    it is given and returns that, which is the right branch for a recording
+    that is already just a voice.
     """
     client = ratelimit.client_key(
         ratelimit.address_from_headers(
@@ -194,6 +229,9 @@ async def submit(
                 "semitone_shift": semitone_shift,
                 "diffusion_steps": diffusion_steps,
                 "vocal_gain_db": vocal_gain_db,
+                "cfg_rate": cfg_rate,
+                "clarity": clarity,
+                "voice_profile": voice_profile,
                 "separation_model": separation_model,
                 "source_ext": safe_ext(source.filename if source else None),
                 "language": language,
@@ -235,6 +273,7 @@ async def submit(
         reference_bytes=len(reference_bytes),
         language=params.get("language"),
         emotion=params.get("emotion"),
+        profile=params.get("voice_profile") or None,
     )
     return {
         "job_id": job_id,
@@ -298,7 +337,10 @@ async def download(job_id: str) -> Response:
 
 @app.function(
     image=api_image,
-    volumes={DATA_DIR: data_vol},
+    # The model Volume is mounted read-only in practice — `/voices` lists a
+    # directory on it and nothing here writes one. It is the whole reason that
+    # endpoint does not need a GPU container behind it.
+    volumes={DATA_DIR: data_vol, MODEL_DIR: model_vol},
     # CORS is configured while this module is imported, so the values have to
     # be in the environment before that — which is what a secret does.
     secrets=[config_secret()],

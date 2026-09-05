@@ -16,8 +16,14 @@ def test_deploy_registers_everything_the_pipeline_needs():
         "api",
         "cleanup",
         "run_song_pipeline",
+        "run_vocal_pipeline",
         "run_speech_pipeline",
         "run_tts_pipeline",
+        # The operator tools. Nothing in `api.py` calls either, which is
+        # exactly why they would otherwise be easy to leave out of a deploy and
+        # discover the next time somebody tried to train a voice.
+        "train_voice",
+        "list_voices",
     } <= set(app.registered_functions)
     assert {
         "VoiceConverter",
@@ -36,6 +42,15 @@ def test_every_engine_a_language_reads_through_is_actually_deployed():
 
     for spec in tts.LANGUAGES.values():
         assert tts.ENGINES[spec.engine].__name__ in set(app.registered_classes), spec.label
+
+
+def test_every_job_mode_has_a_pipeline_that_is_deployed():
+    """A mode in the list with no registered function behind it is a job that
+    is accepted by `/submit` and then never runs."""
+    from modal_app import jobs, pipeline
+
+    for mode in jobs.JOB_MODES:
+        assert pipeline.PIPELINES[mode].info.function_name in set(app.registered_functions)
 
 
 def test_the_cleanup_cron_sweeps_at_least_as_often_as_the_ttl():

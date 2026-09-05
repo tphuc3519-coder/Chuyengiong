@@ -13,6 +13,22 @@ the plan requires and upstream does not have:
   equal-power crossfade, which is what keeps an 8 minute song from running the
   A10G out of memory.
 
+Three things were added to it after the fact, all for the same complaint —
+that the output sounded converted rather than sung — and all named here because
+none of them is visible from the class below:
+
+* the reference is **cleaned** before it is encoded (`reference.py`). Seed-VC
+  reproduces a sample, not a voice: room tone in the reference is room tone
+  fused into every syllable of the result, and that is most of what people
+  mean when they say a result sounds artificial;
+* the speaker embedding is **averaged over every window of the reference worth
+  using**, not taken from one. A window is a sample of a speaker; the average
+  of three is a better estimate of the speaker than the best single one;
+* a voice can be **fine-tuned** (`training.py`) and loaded here by name. Zero
+  shot is one twenty-second look at somebody; a profile is a few hundred steps
+  of actually learning them, and it is the only thing in this file that changes
+  the model rather than what the model is shown.
+
 Two things differ from the plan doc, both deliberate:
 
 * `mode` is a class parameter, not an argument of `convert()`. The two modes
@@ -33,17 +49,20 @@ from typing import Any
 
 import modal
 
+from . import reference as reference_audio
+from . import voices
 from .app import MODEL_DIR, app, base_image, model_vol
 from .audio_utils import (
     CHUNK_OVERLAP_SEC,
+    DEFAULT_CFG_RATE,
     check_mode,
     check_source,
+    clamp_cfg_rate,
     clamp_diffusion_steps,
     clamp_semitone_shift,
     crossfade_concat,
     decode_audio,
     encode_wav,
-    prepare_reference,
     split_at_silence,
 )
 
@@ -138,6 +157,14 @@ class _Reference:
 )
 class VoiceConverter:
     mode: str = modal.parameter(default="singing")
+    # Which fine-tuned voice this container is for, or "" for zero shot.
+    #
+    # A class parameter and not an argument of `convert`, for the same reason
+    # `mode` is one: it decides which weights `@modal.enter()` loads, so a
+    # container can only ever be one of them. Modal keys its containers on the
+    # parameters, so `VoiceConverter(mode="speech", voice="mai")` and the
+    # zero-shot one are two warm pools rather than one that keeps reloading.
+    voice: str = modal.parameter(default="")
 
     @modal.enter()
     def load(self) -> None:
@@ -160,6 +187,13 @@ class VoiceConverter:
         self._seed_vc = seed_vc
         self.fp16 = True
         f0_condition = F0_CONDITION[self.mode]
+        # A trained voice replaces the DiT checkpoint and nothing else: the
+        # content encoder, the speaker encoder and the vocoder are all still
+        # the pretrained ones, because that is all `train.py` fine-tunes.
+        # `resolve` raises for a profile that was asked for and is not there —
+        # running zero-shot instead would produce a confident wrong answer.
+        profile = voices.resolve(MODEL_DIR, self.voice, self.mode)
+        checkpoint, config = profile if profile else (None, None)
         (
             self.model,
             self.semantic_fn,
@@ -172,8 +206,8 @@ class VoiceConverter:
             SimpleNamespace(
                 fp16=self.fp16,
                 f0_condition=f0_condition,
-                checkpoint=None,
-                config=None,
+                checkpoint=checkpoint,
+                config=config,
             )
         )
 
@@ -185,7 +219,10 @@ class VoiceConverter:
         self.overlap_samples = INNER_OVERLAP_FRAMES * self.hop_length
 
         model_vol.commit()
-        print(f"[VoiceConverter] mode={self.mode} sr={self.sr} device={self.device}")
+        print(
+            f"[VoiceConverter] mode={self.mode} sr={self.sr} device={self.device} "
+            f"voice={self.voice or 'zero-shot'}"
+        )
 
     # --- pieces of upstream inference.main, split so state is reused ------
 
@@ -218,8 +255,32 @@ class VoiceConverter:
             traversed += 30 * 16000 if traversed == 0 else chunk.size(-1) - 16000 * overlapping_time
         return torch.cat(features, dim=1)
 
-    def _encode_reference(self, reference) -> _Reference:
-        """Encode the voice sample once; every chunk reuses the result."""
+    def _style(self, wave_16k):
+        """The campplus speaker embedding of one window of reference audio."""
+        import torchaudio
+
+        feat = torchaudio.compliance.kaldi.fbank(
+            wave_16k, num_mel_bins=80, dither=0, sample_frequency=16000
+        )
+        feat = feat - feat.mean(dim=0, keepdim=True)
+        return self.campplus_model(feat.unsqueeze(0))
+
+    def _encode_reference(self, reference, extras=()) -> _Reference:
+        """Encode the voice sample once; every chunk reuses the result.
+
+        `reference` is the window the model is conditioned on — its mel, its
+        content and its length all come from that one stretch of audio, and
+        nothing else can supply them. `extras` are further windows of the same
+        recording, and they contribute to one thing only: the speaker
+        embedding, which is averaged over all of them.
+
+        That split is the whole design. Averaging a mel or a content sequence
+        across windows would be averaging two different sentences, which is
+        meaningless. Averaging speaker embeddings is what speaker verification
+        does at enrolment — the embedding of one window carries what is
+        particular to that window as well as what is particular to the person,
+        and only the second survives the mean.
+        """
         import torch
         import torchaudio
 
@@ -231,11 +292,12 @@ class VoiceConverter:
             mel = self.to_mel(ref.float())
             lengths = torch.LongTensor([mel.size(2)]).to(mel.device)
 
-            feat = torchaudio.compliance.kaldi.fbank(
-                ref_16k, num_mel_bins=80, dither=0, sample_frequency=16000
-            )
-            feat = feat - feat.mean(dim=0, keepdim=True)
-            style = self.campplus_model(feat.unsqueeze(0))
+            style = self._style(ref_16k)
+            for extra in extras:
+                window = torch.tensor(extra).unsqueeze(0).float().to(self.device)
+                style = style + self._style(torchaudio.functional.resample(window, self.sr, 16000))
+            if extras:
+                style = style / float(1 + len(extras))
 
             f0 = None
             if self.f0_condition:
@@ -345,7 +407,7 @@ class VoiceConverter:
         reference_wav: bytes,
         semitone_shift: int,
         diffusion_steps: int = 0,
-        inference_cfg_rate: float = 0.7,
+        inference_cfg_rate: float = DEFAULT_CFG_RATE,
     ) -> bytes:
         """Convert `source_wav` to the voice in `reference_wav`.
 
@@ -353,30 +415,41 @@ class VoiceConverter:
         once from the full vocal stem (Phase 5) and pass the same value here.
         `diffusion_steps` of 0 means "the default for this mode".
 
+        `inference_cfg_rate` is classifier-free guidance: how far the model is
+        pushed towards the reference and away from what it would have produced
+        unconditioned. It reaches the product as "how much of the sample voice
+        to take" — up, and the result is more clearly the target and more
+        obviously processed; down, and it keeps more of whoever is on the
+        source recording. Upstream's 0.7 is the middle of that and the default
+        here.
+
         Returns 16-bit PCM wav bytes at the model's sample rate.
         """
         import time
 
         steps = clamp_diffusion_steps(diffusion_steps, self.mode)
         shift = clamp_semitone_shift(semitone_shift, self.mode)
+        cfg_rate = clamp_cfg_rate(inference_cfg_rate)
 
         source = check_source(decode_audio(source_wav, self.sr), self.sr)
-        reference = prepare_reference(decode_audio(reference_wav, self.sr), self.sr)
+        # Cleaned, then cut into as many usable windows as the recording holds
+        # — see `reference.py`. Everything after the first is only averaged
+        # into the speaker embedding.
+        reference, extras = reference_audio.prepare(decode_audio(reference_wav, self.sr), self.sr)
 
         chunks = split_at_silence(source, self.sr)
         print(
             f"[VoiceConverter] {len(source) / self.sr:.1f}s source -> {len(chunks)} chunks, "
-            f"steps={steps} shift={shift:+d}"
+            f"steps={steps} shift={shift:+d} cfg={cfg_rate:.2f} "
+            f"reference={1 + len(extras)} window(s)"
         )
 
         started = time.time()
-        encoded_reference = self._encode_reference(reference)
+        encoded_reference = self._encode_reference(reference, extras)
         converted = []
         for i, chunk in enumerate(chunks, start=1):
             mark = time.time()
-            converted.append(
-                self._convert_chunk(chunk, encoded_reference, shift, steps, inference_cfg_rate)
-            )
+            converted.append(self._convert_chunk(chunk, encoded_reference, shift, steps, cfg_rate))
             print(
                 f"[VoiceConverter] chunk {i}/{len(chunks)} "
                 f"({len(chunk) / self.sr:.1f}s) in {time.time() - mark:.1f}s"
@@ -395,15 +468,23 @@ def main(
     mode: str = "singing",
     semitone_shift: int = 0,
     diffusion_steps: int = 0,
+    cfg_rate: float = DEFAULT_CFG_RATE,
+    voice: str = "",
 ) -> None:
-    """Standalone smoke test: two local audio files in, one wav out."""
+    """Standalone smoke test: two local audio files in, one wav out.
+
+    `--voice` loads a profile `training.py` produced, which is the A/B that
+    settles whether fine-tuning was worth the GPU minutes: same source, same
+    reference, once with and once without.
+    """
     from pathlib import Path
 
-    result = VoiceConverter(mode=mode).convert.remote(
+    result = VoiceConverter(mode=mode, voice=voice).convert.remote(
         source_wav=Path(source).read_bytes(),
         reference_wav=Path(reference).read_bytes(),
         semitone_shift=semitone_shift,
         diffusion_steps=diffusion_steps,
+        inference_cfg_rate=cfg_rate,
     )
     Path(output).write_bytes(result)
     print(f"wrote {output} ({len(result) / 1e6:.1f} MB)")

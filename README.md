@@ -1,7 +1,8 @@
 # Chuyengiong
 
-Voice conversion web app: đưa vào một bài hát (hoặc đoạn thoại, hoặc một đoạn
-văn bản) + một giọng mẫu, nhận về bản đã đổi sang giọng đó, nhạc nền giữ nguyên.
+Voice conversion web app: đưa vào một bài hát (hoặc một bản hát đã tách sẵn,
+hoặc đoạn thoại, hoặc một đoạn văn bản) + một giọng mẫu, nhận về bản đã đổi sang
+giọng đó, nhạc nền giữ nguyên.
 
 Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/implementation-plan.md).
 
@@ -19,6 +20,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 7 | Audio watermark (§8 "cân nhắc thêm") | 🟡 code xong, chờ chạy checkpoint thật |
 | 8 | Text to speech theo giọng mẫu (có tiếng Nhật) | 🟡 code xong, chờ nghe thật trên container |
 | 9 | Đọc có ngữ điệu — ngắt nghỉ, lên xuống, cảm xúc | 🟡 code xong, chờ nghe thật trên container |
+| 10 | Giọng trong hơn, bớt "AI" — làm sạch giọng mẫu, hậu kỳ, train giọng riêng, mode không tách nhạc | 🟡 code xong, chờ nghe thật trên GPU |
 
 ## Cấu trúc
 
@@ -31,6 +33,10 @@ modal_app/
 ├── conversion.py   # Seed-VC trên GPU: VoiceConverter (@app.cls)
 ├── tts.py          # văn bản → wav trên CPU: Synthesizer (MMS) + KokoroSynthesizer (tiếng Nhật)
 ├── prosody.py      # đọc thế nào: ngắt nghỉ theo dấu câu, ngữ điệu, cảm xúc — Python thuần
+├── reference.py    # làm sạch giọng mẫu trước khi nó thành timbre — numpy thuần, test được
+├── enhance.py      # chuỗi lọc "độ trong" cho giọng đã convert — ffmpeg thuần
+├── training.py     # fine-tune Seed-VC cho một giọng riêng trên GPU (công cụ vận hành)
+├── voices.py       # giọng đã train nằm ở đâu, tên nào hợp lệ — không import gì cả
 ├── mixing.py       # ffmpeg: mix vocal + nhạc nền, encode mp3
 ├── pipeline.py     # orchestration: spawn + nối các bước, cập nhật job state
 ├── storage.py      # file trên Volume + cron dọn rác
@@ -1137,3 +1143,258 @@ không ai đưa nó trở lại.
 - [ ] sau Seed-VC, ngữ điệu còn giữ được — nếu conversion nuốt mất phần lên
       xuống thì phải đo lại xem nên đẩy biên độ lên bao nhiêu
 - [ ] đo thêm thời gian CPU: mỗi câu thêm một lần pitch_shift, câu hỏi thêm bốn
+
+---
+
+## Phase 10 — Giọng trong hơn và bớt "AI"
+
+Yêu cầu vào phase này là một câu: *"làm sao để giọng trong hơn và nghe không bị
+AI hoá"*. Nó không phải một bug để sửa mà là bốn chỗ khác nhau cùng góp phần, và
+phase này đụng vào cả bốn — cộng thêm một mode mới đi kèm cùng lý do.
+
+Nguyên tắc xuyên suốt: **mọi thứ thêm vào đều kéo về 0 được.** `Độ trong` = 0
+nghĩa là không có một filter nào chạy, `Bám giọng mẫu` giữ nguyên mặc định
+upstream, `Độ biểu cảm` = 0 vẫn đọc phẳng đúng như trước. Bản audio mà app này
+trả về trước Phase 10 vẫn lấy lại được bằng cách kéo slider, chứ không phải bằng
+cách revert code.
+
+### 1. Giọng mẫu bẩn thì giọng ra bẩn — `reference.py`
+
+Đây là chỗ đóng góp lớn nhất và cũng là chỗ trước giờ không ai đụng tới.
+
+Seed-VC **không sao chép một giọng, nó sao chép một mẫu ghi âm**. Tiếng ồn nền,
+tiếng quạt laptop, tiếng ù 50 Hz từ củ sạc, tiếng vọng của một phòng nhỏ — với
+model đó không phải là "nền", đó là một phần của timbre nó được yêu cầu tái tạo.
+Nên nó dính vào từng âm tiết của kết quả, và kết quả nghe *đã qua xử lý*: rè,
+lạo xạo, nhân tạo. Chính xác là cái người ta gọi là "nghe bị AI".
+
+Trước khi mẫu được encode, nó đi qua ba phép sửa, đúng thứ tự đó:
+
+| Bước | Làm gì | Vì sao |
+|---|---|---|
+| Cắt ù | tắt hẳn dưới 40 Hz, mở dần tới 75 Hz | dưới 75 Hz không có gì của giọng người, mà có rất nhiều tiếng gõ bàn, bước chân, ù điện |
+| Trừ nhiễu | ước lượng sàn nhiễu từng dải tần bằng phân vị 15 theo thời gian, trừ đi với hệ số 1.8 và **sàn -14 dB** | tiếng nói thì to và ngắt quãng, tiếng phòng thì nhỏ và liên tục — phân vị rơi đúng vào tiếng phòng. Sàn -14 dB là thứ phân biệt "giảm ồn" với cái tiếng ọc ạch dưới nước mà ai cũng nhận ra: gate một dải về 0 rồi mở lại ở frame sau chính là cách tạo ra nó |
+| Đặt mức | chuẩn hoá RMS của *phần có tiếng* về ~-24 dBFS, không cho vượt đỉnh | không phải để to hơn — `loudnorm` cuối pipeline lo việc đó — mà vì mẫu và nguồn tới model ở mức của hai cái micro khác nhau, và mẫu nhỏ tiếng là mẫu model nhìn thấy ít hơn |
+
+Toàn bộ bằng numpy, một lượt STFT làm cả ba việc, không scipy không librosa —
+nên `tests/test_reference.py` chạy trong CI trên máy trần và đo bằng số thật:
+ù giảm còn dưới 5%, nhiễu băng rộng giảm hơn 40%, dải giọng giữ trên 70%.
+
+### 2. Chọn nhầm đoạn thì làm sạch cũng vô ích — `speech_flags`
+
+`usable_reference_window` xưa nay chấm điểm mỗi cửa sổ 20 giây bằng **mức to**.
+Có đúng một trường hợp nó sai và trường hợp đó không hiếm chút nào: bản ghi mở
+đầu bằng một tiếng động lớn — kéo ghế, gõ cửa, preamp vặn to trước khi có ai nói
+— thì đoạn to nhất được chấm là đoạn giọng đẹp nhất, và model nhận đúng 20 giây
+tiếng động đó.
+
+Không có ngưỡng âm lượng nào phân biệt được hai thứ, nên phải hỏi thêm một câu
+khác: **có tuần hoàn không**. Một frame giọng hữu thanh cắt trục 0 đúng hai lần
+mỗi chu kỳ — 0.006 số mẫu ở 140 Hz và 44.1 kHz — còn nhiễu, tiếng quạt và méo
+xén cắt cỡ một nửa số mẫu. Không có mức khuếch đại nào làm nhiễu trở nên tuần
+hoàn.
+
+Kèm một chi tiết nhỏ mà thiếu nó thì hỏng cả: **sàn âm lượng đo theo đỉnh của
+các frame có giọng, không theo đỉnh của cả file.** Nếu đo theo cả file thì một
+tiếng sập cửa làm mọi *từ* nói nhỏ sau đó rơi xuống dưới sàn, và cửa sổ được
+chọn lại chính là cái cửa. Và là phân vị 95 chứ không phải max, vì một đoạn
+nhiễu dài thì kiểu gì cũng có đúng một frame lọt qua bài kiểm tra tuần hoàn.
+
+### 3. Một cửa sổ là một mẫu của người, không phải là người — style trung bình
+
+Speaker embedding lấy từ một cửa sổ mang theo cả cái riêng của *cửa sổ đó* lẫn
+cái riêng của người. Trung bình vài cửa sổ thì phần thứ nhất triệt tiêu, phần
+thứ hai còn lại — đó chính xác là cách speaker verification vẫn enrol.
+
+Nên `reference.prepare` trả về `(cửa sổ chính, các cửa sổ phụ)`: mel, content và
+độ dài vẫn lấy từ một chỗ duy nhất (trung bình hai câu khác nhau thì vô nghĩa),
+chỉ riêng embedding CAM++ được lấy trung bình. Các cửa sổ phụ không chồng lên
+nhau, không chồng lên cửa sổ chính, và một cửa sổ dưới 50% là giọng thì không
+được nhận — trộn tiếng phòng vào embedding là đẩy nó ra xa người nói.
+
+Bản ghi ngắn (dưới 40 giây) không có cửa sổ phụ nào và không có gì thay đổi, tức
+là phần lớn các lần chạy. Cái này ăn tiền đúng ở trường hợp `prepare_reference`
+vẫn mời gọi từ đầu: *"đưa cả phút cũng được"*.
+
+### 4. Vocoder để lại dấu vết — `enhance.py`
+
+Decoder diffusion + neural vocoder rất giỏi ở giữa dải tần và cẩu thả ở hai đầu.
+Cái quay về đều đặn có: ù và trôi DC dưới 70 Hz, một lớp mờ băng rộng cỡ -50
+dBFS (sàn nhiễu của chính vocoder — làm sạch đầu vào không xử lý được nó), một
+cục dồn quanh 250–350 Hz, và tiếng gió /s/ bị thổi phồng vì nhiễu thì model tái
+tạo bằng cách sinh ra nhiễu.
+
+Một chuỗi ffmpeg, chỉ áp lên **giọng** — trong mode `song` nó nằm trước `amix`
+nên nhạc nền không bị đụng tới:
+
+```
+aformat=fltp → afftdn (bám sàn nhiễu) → highpass 70 Hz
+             → -2.5 dB @ 300 Hz → +2.5 dB @ 3.4 kHz → +1.5 dB shelf 8 kHz → de-esser
+```
+
+Thứ tự không đổi chỗ được: khử nhiễu trước mọi thứ có gain (nếu không thì boost
+lên chính cái sàn sắp bị khử), và de-esser sau cùng vì nó sửa hậu quả của cú
+nâng 3.4 kHz — de-ess trước cú nâng là đo tiếng gió chưa xảy ra.
+
+Con số ở trên là mức tại `Độ trong` = 100%; slider nhân tuyến tính, mặc định
+50%. Tại 0% hàm trả về **rỗng**, không phải "nhẹ" — `enhance.chain(0)` là chuỗi
+rỗng và graph của caller y hệt lúc chưa có module này.
+
+### 5. Không câu nào đọc giống câu nào — `prosody._jitter`
+
+Cái đuôi cuối cùng của "nghe như máy" nằm ở chỗ mọi luật trong `prosody.py` đều
+được áp *chính xác*: hai câu cùng loại, cùng vị trí trong đoạn thì ra cùng tốc
+độ, cùng cao độ, cùng khoảng lặng, tới từng mẫu. Không ai đọc như thế. Biến
+thiên tốc độ giữa các câu liền nhau của cùng một người là vài phần trăm và cao
+độ trung bình lệch nhau cỡ nửa cung — đó không phải nhiễu, đó là khác biệt giữa
+một người và một máy đếm nhịp.
+
+`_jitter` trả lại một lượng nhỏ: ±3% tốc độ, ±0.25 nửa cung, ±15% độ dài khoảng
+lặng. Bằng **hash của chính câu đó** chứ không phải random — cùng một văn bản
+phải cho ra cùng một bản thu, nếu không thì không so được với lần trước và một
+lời phàn nàn về một câu cụ thể không tái hiện được để mà sửa. Và nó nhân với
+`expressiveness` như mọi độ lệch khác, nên ở mức 0 bản đọc vẫn phẳng đúng bằng
+0.
+
+### 6. `Bám giọng mẫu` — cái nút xưa nay bị đóng cứng
+
+`inference_cfg_rate` là classifier-free guidance: cân giữa dự đoán *có nhìn thấy*
+giọng mẫu và dự đoán không nhìn thấy. Trước đây nó là `0.7` hardcode trong chữ
+ký hàm và không đường nào chạm tới.
+
+Kéo lên: giống mẫu hơn, và cũng lộ chất máy hơn — artefact của một model
+diffusion là artefact của conditioning, ép conditioning mạnh lên là ép chúng
+mạnh lên theo. Kéo xuống: còn lại nhiều nét của người trên bản gốc. 0.7 vẫn là
+mặc định vì nó là giữa khoảng dùng được, và đây là slider nằm trong `Tinh chỉnh`
+chứ không phải ngoài trang chính: hai đầu đều là setting thật và đều tệ hơn ở
+giữa với phần lớn material.
+
+### 7. Train giọng riêng — `training.py`, `voices.py`
+
+Zero-shot là nhìn một người trong 20 giây rồi làm người đó trong 4 phút. Đó là
+một việc đáng nể và nó **có trần**, và cái trần đúng là thứ người ta mô tả khi
+nói kết quả *gần giống* nhưng vẫn nghe như máy đang mặc một giọng: 20 giây không
+chứa hết quãng giọng của người đó, không chứa cái hơi ở đáy quãng, không chứa
+phụ âm của họ khi nói nhanh — nên model điền nốt bằng trung bình của tất cả
+những người nó từng học, và *trung bình của tất cả mọi người* chính là âm thanh
+của một giọng AI.
+
+Fine-tune thay chỗ đoán đó bằng dữ liệu. `train.py` của upstream được dùng
+nguyên vẹn như một thư viện, và đáng nói rõ nó làm gì vì nó không giống nghĩa
+thông thường của "train một model giọng":
+
+* nó fine-tune **DiT** (decoder diffusion) và length regulator, hết. Content
+  encoder (Whisper), speaker encoder (CAM++) và vocoder giữ nguyên;
+* nó **không cần transcript, không cần nhãn**, chỉ cần audio của một người. Tín
+  hiệu học là self-supervised: mỗi clip được đẩy qua tone converter của
+  OpenVoice sang một timbre ngẫu nhiên khác, rồi model phải dựng lại bản gốc từ
+  content của bản đã đổi cộng speaker embedding của bản gốc. Nên nó học cách đưa
+  *bất cứ thứ gì* về giọng này;
+* vài phút audio và vài trăm step là khoảng làm việc. Đây là adaptation chứ
+  không phải train từ đầu — một giờ audio không hơn năm phút mười lần, và 5000
+  step không hơn 500 step năm lần. Overfit một giọng ở đây dễ hơn underfit nhiều.
+
+Profile lưu theo **từng mode**: `speech` và `singing` là hai kiến trúc khác nhau
+ở hai sample rate khác nhau, một profile train cho cái này không phải là "kém
+hơn" khi nạp vào cái kia — nó không nạp được. Hai thư mục biến điều đó thành một
+sự thật của filesystem thay vì một luật ai đó phải nhớ.
+
+**Đây là công cụ vận hành, không phải endpoint.** Không có gì trong `api.py` khởi
+động một lần train: nó là mười phút GPU, nó cần audio mà chưa ai đặt rate limit
+lên, và câu hỏi đồng thuận cho "giữ giọng người này trên server vĩnh viễn" là
+một câu hỏi khác với câu mà form submit đang hỏi. Người trả tiền GPU chạy nó từ
+shell:
+
+```bash
+modal run -m modal_app.training --voice mai --audio ./mai.wav
+modal run -m modal_app.training --voice mai --audio ./clips --mode singing
+
+# nghe thử, có/không profile, cùng source cùng reference:
+modal run -m modal_app.conversion --source a.wav --reference b.wav --mode speech
+modal run -m modal_app.conversion --source a.wav --reference b.wav --mode speech --voice mai
+```
+
+Job hỏi bằng tên: `voice_profile=mai` trên `/submit`, và `GET /voices` liệt kê
+những gì deployment này đang có. Tên không dùng được thì bị bỏ qua (chạy
+zero-shot như mọi job trước khi có tính năng này); tên **dùng được mà không có
+profile** thì job fail trong container GPU — vì một job xin giọng đã train mà âm
+thầm chạy zero-shot sẽ cho ra kết quả *nghe có lý* và sai, và không ai biết mà
+hỏi.
+
+Audio dùng để train bị xoá ngay sau khi lưu checkpoint, cùng chỗ với thư mục
+run: một profile giọng không phải là lý do để giữ tiếng của ai đó trên server vô
+thời hạn — phần còn lại của app hết hạn audio của user sau 6 giờ.
+
+### 8. Mode `vocal` — chuyển giọng, không tách nhạc nền
+
+Đúng là `song` bỏ đi bước tách. Nghe như một tối ưu tốc độ, nhưng lý do chính
+nằm ở chất lượng: **separation không miễn phí theo cả hai chiều.** Nó tốn một
+lượt GPU, và thứ nó giao cho converter là một stem mang theo artefact mà mọi
+model tách nguồn đều để lại — transient bị nhoè, bóng mờ của bản phối còn sót
+lại — rồi những thứ đó được convert *cùng với* giọng. Một phần không nhỏ của
+việc "bài hát convert xong nghe như đã qua máy" nằm ở đấy.
+
+File đã là giọng không nên trả cả hai cái giá đó. Nên `vocal` đi thẳng vào
+conversion với checkpoint `singing` (có điều kiện F0, 44.1 kHz) và trả về đúng
+cái đó: không stem, không mix, không dịch cao độ tự động — bản hát có key của
+nó.
+
+Đưa cả một bản mix đầy đủ vào đây thì được phép và không phải mục đích của nó:
+nhạc nền sẽ đi qua Seed-VC cùng với giọng. Đó là thứ đáng nghe thử một lần chứ
+không phải một cách convert bài hát.
+
+### Ba chỗ đáng chú ý
+
+**`enhance.chain(clarity, ",")` trả về chuỗi rỗng khi clarity = 0, kể cả dấu
+phẩy.** Nghe vụn vặt, nhưng một filter graph thừa dấu phẩy là lỗi ffmpeg lúc
+chạy, trong container, trên job của người đang đợi — không phải lúc build.
+
+**Hai slider mới luôn được gửi, không bao giờ bỏ trống.** Với `semitone_shift`,
+"vắng mặt" mang nghĩa *tự đo* và khác hẳn 0. Với hai cái này thì 0 là setting
+thật (không guidance, không hậu kỳ) nên form luôn có câu trả lời, và backend
+phân biệt `None` với `0` chứ không dùng `or`.
+
+**`speech` và `vocal` chạy chung một hàm.** Chúng chỉ khác nhau đúng ở checkpoint
+nào convert (`jobs.CONVERSION_MODE`), nên `_convert_uploaded` viết một lần. Bản
+copy-paste của nó sẽ là bản mà một trong hai nhánh lặng lẽ ngừng được đóng dấu
+watermark.
+
+### Test
+
+`tests/test_reference.py`, `tests/test_enhance.py`, `tests/test_voices.py`,
+`tests/test_training.py` — cộng thêm phần mới trong `test_audio_utils`,
+`test_prosody`, `test_pipeline`, `test_api`, `test_deploy`. Tất cả chạy trong CI
+không cần GPU: phần DSP đo trên tín hiệu có đáp án tính được bằng số học, phần
+ffmpeg chạy ffmpeg thật, phần training test đúng cái nửa quyết định GPU được xem
+gì (độ dài clip mà `ft_dataset` lặng lẽ bỏ qua nếu sai, khoảng lặng, và việc từ
+chối tiêu GPU cho một bản ghi quá ngắn để học được ai).
+
+### Còn phải verify bằng tai và bằng GPU
+
+- [ ] **A/B giọng mẫu bẩn**: cùng một câu, mẫu thu bằng điện thoại trong phòng
+      có tiếng quạt, chạy trước và sau `reference.clean`. Đây là mục quan trọng
+      nhất của phase — nếu nó không nghe khác thì cả phần 1 không đáng giá
+- [ ] mẫu dài hơn 40 giây: embedding trung bình nhiều cửa sổ có ổn định hơn
+      thật không, hay chỉ là một phép trung bình không ai nghe ra
+- [ ] `Độ trong` ở 0 / 50 / 100% trên cùng một bản: 50% có phải chỗ đúng để đặt
+      mặc định không, và 100% đã quá tay chưa
+- [ ] `afftdn` trên giọng **hát** — nó bám sàn nhiễu, và đuôi reverb của một bản
+      hát có thể bị nó coi là nhiễu
+- [ ] `Bám giọng mẫu` ở 0.4 / 0.7 / 1.0: mô tả trong slider hint ("giống hơn
+      nhưng lộ chất máy hơn") là suy luận từ cách CFG hoạt động, chưa phải là
+      một phép nghe
+- [ ] train một giọng thật: 500 step trên A10G có phải ~10 phút không, và
+      checkpoint ra có nạp lại được bằng `--voice` không. **Toàn bộ nhánh
+      training chưa từng chạy** — `Trainer` được gọi đúng chữ ký của upstream ở
+      commit đã pin, nhưng chữ ký đúng không phải là đã chạy
+- [ ] profile `singing`: preset config ghi `pretrained_model` là bản `ft_ema`
+      còn inference dùng `ft_ema_v2`. Ở đây truyền thẳng checkpoint của
+      inference vào để hai bên xuất phát từ cùng một chỗ — nếu kiến trúc lệch
+      thì `load_checkpoint` sẽ báo, và fallback là bỏ `PRETRAINED` đi
+- [ ] một giọng train xong có thật sự hơn zero-shot không, và hơn bao nhiêu —
+      đây là câu hỏi quyết định tính năng này có đáng giữ hay không
+- [ ] mode `vocal` trên một bản a cappella: so với `song` trên bản mix đầy đủ
+      của cùng bài, phần giọng có sạch hơn thấy rõ không (giả thuyết của cả
+      mode nằm ở đây)
+- [ ] jitter ±3%/±0.25 nửa cung: có nghe ra "người hơn" hay chỉ là không nghe
+      thấy gì — nếu là vế sau thì tăng dần chứ đừng bỏ

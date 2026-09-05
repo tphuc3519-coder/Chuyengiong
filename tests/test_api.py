@@ -101,6 +101,53 @@ def test_the_upload_extension_reaches_the_separator(client, started):
     assert started[0]["params"]["source_ext"] == ".m4a"
 
 
+def test_the_vocal_mode_takes_a_file_and_never_reaches_the_separator(client, started):
+    """The branch that exists to skip separation: same upload, same reference,
+    and what changes is only which pipeline it is handed to."""
+    response = client.post("/submit", **upload(mode="vocal"))
+    assert response.status_code == 200
+    assert response.json()["mode"] == "vocal"
+    assert started[0]["mode"] == "vocal"
+    assert "separation_model" not in started[0]["params"]
+
+
+def test_the_new_quality_knobs_reach_the_pipeline_clamped(client, started):
+    client.post("/submit", **upload(cfg_rate="5", clarity="-2"))
+    assert started[0]["params"]["cfg_rate"] == 1.0
+    assert started[0]["params"]["clarity"] == 0.0
+
+
+def test_omitting_the_quality_knobs_is_not_the_same_as_sending_zero(client, started):
+    """A client that never learned about them gets the defaults; one that sends
+    0 is asking for no guidance and no post-processing, and means it."""
+    from modal_app import enhance
+    from modal_app.audio_utils import DEFAULT_CFG_RATE
+
+    client.post("/submit", **upload())
+    assert started[0]["params"]["cfg_rate"] == DEFAULT_CFG_RATE
+    assert started[0]["params"]["clarity"] == enhance.DEFAULT_CLARITY
+    client.post("/submit", **upload(cfg_rate="0", clarity="0"))
+    assert started[1]["params"]["cfg_rate"] == 0.0
+    assert started[1]["params"]["clarity"] == 0.0
+
+
+def test_a_voice_profile_name_is_carried_through_and_a_bad_one_is_dropped(client, started):
+    client.post("/submit", **upload(voice_profile="mai"))
+    assert started[0]["params"]["voice_profile"] == "mai"
+    client.post("/submit", **upload(voice_profile="../etc/passwd"))
+    assert started[1]["params"]["voice_profile"] == ""
+
+
+def test_listing_voices_needs_no_gpu_and_is_empty_by_default(client, monkeypatch, tmp_path):
+    """A directory listing on the model Volume. Empty is the normal answer —
+    a deployment that never ran the trainer converts zero-shot as before."""
+    monkeypatch.setattr(api, "MODEL_DIR", str(tmp_path))
+    monkeypatch.setattr(api.model_vol, "reload", lambda: None)
+    response = client.get("/voices")
+    assert response.status_code == 200
+    assert response.json() == {"voices": {}}
+
+
 def test_an_unknown_mode_is_a_400(client, started):
     response = client.post("/submit", **upload(mode="karaoke"))
     assert response.status_code == 400

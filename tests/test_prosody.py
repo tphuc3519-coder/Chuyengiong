@@ -189,7 +189,46 @@ def test_the_declination_is_centred_so_it_does_not_move_the_measured_f0():
     against the reference. A paragraph that drifted downward overall would move
     that measurement, and the shift it produces is applied to everything."""
     beats = plan([["Một.", "Hai.", "Ba.", "Bốn.", "Năm."]])
-    assert sum(beat.pitch for beat in beats) == pytest.approx(0.0, abs=0.4)
+    # 0.4 for the paragraph's final fall, plus the jitter budget: every
+    # sentence is moved by up to `JITTER_PITCH_ST` on purpose (`_jitter`), and
+    # five of them can in principle land on the same side. What the test is
+    # protecting is that nothing *systematically* drags the paragraph down.
+    budget = 0.4 + len(beats) * prosody.JITTER_PITCH_ST
+    assert sum(beat.pitch for beat in beats) == pytest.approx(0.0, abs=budget)
+
+
+def test_the_wobble_is_small_and_does_not_lean_one_way():
+    """The jitter has to be centred, or it is not jitter — it is a shift.
+
+    Measured across many different sentences rather than many runs of one:
+    `_jitter` is a hash, so the same text always gives the same numbers and
+    running it twice would only show that.
+    """
+    draws = [prosody._jitter(f"Câu số {i}.", i) for i in range(400)]
+    for slot in range(3):
+        values = [draw[slot] for draw in draws]
+        assert max(abs(value) for value in values) <= 1.0
+        assert sum(values) / len(values) == pytest.approx(0.0, abs=0.1)
+
+
+def test_two_identical_sentences_are_not_read_identically():
+    """The tell this exists to remove: a rule applied exactly."""
+    first, second = plan([["Cảm ơn nhé.", "Cảm ơn nhé."]])
+    assert first.rate != second.rate
+    assert first.pitch != second.pitch
+
+
+def test_the_same_text_is_always_read_the_same_way():
+    """…and it still has to be reproducible, or a complaint cannot be chased."""
+    assert plan([["Cảm ơn nhé.", "Hẹn gặp lại."]]) == plan([["Cảm ơn nhé.", "Hẹn gặp lại."]])
+
+
+def test_a_flat_reading_has_no_wobble_either():
+    """`expressiveness=0` is the reading this shipped with, to the sample."""
+    beats = plan([["Một.", "Hai."]], expressiveness=0)
+    assert [beat.rate for beat in beats] == [1.0, 1.0]
+    assert [beat.pitch for beat in beats] == [0.0, 0.0]
+    assert beats[0].pause_sec == pytest.approx(prosody.PAUSE_SEC[prosody.SENTENCE])
 
 
 def test_the_last_sentence_of_a_paragraph_is_read_slightly_slower():
@@ -207,7 +246,8 @@ def test_the_speaking_rate_the_user_asked_for_is_what_the_style_multiplies():
     slow = plan([["Một."]], speaking_rate=0.8)[0].rate
     fast = plan([["Một."]], speaking_rate=1.4)[0].rate
     assert slow < fast
-    assert slow == pytest.approx(0.8 * prosody.FINAL_LENGTHENING)
+    # `rel` because every sentence carries its own small wobble now.
+    assert slow == pytest.approx(0.8 * prosody.FINAL_LENGTHENING, rel=prosody.JITTER_RATE)
 
 
 def test_a_sad_read_is_slower_with_longer_gaps_than_a_cheerful_one():
@@ -281,7 +321,7 @@ def test_an_empty_paragraph_contributes_nothing():
 
 def test_a_one_sentence_paragraph_has_nowhere_to_decline_to():
     only = plan([["Một."]])[0]
-    assert only.pitch == pytest.approx(-prosody.FINAL_FALL_ST)
+    assert only.pitch == pytest.approx(-prosody.FINAL_FALL_ST, abs=prosody.JITTER_PITCH_ST)
 
 
 # --- applying it ----------------------------------------------------------
