@@ -13,6 +13,7 @@ does not drag the audio stack into the API image.
 
 from . import (  # noqa: F401  (registration)
     api,
+    beatgen,
     conversion,
     pipeline,
     separation,

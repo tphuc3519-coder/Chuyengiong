@@ -16,6 +16,7 @@ def test_deploy_registers_everything_the_pipeline_needs():
         "api",
         "cleanup",
         "run_song_pipeline",
+        "run_beat_pipeline",
         "run_vocal_pipeline",
         "run_speech_pipeline",
         "run_tts_pipeline",
@@ -27,6 +28,7 @@ def test_deploy_registers_everything_the_pipeline_needs():
     } <= set(app.registered_functions)
     assert {
         "VoiceConverter",
+        "BeatGenerator",
         "Separator",
         "Synthesizer",
         "KokoroSynthesizer",

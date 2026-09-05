@@ -46,6 +46,22 @@ chứ không hardcode vào client bundle — nên nó được phục vụ **lú
 bị nhúng thẳng vào bundle lúc build. Hệ quả tiện: cùng một build chạy được cho cả
 preview lẫn production.
 
+## Chế độ "Đổi beat"
+
+`app/components/BeatSource.tsx`. Mode `beat` thêm đúng một bước vào form (2b) và
+giữ nguyên mọi bước khác: nguồn beat là radio group hai lựa chọn, vì backend từ
+chối job mang cả hai — không có thứ tự nào giữa "file tôi vừa tải lên" và "beat
+tôi vừa mô tả" mà người dùng đoán được, nên nó là một lựa chọn chứ không phải
+hai ô độc lập.
+
+"Tải beat lên" là mặc định vì nó luôn chạy được: không cần GPU, không cần weights
+gated, và license của thứ ra lò là license người dùng đã chọn khi lấy file.
+
+Dòng chữ dưới ô mô tả không phải disclaimer — nó là thứ dễ làm người dùng thất
+vọng nhất: beat sinh ra không biết vòng hợp âm của bài, nên nó hợp với rap và
+nhạc điện tử và chỏi dần khi giọng đi giai điệu nhiều. Nói trước rẻ hơn để mỗi
+người tự phát hiện một lần.
+
 ## Chế độ "Giọng hát"
 
 Mode `vocal` là `song` bỏ bước tách nhạc nền, và khác biệt duy nhất ở frontend

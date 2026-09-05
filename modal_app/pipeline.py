@@ -2,6 +2,10 @@
 
     song:    input ──► separate ──► vocal ──► convert ──► mix ──► output.mp3
                             └────► instrumental ───────────┘
+    beat:    input ──► separate ──► vocal ──► convert ──────────► mix ──► output.mp3
+                            └────► instrumental ──► (đo BPM/key)  ↑
+             beat file ────────────────────────────► fit ─────────┘
+             hoặc mô tả ──► sinh beat ──────────────► fit ────────┘
     vocal:   input ─────────────────────────► convert ──► encode ──► output.mp3
     speech:  input ─────────────────────────► convert ──► encode ──► output.mp3
     tts:     input.txt ──► synthesize ──────► convert ──► encode ──► output.mp3
@@ -50,6 +54,12 @@ INSTRUMENTAL = "instrumental.wav"
 # What the synthesiser produced, before it has anybody's voice.
 SPOKEN = "spoken.wav"
 CONVERTED = "converted.wav"
+# The `beat` branch: the replacement backing track as it arrived (uploaded or
+# generated), and the same thing after it has been cut, transposed, stretched
+# and looped to fit the song. Both on the Volume so a restarted container does
+# not pay for the GPU that made the first one twice.
+BEAT = "beat.wav"
+BED = "bed.wav"
 OUTPUT = "output.mp3"
 
 # A 15 minute song at 44.1kHz is ~10 minutes of GPU work in the worst case;
@@ -77,6 +87,15 @@ PIPELINE_TIMEOUT = 1800
 # measurement more than an upload does — the synthetic voice has one register
 # per language and the target is as likely to be an octave off it as not.
 AUTO_DETECT_MODES = ("speech",)
+
+# Which job modes run the separator. Both of them start from a mixed recording
+# and need the voice on its own; they differ in what goes back underneath it.
+SEPARATING_MODES = ("song", "beat")
+
+# Mirrored from `beatgen.MAX_PROMPT_CHARS`, and duplicated rather than imported
+# for the reason every constant in this module is: `pipeline` runs on the API
+# image, and `beatgen` imports `stable_audio_tools`.
+BEAT_PROMPT_CHARS = 300
 
 # Job records are read by a browser that is polling; keep failure text short
 # enough to render and free of stack traces.
@@ -125,10 +144,23 @@ def clean_params(mode: str, raw: dict | None = None) -> dict:
         # this file rather than what the config happens to say later.
         "watermark": watermark.enabled(),
     }
-    if mode == "song":
+    if mode in SEPARATING_MODES:
         params["separation_model"] = check_model(
             raw.get("separation_model") or DEFAULT_SEPARATION_MODEL
         )
+    if mode == "beat":
+        # Empty means "a beat was uploaded"; `api.submit` is where the two are
+        # required to be one or the other, because only it can see the upload.
+        params["beat_prompt"] = str(raw.get("beat_prompt") or "").strip()[:BEAT_PROMPT_CHARS]
+        # -1 is "a different beat every time", which is what somebody
+        # auditioning one wants. A fixed seed is how they get the same one back
+        # after changing something else about the job.
+        try:
+            params["beat_seed"] = int(
+                raw.get("beat_seed") if raw.get("beat_seed") is not None else -1
+            )
+        except (TypeError, ValueError):
+            params["beat_seed"] = -1
     if mode == "tts":
         # The language is refused rather than defaulted when it is unknown: a
         # job that silently reads Vietnamese text with the English checkpoint
@@ -177,6 +209,9 @@ def _finished(
         # rest of the run's working files.
         profile=params.get("voice_profile") or None,
         model=params.get("separation_model"),
+        # Whether a beat was described rather than uploaded — not the words,
+        # which are the user's the same way the audio is.
+        generated_beat=bool(params.get("beat_prompt")) or None,
         # The language and the style, never the text: what was said is the
         # user's, the same way the audio is (plan §8 item 5). How it was read is
         # a setting, and knowing which styles anybody picks is the only way to
@@ -328,6 +363,112 @@ def run_song_pipeline(job_id: str, params: dict) -> str:
         jobs.fail(job_id, _error_text(exc))
         data_vol.commit()
         _finished(job_id, "song", params, started, exc)
+        raise
+
+
+@app.function(image=api_image, volumes={DATA_DIR: data_vol}, timeout=PIPELINE_TIMEOUT, retries=0)
+def run_beat_pipeline(job_id: str, params: dict) -> str:
+    """separate → (sinh beat) → convert → fit → mix. The backing track is replaced.
+
+    The same first half as `run_song_pipeline` and a different second one: the
+    original instrumental is separated out, **measured**, and then thrown away.
+    It is the timing reference, not part of the output — the singer's key and
+    tempo live in it, and a replacement bed has to match both or it is not a
+    backing track, it is a second piece of music playing at the same time.
+
+    Measured on the instrumental rather than on the vocal, deliberately. A
+    vocal on its own has almost no pulse to find — that is what the drums were
+    for — and a key estimate from one melodic line is a guess. The instrumental
+    has both, right up until the moment it is discarded.
+
+    The beat itself arrives one of two ways and the difference is one `if`: a
+    file somebody uploaded, or a description handed to a GPU. Everything after
+    that point is identical, which is the whole reason `beats.py` takes audio
+    and not a source.
+    """
+    from . import beats
+    from .conversion import VoiceConverter
+    from .mixing import mix
+    from .separation import INSTRUMENTAL_STEM, VOCAL_STEM, Separator
+
+    started = time.monotonic()
+    data_vol.reload()
+    try:
+        jobs.update(job_id, jobs.SEPARATING)
+        vocal = _done_already(job_id, VOCAL)
+        instrumental = _done_already(job_id, INSTRUMENTAL)
+        if vocal is None or instrumental is None:
+            stems = Separator(model=params["separation_model"]).separate.remote(
+                storage.get(job_id, INPUT), params["source_ext"]
+            )
+            vocal, instrumental = stems[VOCAL_STEM], stems[INSTRUMENTAL_STEM]
+            storage.put(job_id, VOCAL, vocal)
+            storage.put(job_id, INSTRUMENTAL, instrumental)
+            data_vol.commit()
+
+        beat = _done_already(job_id, BEAT)
+        if beat is None:
+            # An uploaded beat is already on the Volume under this name, put
+            # there by `_start_job`; only a described one has to be made.
+            jobs.update(job_id, jobs.GENERATING)
+            from .beatgen import BeatGenerator
+
+            beat = BeatGenerator().generate.remote(
+                prompt=params["beat_prompt"], seed=params["beat_seed"]
+            )
+            storage.put(job_id, BEAT, beat)
+            data_vol.commit()
+
+        jobs.update(job_id, jobs.CONVERTING)
+        converted = _done_already(job_id, CONVERTED)
+        if converted is None:
+            reference = storage.get(job_id, REFERENCE)
+            # Never auto-detected here, same as `song`: the bed is being fitted
+            # to the singer's key, so moving the singer would be fitting two
+            # things to each other at once.
+            shift = _resolve_shift(job_id, params, vocal, reference, "singing")
+            converted = VoiceConverter(
+                mode="singing", voice=params.get("voice_profile", "")
+            ).convert.remote(
+                source_wav=vocal,
+                reference_wav=reference,
+                semitone_shift=shift,
+                diffusion_steps=params["diffusion_steps"],
+                inference_cfg_rate=params["cfg_rate"],
+            )
+            storage.put(job_id, CONVERTED, converted)
+            data_vol.commit()
+
+        jobs.update(job_id, jobs.MIXING)
+        bed = _done_already(job_id, BED)
+        if bed is None:
+            bed, plan, source, target = beats.analyse_and_fit(beat, instrumental)
+            print(f"[beat] {job_id}: beat {source} / song {target} -> {plan}")
+            jobs.record_params(job_id, {"beat_fit": str(plan)})
+            storage.put(job_id, BED, bed)
+            data_vol.commit()
+
+        if not storage.exists(job_id, OUTPUT):
+            storage.put(
+                job_id,
+                OUTPUT,
+                mix(
+                    converted,
+                    bed,
+                    vocal_gain_db=params["vocal_gain_db"],
+                    watermark=_watermark(job_id, params),
+                    clarity=params["clarity"],
+                ),
+            )
+            data_vol.commit()
+
+        jobs.update(job_id, jobs.DONE)
+        _finished(job_id, "beat", params, started)
+        return job_id
+    except Exception as exc:
+        jobs.fail(job_id, _error_text(exc))
+        data_vol.commit()
+        _finished(job_id, "beat", params, started, exc)
         raise
 
 
@@ -496,6 +637,7 @@ def run_tts_pipeline(job_id: str, params: dict) -> str:
 # a KeyError here instead of a job quietly running the wrong pipeline.
 PIPELINES = {
     "song": run_song_pipeline,
+    "beat": run_beat_pipeline,
     "vocal": run_vocal_pipeline,
     "speech": run_speech_pipeline,
     "tts": run_tts_pipeline,

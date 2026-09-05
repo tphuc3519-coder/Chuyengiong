@@ -32,8 +32,16 @@ def started(monkeypatch):
     """Capture what `/submit` would hand to the pipeline."""
     calls = []
 
-    def fake_start(mode, params, source, reference, client):
-        calls.append({"mode": mode, "params": params, "source": source, "reference": reference})
+    def fake_start(mode, params, source, reference, client, beat=None):
+        calls.append(
+            {
+                "mode": mode,
+                "params": params,
+                "source": source,
+                "reference": reference,
+                "beat": beat,
+            }
+        )
         return "b" * 32
 
     monkeypatch.setattr(api, "_start_job", fake_start)
@@ -109,6 +117,59 @@ def test_the_vocal_mode_takes_a_file_and_never_reaches_the_separator(client, sta
     assert response.json()["mode"] == "vocal"
     assert started[0]["mode"] == "vocal"
     assert "separation_model" not in started[0]["params"]
+
+
+def beat_upload(**form):
+    """A `beat` submit with a replacement backing track attached."""
+    data = {"mode": "beat", "consent": "true", **form}
+    files = {
+        "input": ("song.m4a", b"fake-audio", "audio/mp4"),
+        "reference": ("voice.wav", b"fake-voice", "audio/wav"),
+        "beat": ("beat.wav", b"fake-beat", "audio/wav"),
+    }
+    return {"data": data, "files": files}
+
+
+def test_a_beat_job_can_bring_its_own_backing_track(client, started):
+    response = client.post("/submit", **beat_upload())
+    assert response.status_code == 200
+    assert started[0]["mode"] == "beat"
+    assert started[0]["beat"] == b"fake-beat"
+    assert started[0]["params"]["beat_prompt"] == ""
+
+
+def test_a_beat_job_can_describe_one_instead(client, started):
+    response = client.post("/submit", **upload(mode="beat", beat_prompt="boom bap, 90 BPM"))
+    assert response.status_code == 200
+    assert started[0]["beat"] is None
+    assert started[0]["params"]["beat_prompt"] == "boom bap, 90 BPM"
+
+
+def test_a_beat_job_with_neither_source_is_a_400(client, started):
+    """The branch has nothing to put under the voice, and finding that out in a
+    GPU container three minutes in is the wrong place."""
+    response = client.post("/submit", **upload(mode="beat"))
+    assert response.status_code == 400
+    assert "beat" in response.json()["detail"]
+    assert started == []
+
+
+def test_a_beat_job_with_both_sources_is_a_400_not_a_precedence_rule(client, started):
+    """Refused rather than resolved silently: no ordering between "the file I
+    uploaded" and "the beat I described" is one a user would guess."""
+    response = client.post("/submit", **beat_upload(beat_prompt="lo-fi house"))
+    assert response.status_code == 400
+    assert started == []
+
+
+def test_the_other_modes_ignore_a_beat_that_was_sent_anyway(client, started):
+    assert client.post("/submit", **beat_upload(mode="song")).status_code == 200
+    assert started[0]["beat"] is None
+
+
+def test_a_beat_seed_reaches_the_pipeline(client, started):
+    client.post("/submit", **upload(mode="beat", beat_prompt="trap", beat_seed="7"))
+    assert started[0]["params"]["beat_seed"] == 7
 
 
 def test_the_new_quality_knobs_reach_the_pipeline_clamped(client, started):

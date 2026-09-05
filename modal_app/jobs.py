@@ -1,8 +1,8 @@
 """Job state machine, stored in `modal.Dict`.
 
     queued → separating ⎫
-             synthesizing ⎬→ converting → mixing → done
-                          ⎭                     ↘ failed
+             synthesizing ⎬→ generating → converting → mixing → done
+                          ⎭                                  ↘ failed
 
 Transitions may skip forward but never go back: the `speech` branch has no
 separation and no mixing, so it runs `queued → converting → done` through the
@@ -30,6 +30,10 @@ from .app import job_dict
 QUEUED = "queued"
 SEPARATING = "separating"
 SYNTHESIZING = "synthesizing"
+# Making a beat that did not exist before. Only the `beat` branch enters it, and
+# only when it was given a description rather than a file — an uploaded beat
+# needs no GPU and skips straight to converting.
+GENERATING = "generating"
 CONVERTING = "converting"
 MIXING = "mixing"
 DONE = "done"
@@ -39,7 +43,7 @@ FAILED = "failed"
 # by any single path through it — `separating` and `synthesizing` are the two
 # branches' preparation steps and no job ever sees both. `failed` is not in
 # here: it is reachable from any non-terminal state and is compared separately.
-ORDER = (QUEUED, SEPARATING, SYNTHESIZING, CONVERTING, MIXING, DONE)
+ORDER = (QUEUED, SEPARATING, SYNTHESIZING, GENERATING, CONVERTING, MIXING, DONE)
 STATUSES = (*ORDER, FAILED)
 TERMINAL = frozenset({DONE, FAILED})
 
@@ -47,7 +51,15 @@ TERMINAL = frozenset({DONE, FAILED})
 # numbers (§4 lists the value each step ends on, §5's pipeline the value it
 # starts on); these are §5's, because that is the code that calls `update`.
 # They only exist so the bar keeps moving — do not read them as a real estimate.
-PROGRESS = {QUEUED: 0, SEPARATING: 5, SYNTHESIZING: 10, CONVERTING: 30, MIXING: 75, DONE: 100}
+PROGRESS = {
+    QUEUED: 0,
+    SEPARATING: 5,
+    SYNTHESIZING: 10,
+    GENERATING: 20,
+    CONVERTING: 30,
+    MIXING: 75,
+    DONE: 100,
+}
 
 # The user-facing job modes, which are *not* the conversion modes: a `song` job
 # separates stems and then converts with the singing checkpoint. Phase 3 maps
@@ -67,8 +79,19 @@ PROGRESS = {QUEUED: 0, SEPARATING: 5, SYNTHESIZING: 10, CONVERTING: 30, MIXING: 
 # processed. A recording that is already just a voice should not pay either
 # price, so `vocal` skips straight to the conversion and returns it as-is: no
 # stem, no mix, and the take keeps its own key.
-JOB_MODES = ("song", "vocal", "speech", "tts")
-CONVERSION_MODE = {"song": "singing", "vocal": "singing", "speech": "speech", "tts": "speech"}
+#
+# `beat` is `song` with the instrumental thrown away and a different one put
+# back: same separation, same conversion, and then the original backing track is
+# replaced rather than mixed. It converts as `singing` for the same reason
+# `song` does — it is somebody singing.
+JOB_MODES = ("song", "beat", "vocal", "speech", "tts")
+CONVERSION_MODE = {
+    "song": "singing",
+    "beat": "singing",
+    "vocal": "singing",
+    "speech": "speech",
+    "tts": "speech",
+}
 
 
 class JobError(RuntimeError):
