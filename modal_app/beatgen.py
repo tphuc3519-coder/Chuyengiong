@@ -384,8 +384,13 @@ class BeatGenerator:
         audio = output.to(torch.float32).cpu().numpy()
         audio = audio.reshape(-1, audio.shape[-1]).mean(axis=0)
         audio = audio[: int(length * self.sample_rate)]
+        # A gentle guard and nothing more. Normalising by **peak** here is what
+        # made a bass-heavy generation come out as mud: peak normalisation of a
+        # signal whose loudest thing is one low note sets the whole level by
+        # that note and leaves the rest small. Balance is `beats.balance`'s
+        # job, and it runs after `stretch` has transposed this — see there.
         peak = float(np.abs(audio).max())
-        if peak > 0:
+        if peak > 0.95:
             audio = audio / peak * 0.95
 
         source = f"init {clamp_noise_level(init_noise_level):.0f}" if init_wav else "from scratch"

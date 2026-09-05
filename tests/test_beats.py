@@ -242,3 +242,108 @@ def test_transposing_the_beat_moves_its_pitch():
 def test_an_empty_beat_is_a_beat_error_and_not_an_ffmpeg_one():
     with pytest.raises(beats.BeatError):
         beats.fit(b"", track(), track(), 10.0)
+
+
+# --- tonal balance ---------------------------------------------------------
+
+
+def low_share(audio: np.ndarray, cutoff: float = beats.LOW_HZ) -> float:
+    """Share of the power sitting below `cutoff`. The number that went wrong."""
+    spectrum = np.abs(np.fft.rfft(audio)) ** 2
+    freqs = np.fft.rfftfreq(len(audio), 1.0 / SR)
+    return float(spectrum[freqs < cutoff].sum() / spectrum.sum())
+
+
+def bassy(seconds: float = 4.0) -> np.ndarray:
+    """The shape the measurement found: one low note carrying almost everything.
+
+    73 Hz because that is where the real job's loudest bin sat — D2, the root
+    of the song it was made for.
+    """
+    time = np.arange(int(seconds * SR)) / SR
+    rng = np.random.default_rng(0)
+    audio = (
+        np.sin(2 * np.pi * 73 * time)
+        + 0.10 * np.sin(2 * np.pi * 440 * time)
+        + 0.03 * rng.standard_normal(len(time))
+    )
+    return (audio / np.abs(audio).max() * 0.95).astype(np.float32)
+
+
+@needs_ffmpeg
+def test_a_bed_that_is_almost_all_bass_is_pulled_back_to_the_target():
+    """The measured failure, as a test.
+
+    A finished job came back with 71.9% of its power between 40 and 120 Hz
+    where a human arrangement of the same song had 23.5%, and 5.3% in the
+    2-6 kHz band where that reference had 16.0%. Mud, with the singer behind
+    it.
+    """
+    before = bassy()
+    assert low_share(before) > 0.9, "the fixture is not the failure being tested"
+
+    fixed, note = beats.balance(encode_wav(before, SR), SR)
+    after = decode_audio(fixed, SR)
+
+    assert low_share(after) == pytest.approx(beats.LOW_SHARE_TARGET, abs=0.03)
+    assert "->" in note and "shelf" in note
+
+
+@needs_ffmpeg
+def test_a_bed_that_is_already_balanced_keeps_its_shelf_flat():
+    """No shelf where none is needed. This runs on every generated bed, and a
+    filter that always fires is a filter that dulls the ones that were fine."""
+    time = np.arange(4 * SR) / SR
+    rng = np.random.default_rng(1)
+    even = (0.3 * np.sin(2 * np.pi * 73 * time) + 0.4 * rng.standard_normal(len(time))).astype(
+        np.float32
+    )
+    assert low_share(even) < beats.LOW_SHARE_TARGET
+
+    fixed, note = beats.balance(encode_wav(even / np.abs(even).max() * 0.9, SR), SR)
+    after = decode_audio(fixed, SR)
+    # Untouched above the sub, so the share barely moves.
+    assert low_share(after) == pytest.approx(low_share(even), abs=0.02)
+    assert "+0.0 dB" in note
+
+
+@needs_ffmpeg
+def test_the_sub_goes_whatever_the_rest_of_the_spectrum_is_doing():
+    """Rumble that survives into `mixing` is rumble `loudnorm` turns *up*:
+    K-weighting barely hears it, so it costs headroom and buys nothing."""
+    time = np.arange(4 * SR) / SR
+    rumble = (0.6 * np.sin(2 * np.pi * 12 * time) + 0.4 * np.sin(2 * np.pi * 500 * time)).astype(
+        np.float32
+    )
+    after = decode_audio(beats.balance(encode_wav(rumble, SR), SR)[0], SR)
+    assert low_share(after, cutoff=20.0) < 0.01
+
+
+@needs_ffmpeg
+def test_the_level_is_set_by_rms_and_the_peak_is_only_a_ceiling():
+    """The step that replaces peak normalisation, which is where this started.
+
+    Two beds with the same RMS and very different peaks used to come out at
+    very different loudnesses — the one with a single tall transient got turned
+    down to fit it, and arrived under the vocal as a whisper.
+    """
+    time = np.arange(4 * SR) / SR
+    rng = np.random.default_rng(2)
+    even = 0.2 * rng.standard_normal(len(time))
+    spiky = even.copy()
+    spiky[SR] = 0.99  # one transient, nothing else different
+
+    a = decode_audio(beats.balance(encode_wav(even.astype(np.float32), SR), SR)[0], SR)
+    b = decode_audio(beats.balance(encode_wav(spiky.astype(np.float32), SR), SR)[0], SR)
+    rms = lambda x: float(np.sqrt((x**2).mean()))  # noqa: E731
+    assert rms(a) == pytest.approx(rms(b), rel=0.05)
+    assert np.abs(a).max() <= beats.BALANCE_PEAK + 1e-3
+    assert np.abs(b).max() <= beats.BALANCE_PEAK + 1e-3
+
+
+@needs_ffmpeg
+def test_silence_is_refused_rather_than_divided_by():
+    with pytest.raises(beats.BeatError):
+        beats.balance(encode_wav(np.zeros(SR, dtype=np.float32), SR), SR)
+    with pytest.raises(beats.BeatError):
+        beats.balance(b"")

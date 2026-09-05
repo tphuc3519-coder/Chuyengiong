@@ -533,6 +533,14 @@ def _beat_bed(job_id: str, params: dict, instrumental: bytes, beat: bytes | None
         return bed
     bed, plan, beat_track, song = beats.analyse_and_fit(beat, instrumental)
     note = f"beat {beat_track} / song {song} -> {plan}"
+    # Only what came off a GPU. An uploaded beat is somebody's finished
+    # production; the generator's output is unmastered by construction, and
+    # measuring it here rather than inside `beatgen` is deliberate — `stretch`
+    # has already transposed it by then, so this reads the spectrum the mix
+    # will actually be handed.
+    if params["beat_source"] in GENERATING_SOURCES:
+        bed, balance_note = beats.balance(bed)
+        note = f"{note}; balance {balance_note}"
     print(f"[beat] {job_id}: {note}")
     jobs.record_params(job_id, {"beat_fit": note})
     storage.put(job_id, BED, bed)
