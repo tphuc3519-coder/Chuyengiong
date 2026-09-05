@@ -188,7 +188,13 @@ async def submit(
     # Absent means it is to be generated from `beat_prompt`, and `/submit`
     # refuses a `beat` job that has neither and one that has both.
     beat: Annotated[UploadFile | None, File()] = None,
+    # Which of the three: a file, a description, or the song's own harmony
+    # rebuilt from scratch. Named rather than inferred from which field arrived
+    # — `remake` sends neither, so there is nothing to infer it from.
+    beat_source: Annotated[str, Form()] = "",
     beat_prompt: Annotated[str, Form()] = "",
+    # Which kind of arrangement `remake` plays. `auto` picks from the tempo.
+    arrange_style: Annotated[str, Form()] = "",
     # -1 is a different beat every time. A fixed value gets the same one back.
     beat_seed: Annotated[int, Form()] = -1,
     text: Annotated[str, Form()] = "",
@@ -235,8 +241,9 @@ async def submit(
 
     `beat` is `song` with the backing track replaced: it separates the same way,
     measures the original instrumental for tempo and key, and then mixes the
-    converted voice over a different bed — either the `beat` file, or one
-    generated from `beat_prompt`. Exactly one of those two is required.
+    converted voice over a different bed. `beat_source` says where that bed
+    comes from — an uploaded `beat` file, music generated from `beat_prompt`, or
+    the song's own chords rebuilt on synthesised instruments.
     """
     client = ratelimit.client_key(
         ratelimit.address_from_headers(
@@ -259,6 +266,8 @@ async def submit(
                 "vocal_gain_db": vocal_gain_db,
                 "cfg_rate": cfg_rate,
                 "clarity": clarity,
+                "beat_source": beat_source,
+                "arrange_style": arrange_style,
                 "beat_prompt": beat_prompt,
                 "beat_seed": beat_seed,
                 "voice_profile": voice_profile,
@@ -288,21 +297,29 @@ async def submit(
         source_bytes = await _read_upload(source, MAX_INPUT_BYTES, "input")
     reference_bytes = await _read_upload(reference, MAX_REFERENCE_BYTES, "reference")
 
-    # Exactly one beat source, and only this layer can tell: `clean_params` sees
-    # the prompt but never the upload. Both is refused rather than resolved by a
-    # precedence rule nobody would guess, and neither is refused because the
-    # branch has nothing to put under the voice.
+    # What each source requires, checked here because only this layer can see the
+    # upload — `clean_params` gets the prompt and never the file. Refused rather
+    # than resolved by a precedence rule: no ordering between "the file I sent"
+    # and "the beat I described" is one anybody would guess.
     beat_bytes = None
     if mode == "beat":
-        described = bool(params.get("beat_prompt"))
-        if beat is not None and described:
-            raise HTTPException(400, "send a beat file or a description of one, not both")
-        if beat is None and not described:
-            raise HTTPException(
-                400, "this mode needs a beat: upload one, or describe the beat to make"
-            )
-        if beat is not None:
+        source_of_beat = params["beat_source"]
+        if source_of_beat == "upload":
+            if beat is None:
+                raise HTTPException(400, "this mode needs a beat file, or a different source")
             beat_bytes = await _read_upload(beat, MAX_BEAT_BYTES, "beat")
+        elif source_of_beat == "generate":
+            if not params.get("beat_prompt"):
+                raise HTTPException(400, "describe the beat to generate, or upload one")
+            if beat is not None:
+                raise HTTPException(400, "send a beat file or a description of one, not both")
+        elif beat is not None:
+            # `remake` builds the bed out of the song itself, so a file sent with
+            # it would be silently ignored — which is the failure where somebody
+            # uploads a beat and wonders why they cannot hear it.
+            raise HTTPException(
+                400, "this source rebuilds the song's own backing track; no beat file is used"
+            )
 
     job_id = _start_job(mode, params, source_bytes, reference_bytes, client, beat_bytes)
     # The audit trail proper (plan §8 item 5): who asked, when, for what shape
@@ -319,7 +336,7 @@ async def submit(
         reference_bytes=len(reference_bytes),
         # How the bed got here, never what it was asked to sound like.
         beat_bytes=len(beat_bytes) if beat_bytes else None,
-        generated_beat=bool(params.get("beat_prompt")) or None,
+        beat_source=params.get("beat_source"),
         language=params.get("language"),
         emotion=params.get("emotion"),
         profile=params.get("voice_profile") or None,

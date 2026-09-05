@@ -131,7 +131,7 @@ def beat_upload(**form):
 
 
 def test_a_beat_job_can_bring_its_own_backing_track(client, started):
-    response = client.post("/submit", **beat_upload())
+    response = client.post("/submit", **beat_upload(beat_source="upload"))
     assert response.status_code == 200
     assert started[0]["mode"] == "beat"
     assert started[0]["beat"] == b"fake-beat"
@@ -139,27 +139,63 @@ def test_a_beat_job_can_bring_its_own_backing_track(client, started):
 
 
 def test_a_beat_job_can_describe_one_instead(client, started):
-    response = client.post("/submit", **upload(mode="beat", beat_prompt="boom bap, 90 BPM"))
+    response = client.post(
+        "/submit", **upload(mode="beat", beat_source="generate", beat_prompt="boom bap, 90 BPM")
+    )
     assert response.status_code == 200
     assert started[0]["beat"] is None
     assert started[0]["params"]["beat_prompt"] == "boom bap, 90 BPM"
 
 
-def test_a_beat_job_with_neither_source_is_a_400(client, started):
+def test_a_beat_job_can_rebuild_the_songs_own_backing_track(client, started):
+    """The third source sends neither a file nor a description — everything it
+    needs is in the song, which is the whole idea."""
+    response = client.post(
+        "/submit", **upload(mode="beat", beat_source="remake", arrange_style="lofi")
+    )
+    assert response.status_code == 200
+    assert started[0]["beat"] is None
+    assert started[0]["params"]["beat_source"] == "remake"
+    assert started[0]["params"]["arrange_style"] == "lofi"
+
+
+def test_an_upload_source_with_no_file_is_a_400(client, started):
     """The branch has nothing to put under the voice, and finding that out in a
     GPU container three minutes in is the wrong place."""
-    response = client.post("/submit", **upload(mode="beat"))
+    response = client.post("/submit", **upload(mode="beat", beat_source="upload"))
     assert response.status_code == 400
     assert "beat" in response.json()["detail"]
+    assert started == []
+
+
+def test_a_generate_source_with_no_description_is_a_400(client, started):
+    response = client.post("/submit", **upload(mode="beat", beat_source="generate"))
+    assert response.status_code == 400
     assert started == []
 
 
 def test_a_beat_job_with_both_sources_is_a_400_not_a_precedence_rule(client, started):
     """Refused rather than resolved silently: no ordering between "the file I
     uploaded" and "the beat I described" is one a user would guess."""
-    response = client.post("/submit", **beat_upload(beat_prompt="lo-fi house"))
+    response = client.post(
+        "/submit", **beat_upload(beat_source="generate", beat_prompt="lo-fi house")
+    )
     assert response.status_code == 400
     assert started == []
+
+
+def test_a_beat_file_sent_to_the_remake_source_is_refused_not_ignored(client, started):
+    """Silently ignoring it is the failure where somebody uploads a beat and
+    spends the run wondering why they cannot hear it."""
+    response = client.post("/submit", **beat_upload(beat_source="remake"))
+    assert response.status_code == 400
+    assert started == []
+
+
+def test_an_unknown_source_falls_back_to_the_one_that_needs_no_model(client, started):
+    response = client.post("/submit", **beat_upload(beat_source="telepathy"))
+    assert response.status_code == 200
+    assert started[0]["params"]["beat_source"] == "upload"
 
 
 def test_the_other_modes_ignore_a_beat_that_was_sent_anyway(client, started):
@@ -168,7 +204,10 @@ def test_the_other_modes_ignore_a_beat_that_was_sent_anyway(client, started):
 
 
 def test_a_beat_seed_reaches_the_pipeline(client, started):
-    client.post("/submit", **upload(mode="beat", beat_prompt="trap", beat_seed="7"))
+    client.post(
+        "/submit",
+        **upload(mode="beat", beat_source="generate", beat_prompt="trap", beat_seed="7"),
+    )
     assert started[0]["params"]["beat_seed"] == 7
 
 
