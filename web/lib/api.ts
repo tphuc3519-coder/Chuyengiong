@@ -92,18 +92,7 @@ async function offlineAs<T>(step: keyof typeof OFFLINE, work: () => Promise<T>):
   }
 }
 
-/**
- * What `/api/config` answers: where Modal is, and what that deployment can do.
- *
- * One request, not two. `beatGenerator` used to be a second, cross-origin
- * `GET ${apiBase}/health` from the browser — and that request fails on CORS or
- * on a dropped connection in exactly the same shape as a deployment without the
- * generator, so a working backend and a blocked request were indistinguishable
- * here. The probe now happens server side inside `/api/config`.
- */
-export type Config = { apiBase: string; beatGenerator: boolean };
-
-let configPromise: Promise<Config> | null = null;
+let apiBasePromise: Promise<string> | null = null;
 
 // The smallest request the app makes, and the one every other request waits on:
 // nothing can be uploaded or downloaded until it says where Modal is. `watch`
@@ -116,7 +105,7 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchConfig(): Promise<Config> {
+async function fetchApiBase(): Promise<string> {
   for (let attempt = 1; ; attempt++) {
     try {
       const response = await fetch("/api/config", { cache: "no-store" });
@@ -124,7 +113,7 @@ async function fetchConfig(): Promise<Config> {
       if (!response.ok || !body?.apiBase) {
         throw new ApiError(response.status, body?.error ?? "Máy chủ xử lý chưa được cấu hình.");
       }
-      return { apiBase: body.apiBase as string, beatGenerator: Boolean(body?.beatGenerator) };
+      return body.apiBase as string;
     } catch (error) {
       // A reply is an answer, however unwelcome: MODAL_API_URL is unset on the
       // deployment and asking three times will not set it. Only a request that
@@ -135,39 +124,47 @@ async function fetchConfig(): Promise<Config> {
   }
 }
 
-/** The deployment's configuration, fetched once per page load and remembered. */
-export function config(): Promise<Config> {
-  configPromise ??= offlineAs("config", () => fetchConfig()).catch((error) => {
-    configPromise = null; // let the next attempt retry rather than cache the failure
+/** The Modal base URL, fetched once per page load and then remembered. */
+export function apiBase(): Promise<string> {
+  apiBasePromise ??= offlineAs("config", () => fetchApiBase()).catch((error) => {
+    apiBasePromise = null; // let the next attempt retry rather than cache the failure
     throw error;
   });
-  return configPromise;
-}
-
-/** The Modal base URL. */
-export async function apiBase(): Promise<string> {
-  return (await config()).apiBase;
+  return apiBasePromise;
 }
 
 /**
  * What the deployment can do, asked rather than assumed.
  *
- * `beat_generator` was a build-time constant in `params.ts` for one commit —
- * two flags, in two repositories, that had to be flipped together. A UI
- * offering a source the API refuses is a worse failure than either flag being
- * wrong alone, so the deployment is asked instead.
+ * `BEAT_GENERATOR_ENABLED` was a build-time constant in `params.ts` for one
+ * commit — two flags, in two repositories, that had to be flipped together. A
+ * UI offering a source the API refuses is a worse failure than either flag
+ * being wrong alone, so the deployment is asked instead.
  *
- * Never throws: a config that did not load is a form that cannot submit
- * anyway, and the page says so through the submit path. Here, not knowing
- * means not offering.
+ * The asking is same-origin, and the actual probe of `${apiBase}/health`
+ * happens inside that route. It used to happen right here, in the browser, and
+ * a cross-origin request that is blocked or dropped is indistinguishable from a
+ * deployment without the generator — which is how a working backend showed up
+ * as a missing button.
+ *
+ * Fetched once per page load, and never throws: not knowing means not
+ * offering, and the form still works.
  */
 export type Capabilities = { beatGenerator: boolean };
 
+let capabilitiesPromise: Promise<Capabilities> | null = null;
+
 export function capabilities(): Promise<Capabilities> {
-  return config().then(
-    ({ beatGenerator }) => ({ beatGenerator }),
-    () => ({ beatGenerator: false }),
-  );
+  capabilitiesPromise ??= (async () => {
+    try {
+      const response = await fetch("/api/capabilities", { cache: "no-store" });
+      const body = await response.json();
+      return { beatGenerator: Boolean(body?.beatGenerator) };
+    } catch {
+      return { beatGenerator: false };
+    }
+  })();
+  return capabilitiesPromise;
 }
 
 function detail(body: string, fallback: string): string {
