@@ -180,9 +180,6 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
     if (input.params.beatSource === "generate") {
       form.set("beat_prompt", input.params.beatPrompt);
       form.set("beat_seed", String(input.params.beatSeed));
-    } else if (input.params.beatSource === "remake") {
-      form.set("arrange_style", input.params.arrangeStyle);
-      form.set("beat_seed", String(input.params.beatSeed));
     } else if (input.beat) {
       form.set("beat", input.beat, input.beat.name);
     }

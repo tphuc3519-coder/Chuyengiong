@@ -81,7 +81,6 @@ export default function Page() {
   const beatMode = mode === "beat" || mode === "rebeat";
   const hasBeat =
     !beatMode ||
-    params.beatSource === "remake" ||
     (params.beatSource === "generate" ? params.beatPrompt.trim().length > 0 : beat !== null);
   const ready =
     hasSource && hasBeat && !tooLong && (!needsVoice || reference !== null) && consent && !busy;

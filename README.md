@@ -22,9 +22,10 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 9 | Đọc có ngữ điệu — ngắt nghỉ, lên xuống, cảm xúc | 🟡 code xong, chờ nghe thật trên container |
 | 10 | Giọng trong hơn, bớt "AI" — làm sạch giọng mẫu, hậu kỳ, train giọng riêng, mode không tách nhạc | 🟡 code xong, chờ nghe thật trên GPU |
 | 11 | Đổi beat — đo BPM/tông, khớp beat có sẵn hoặc sinh beat mới | 🟡 code xong, chờ nghe thật trên GPU |
-| 12 | Phối lại bài gốc — đọc vòng hợp âm rồi dựng lại bằng tiếng tự tổng hợp | 🟡 code xong, chờ nghe thật |
+| 12 | Phối lại bài gốc — đọc vòng hợp âm rồi dựng lại bằng tiếng tự tổng hợp | 🔴 **đã gỡ** — không đạt chất lượng, xem 13.2 |
 | 13 | Mode "Đổi beat" đứng riêng — giữ nguyên giọng gốc, không cần giọng mẫu | 🟡 code xong, chờ chạy thật |
 | 13.1 | Sửa deploy đỏ: image của beatgen chặn cả ba phase | 🟢 deploy xanh lại, sinh beat tắt sau cờ |
+| 13.2 | Nghe thật lần đầu: gỡ "Phối lại", sửa tempo sai 3:2 | 🟢 đo trên nhạc thật |
 
 ## Cấu trúc
 
@@ -40,8 +41,6 @@ modal_app/
 ├── reference.py    # làm sạch giọng mẫu trước khi nó thành timbre — numpy thuần, test được
 ├── enhance.py      # chuỗi lọc "độ trong" cho giọng đã convert — ffmpeg thuần
 ├── analysis.py     # đo BPM, vị trí phách và tông của một bản nhạc — numpy thuần
-├── chords.py       # đọc vòng hợp âm, giới hạn trong tông đã đo — numpy thuần
-├── arrange.py      # dựng lại bản phối mới từ vòng hợp âm — tổng hợp bằng numpy
 ├── beats.py        # cắt/dịch/kéo/lặp một beat cho khớp bài — ffmpeg thuần
 ├── beatgen.py      # sinh beat mới từ mô tả (Stable Audio Open) trên GPU
 ├── training.py     # fine-tune Seed-VC cho một giọng riêng trên GPU (công cụ vận hành)
@@ -1873,3 +1872,84 @@ Lúc đó: `BEAT_GENERATOR=1` và `HF_TOKEN` trên deployment, và
 
 Hai nguồn beat còn lại — tải lên và phối lại — không cần model nào, không cần
 image nào, và chạy được ngay.
+
+---
+
+## 13.2 — Lần đầu nghe trên nhạc thật
+
+Một bản Blue Bird chạy qua mode đổi beat, đặt cạnh bản phối rock của Ryu No
+Kage. Nhận xét của người dùng: *"beat hoàn toàn lạc quẻ"*, và *"giọng AI người
+ta trong veo, còn bản mình thì…"*. Đo hai file cạnh nhau thì thấy cả hai đều
+đúng, và số đo chỉ thẳng vào chỗ hỏng:
+
+| | Ryu No Kage | Bản của app |
+|---|---|---|
+| Rolloff 99% | 9 324 Hz | **4 027 Hz** |
+| Năng lượng < 120 Hz | 23.5 % | **55.5 %** |
+| 500 Hz – 2 kHz | 37.7 % | 19.6 % |
+| 2 – 6 kHz (độ rõ chữ) | 16.0 % | **5.2 %** |
+| Đỉnh | 0.763 | **1.280** (+2.1 dBFS) |
+| Tempo | ~154 BPM | **76 BPM** |
+
+### Gỡ "Phối lại bài gốc"
+
+Phase 12 dựng lại bản phối bằng tổng hợp cộng hợp — cộng các hoạ âm hình sin.
+Thứ nó bị đem ra so là một bản phối rock có guitar điện, trống thật, bass thật.
+Khoảng cách đó không phải khoảng cách tinh chỉnh: nó là khoảng cách giữa *sinh
+sóng bằng số học* và *một thư viện sample thu từ nhạc cụ thật*, và không có hằng
+số nào sửa được.
+
+README của Phase 12 đã viết đúng cái trần đó ("một bản phối lập trình sạch sẽ,
+không phải một bản production"). Nhưng viết trần vào README không cứu được việc
+nó được đưa ra như một lựa chọn ngang hàng trong UI, và người dùng có lý khi
+mong đợi hơn thế. Nên nó bị **gỡ**, không phải đánh bóng: `arrange.py`,
+`chords.py` và test của chúng đi hẳn.
+
+Còn lại hai nguồn beat, và `upload` mới là nguồn chạm được tới cái bar đó — vì ở
+đó bản phối là do người làm ra. App chỉ làm phần nó làm được: đo, khớp tông và
+nhịp, ghép.
+
+### Sửa lỗi tempo 3:2 — phần phải sửa dù có gỡ hay không
+
+`analysis.py` là nền của **cả** đường tải beat lên, nên lỗi của nó không đi cùng
+`arrange.py`.
+
+Trên bản rock 154 BPM, autocorrelation đỉnh gần bằng nhau ở chu kỳ phách và ở
+**một rưỡi** lần chu kỳ đó — backbeat đặt onset mạnh lên cả hai lưới. Chấm điểm
+cũ chọn 103.4 BPM (score 0.4817) thay vì 152.0 (0.4774): **sai vì 0.9%.**
+
+Và sai 3:2 là kiểu sai không sống chung được. Hai ô nhịp của bed ở 103 trải dài
+đúng ba ô nhịp của bài ở 154 — không phải trôi dần, mà là khác nhịp hẳn. Sai
+quãng tám thì lành hơn nhiều: bed ở nửa tốc độ rơi đúng vào phách chẵn, đó là
+half-time, và `beats.fold_tempo` hấp thụ nó sẵn rồi.
+
+Cách sửa là chấm điểm mỗi ứng viên **kèm các bội của nó**. Chu kỳ đúng có điểm
+tựa ở 1x, 2x, 3x, 4x; một lag dài gấp rưỡi chỉ chia được các bội chẵn nên các
+bội lẻ sụp. Trên đúng bài đó: 152 được 0.506/0.485/0.378/0.504, còn 103 được
+0.493/0.378/0.252/0.505.
+
+Nó **không** đụng tới nhập nhằng quãng tám, và như thế là đúng: mọi bội của 2P
+cũng là bội của P, nên không phép chấm điểm nào phân biệt được, và không nên giả
+vờ là được.
+
+**Một cái bẫy trong chính cách sửa đó**, đã cắn một lần và giờ có test riêng:
+lag là số nguyên khung còn chu kỳ thì không. Chu kỳ thật 21.53 khung được tìm ở
+lag 22, mà bội hai của lag 22 là 44 trong khi đỉnh thật ở 43. Ứng viên dài gấp
+đôi (lag 43) thì các bội 86, 129, 172 lại khớp đẹp — nên chấm điểm ở đúng bội
+nguyên **thưởng cho lag dài một cách có hệ thống**, và bản đầu tiên biến click
+track 120 BPM thành 60. Phải tìm mỗi bội trong một cửa sổ rộng `ceil(k/2)`, đúng
+bằng quãng đường mà nửa khung làm tròn đi được tới bội thứ k.
+
+Kết quả trên chính bản Ryu No Kage: **153.0 BPM** (trước là 102.7), và 8/11 đoạn
+20 giây đọc đúng thay vì lật liên tục.
+
+### Còn nợ
+
+- [ ] 55% năng lượng dưới 120 Hz và clipping +2.1 dBFS là số đo của bản **có
+      bed tổng hợp**. Phải đo lại một bản đường `upload` để biết `mixing` và
+      `enhance` có phần lỗi trong đó không, hay tất cả là do bed
+- [ ] margin của phép đo tông trên nhạc thật là 0.003–0.09, ngưỡng đang là 0.04.
+      Guard hiện chạy đúng (không dịch tông khi không chắc) nhưng nó đúng vì
+      may, không phải vì tin cậy
+- [ ] 3/11 đoạn vẫn đọc 103 BPM. Cả bài thì đúng, nhưng nếu sau này cần đo theo
+      đoạn thì chưa đủ

@@ -165,18 +165,6 @@ def test_a_beat_job_can_describe_one_instead(client, started, generator_on):
     assert started[0]["params"]["beat_prompt"] == "boom bap, 90 BPM"
 
 
-def test_a_beat_job_can_rebuild_the_songs_own_backing_track(client, started):
-    """The third source sends neither a file nor a description — everything it
-    needs is in the song, which is the whole idea."""
-    response = client.post(
-        "/submit", **upload(mode="beat", beat_source="remake", arrange_style="lofi")
-    )
-    assert response.status_code == 200
-    assert started[0]["beat"] is None
-    assert started[0]["params"]["beat_source"] == "remake"
-    assert started[0]["params"]["arrange_style"] == "lofi"
-
-
 def test_an_upload_source_with_no_file_is_a_400(client, started):
     """The branch has nothing to put under the voice, and finding that out in a
     GPU container three minutes in is the wrong place."""
@@ -202,14 +190,6 @@ def test_a_beat_job_with_both_sources_is_a_400_not_a_precedence_rule(client, sta
     assert started == []
 
 
-def test_a_beat_file_sent_to_the_remake_source_is_refused_not_ignored(client, started):
-    """Silently ignoring it is the failure where somebody uploads a beat and
-    spends the run wondering why they cannot hear it."""
-    response = client.post("/submit", **beat_upload(beat_source="remake"))
-    assert response.status_code == 400
-    assert started == []
-
-
 def test_an_unknown_source_falls_back_to_the_one_that_needs_no_model(client, started):
     response = client.post("/submit", **beat_upload(beat_source="telepathy"))
     assert response.status_code == 200
@@ -224,8 +204,11 @@ def test_rebeat_needs_no_reference_voice(client, started):
     voice sample, a consent question about somebody's voice, and a GPU pass."""
     response = client.post(
         "/submit",
-        data={"mode": "rebeat", "consent": "true", "beat_source": "remake"},
-        files={"input": ("song.m4a", b"fake-audio", "audio/mp4")},
+        data={"mode": "rebeat", "consent": "true", "beat_source": "upload"},
+        files={
+            "input": ("song.m4a", b"fake-audio", "audio/mp4"),
+            "beat": ("beat.wav", b"fake-beat", "audio/wav"),
+        },
     )
     assert response.status_code == 200
     assert started[0]["mode"] == "rebeat"
@@ -237,9 +220,10 @@ def test_rebeat_refuses_a_reference_rather_than_ignoring_it(client, started):
     singer did not change."""
     response = client.post(
         "/submit",
-        data={"mode": "rebeat", "consent": "true", "beat_source": "remake"},
+        data={"mode": "rebeat", "consent": "true", "beat_source": "upload"},
         files={
             "input": ("song.m4a", b"fake-audio", "audio/mp4"),
+            "beat": ("beat.wav", b"fake-beat", "audio/wav"),
             "reference": ("voice.wav", b"fake-voice", "audio/wav"),
         },
     )
@@ -253,8 +237,16 @@ def test_rebeat_carries_no_conversion_settings_at_all(client, started):
     reads and `/status` would report."""
     client.post(
         "/submit",
-        data={"mode": "rebeat", "consent": "true", "beat_source": "remake", "semitone_shift": "5"},
-        files={"input": ("song.m4a", b"fake-audio", "audio/mp4")},
+        data={
+            "mode": "rebeat",
+            "consent": "true",
+            "beat_source": "upload",
+            "semitone_shift": "5",
+        },
+        files={
+            "input": ("song.m4a", b"fake-audio", "audio/mp4"),
+            "beat": ("beat.wav", b"fake-beat", "audio/wav"),
+        },
     )
     params = started[0]["params"]
     assert "semitone_shift" not in params
@@ -268,7 +260,7 @@ def test_rebeat_carries_no_conversion_settings_at_all(client, started):
 def test_rebeat_still_needs_consent(client, started):
     response = client.post(
         "/submit",
-        data={"mode": "rebeat", "consent": "false", "beat_source": "remake"},
+        data={"mode": "rebeat", "consent": "false", "beat_source": "upload"},
         files={"input": ("song.m4a", b"fake-audio", "audio/mp4")},
     )
     assert response.status_code == 400

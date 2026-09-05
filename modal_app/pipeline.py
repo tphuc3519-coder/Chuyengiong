@@ -7,8 +7,7 @@
     beat:    input ──► separate ──► vocal ──► convert ──────────► mix ──► output.mp3
                             └────► instrumental ──► (đo BPM/key)  ↑
              beat file ────────────────────────────► fit ─────────┤
-             hoặc mô tả ──► sinh beat ──────────────► fit ────────┤
-             hoặc phối lại ──► (đo hợp âm) ──► dựng bản phối mới ─┘
+             hoặc mô tả ──► sinh beat ──────────────► fit ────────┘
     vocal:   input ─────────────────────────► convert ──► encode ──► output.mp3
     speech:  input ─────────────────────────► convert ──► encode ──► output.mp3
     tts:     input.txt ──► synthesize ──────► convert ──► encode ──► output.mp3
@@ -36,7 +35,6 @@ import time
 
 from . import audit, jobs, storage, voices, watermark
 from .app import DATA_DIR, api_image, app, data_vol
-from .arrange import DEFAULT_STYLE as DEFAULT_ARRANGE_STYLE
 from .audio_utils import clamp_cfg_rate, clamp_diffusion_steps, clamp_semitone_shift
 from .enhance import clamp_clarity
 from .mixing import clamp_gain_db
@@ -114,12 +112,21 @@ BEAT_PROMPT_CHARS = 300
 #   generate music invented from a description. Nothing to do with the original
 #            song, which is the point and also the limit — it cannot know the
 #            song's chord progression.
-#   remake   the original's *own* harmony, at its own tempo, played on
-#            instruments synthesised from scratch. The only one that is still
-#            the same song, and the only one whose copyright story needs saying
-#            out loud: it removes the sound recording and not the composition,
-#            so it is a cover — licensable, and not free.
-BEAT_SOURCES = ("upload", "generate", "remake")
+#
+# There was a third — `remake`, which read the song's own chord chart and
+# played it back on instruments synthesised from scratch. It is gone, and the
+# reason is worth keeping so nobody rebuilds it: it could not reach the bar.
+# Additive synthesis produces a drum machine, and it was being held against a
+# human rock arrangement with recorded guitars and drums. That gap is not a
+# tuning problem — it is the distance between generating waveforms from
+# arithmetic and a sampled instrument library, and no amount of fixing
+# constants crosses it.
+#
+# Measured against such an arrangement, the bed it produced put 55% of its
+# energy below 120 Hz and had nothing at all above 4 kHz. Deleting it was the
+# honest move; `upload` is the source that reaches the bar, because there a
+# person made the arrangement.
+BEAT_SOURCES = ("upload", "generate")
 DEFAULT_BEAT_SOURCE = "upload"
 
 # Job records are read by a browser that is polling; keep failure text short
@@ -188,7 +195,6 @@ def clean_params(mode: str, raw: dict | None = None) -> dict:
         # `api.submit` will refuse it anyway if no file came with it.
         source = raw.get("beat_source")
         params["beat_source"] = source if source in BEAT_SOURCES else DEFAULT_BEAT_SOURCE
-        params["arrange_style"] = str(raw.get("arrange_style") or DEFAULT_ARRANGE_STYLE)[:24]
         params["beat_prompt"] = str(raw.get("beat_prompt") or "").strip()[:BEAT_PROMPT_CHARS]
         # -1 is "a different beat every time", which is what somebody
         # auditioning one wants. A fixed seed is how they get the same one back
@@ -404,37 +410,6 @@ def run_song_pipeline(job_id: str, params: dict) -> str:
         raise
 
 
-def _remake(instrumental: bytes, params: dict) -> tuple[bytes, str]:
-    """The original song's harmony, played on instruments synthesised here.
-
-    Measure the tempo and key, read the chords off the same audio, and render
-    them back with none of the original in the output. The bed comes out at the
-    right length and already aligned to the song's first beat, so unlike an
-    uploaded or generated beat there is nothing left to fit — it was built to
-    the measurements rather than stretched towards them.
-
-    An unconfident chart is not a failure: `chords.detect` returns an empty one
-    and `arrange.render` plays the rhythm section alone. Drums under a voice
-    cannot be in the wrong key; guessed chords can.
-    """
-    from . import arrange, chords
-    from .analysis import analyse_bytes
-
-    song = analyse_bytes(instrumental)
-    if song.bpm <= 0:
-        raise ValueError("could not find a pulse in this song, so there is no bar to rebuild it on")
-    chart = chords.detect_bytes(instrumental, song)
-    bed = arrange.render_wav(
-        chart,
-        song,
-        duration_sec=song.duration_sec,
-        style=params.get("arrange_style", DEFAULT_ARRANGE_STYLE),
-        seed=max(0, params.get("beat_seed", -1)),
-    )
-    style = arrange.choose_style(params.get("arrange_style", ""), song.bpm)
-    return bed, f"remade {song} as {style.label}: {chart}"
-
-
 @app.function(image=api_image, volumes={DATA_DIR: data_vol}, timeout=PIPELINE_TIMEOUT, retries=0)
 def run_beat_pipeline(job_id: str, params: dict) -> str:
     """separate → (sinh beat) → convert → fit → mix. The backing track is replaced.
@@ -523,7 +498,7 @@ def run_beat_pipeline(job_id: str, params: dict) -> str:
 
 
 def _beat_bed(job_id: str, params: dict, instrumental: bytes, beat: bytes | None) -> bytes:
-    """The replacement backing track, whichever of the three ways it arrives.
+    """The replacement backing track, however it arrived.
 
     Written once and called from both beat branches: `beat` and `rebeat` differ
     only in whether the voice on top of the bed was converted, and a copy of
@@ -534,11 +509,8 @@ def _beat_bed(job_id: str, params: dict, instrumental: bytes, beat: bytes | None
     bed = _done_already(job_id, BED)
     if bed is not None:
         return bed
-    if params["beat_source"] == "remake":
-        bed, note = _remake(instrumental, params)
-    else:
-        bed, plan, beat_track, song = beats.analyse_and_fit(beat, instrumental)
-        note = f"beat {beat_track} / song {song} -> {plan}"
+    bed, plan, beat_track, song = beats.analyse_and_fit(beat, instrumental)
+    note = f"beat {beat_track} / song {song} -> {plan}"
     print(f"[beat] {job_id}: {note}")
     jobs.record_params(job_id, {"beat_fit": note})
     storage.put(job_id, BED, bed)
@@ -550,8 +522,7 @@ def _generate_beat(job_id: str, params: dict) -> bytes | None:
     """The described beat, made on a GPU. `None` for the sources that need none.
 
     An uploaded beat is already on the Volume under this name, put there by
-    `_start_job`; a remade one is built from the song further down, because it
-    needs chords nothing has measured yet.
+    `_start_job`.
     """
     beat = _done_already(job_id, BEAT)
     if beat is not None or params["beat_source"] != "generate":
