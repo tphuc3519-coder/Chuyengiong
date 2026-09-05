@@ -23,6 +23,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 10 | Giọng trong hơn, bớt "AI" — làm sạch giọng mẫu, hậu kỳ, train giọng riêng, mode không tách nhạc | 🟡 code xong, chờ nghe thật trên GPU |
 | 11 | Đổi beat — đo BPM/tông, khớp beat có sẵn hoặc sinh beat mới | 🟡 code xong, chờ nghe thật trên GPU |
 | 12 | Phối lại bài gốc — đọc vòng hợp âm rồi dựng lại bằng tiếng tự tổng hợp | 🟡 code xong, chờ nghe thật |
+| 13 | Mode "Đổi beat" đứng riêng — giữ nguyên giọng gốc, không cần giọng mẫu | 🟡 code xong, chờ chạy thật |
 
 ## Cấu trúc
 
@@ -1719,3 +1720,96 @@ ra một bộ trống thật chứ không phải im lặng.
       nhưng nó chạy trong bước `mixing` trên container CPU cùng lúc với những
       việc khác
 - [ ] swing 0.18 của lo-fi có quá tay không
+
+---
+
+## Phase 13 — "Đổi beat" tách khỏi "đổi giọng"
+
+Phase 11 và 12 để việc thay nhạc nền nằm trong mode `beat`, mà `beat` là mode
+**đổi giọng có thay nền**. Hệ quả: muốn đổi mỗi cái beat thì vẫn phải nộp giọng
+mẫu, vẫn phải tick một câu cam kết về quyền sử dụng giọng của người khác, và vẫn
+phải trả một lượt GPU chuyển giọng — cho một việc không đụng gì tới giọng.
+
+Nên `rebeat` là một mode riêng: **tách nền, giữ nguyên người hát, thay nhạc**.
+
+### Mode duy nhất không convert gì cả
+
+```
+rebeat:  input ──► separate ──► vocal ─────────────────────► mix ──► output.mp3
+                        └────► instrumental ──► (đo BPM/key) ↑ beat mới
+```
+
+`queued → separating → [generating] → mixing → done`, và không có `converting`
+trong đó vì không có gì để convert. Rẻ hơn hẳn một chặng GPU, và ngắn hơn đúng
+bằng mọi bước có thể hỏng trong chặng đó.
+
+Ba nguồn beat của Phase 11–12 dùng lại y nguyên (tải lên / tự sinh / phối lại),
+vì `_beat_bed` và `_generate_beat` được tách ra dùng chung cho cả hai nhánh.
+Bản copy-paste của chúng sẽ là bản mà một trong hai nhánh lặng lẽ ngừng được
+đóng dấu watermark.
+
+### `CONVERSION_MODE` không có `rebeat`, và đó là chủ ý
+
+Chỗ dễ làm sai nhất của phase này là nhét một entry giả vào bảng ánh xạ cho đủ
+bộ. `rebeat` **không có** conversion mode vì nó không convert, và một
+placeholder ở đó là một lời nói dối mà `clean_params` sẽ đọc như một câu trả
+lời thật.
+
+Nên bảng chỉ chứa các mode thật sự convert, `CONVERTING_MODES` là danh sách
+đó, và `clean_params` chỉ thêm `semitone_shift`, `diffusion_steps`, `cfg_rate`,
+`voice_profile` cho những mode nằm trong nó. Job `rebeat` không mang những số
+đó — vì ghi vào thì `/status` sẽ báo cáo những con số không ai đọc.
+
+### Giọng mẫu: không cần, và bị từ chối nếu gửi
+
+`reference` thành optional trong chữ ký và bắt buộc theo từng mode ở thân hàm,
+nên thiếu nó là **400 nói rõ mode nào cần** thay vì 422 về một form field.
+
+Gửi giọng mẫu cho `rebeat` thì bị từ chối chứ không bị bỏ qua. Bỏ qua im lặng
+chính là cách một người ngồi hết cả lượt chạy để tự hỏi sao giọng không đổi.
+
+### Câu cam kết đổi theo mode
+
+Câu đồng thuận cũ là *"tôi có quyền sử dụng giọng nói trong file tham chiếu"*.
+Với `rebeat` thì không có file tham chiếu nào — bắt ai đó xác nhận quyền với
+một file họ chưa từng được hỏi là một cái checkbox không ai tick thật lòng
+được, và một cái gate không ai đọc thì không phải gate.
+
+Nên `rebeat` hỏi câu đúng với việc nó làm: *"tôi có quyền sử dụng bản ghi này"*.
+Cổng vẫn nằm ở backend và vẫn từ chối job không kèm cam kết — đổi là đổi câu
+chữ, không phải đổi luật.
+
+### UI
+
+Sáu mode giờ chia thành hai cặp rõ ràng:
+
+| Mode | Giọng | Nhạc nền |
+|---|---|---|
+| Bài hát | đổi sang giọng mẫu | giữ nguyên |
+| **Đổi beat** | **giữ nguyên** | **thay** |
+| Đổi beat + giọng | đổi sang giọng mẫu | thay |
+| Giọng hát | đổi sang giọng mẫu | không có |
+| Giọng nói | đổi sang giọng mẫu | không có |
+| Văn bản | đọc bằng giọng mẫu | không có |
+
+Bước "Giọng mẫu" bị **ẩn** ở `rebeat` chứ không phải disable: backend từ chối
+reference gửi tới mode đó, nên một ô trống ở đây là lời mời tới một cái 400. Và
+trong "Tinh chỉnh", dịch cao độ / chất lượng / bám giọng mẫu đều biến mất — còn
+lại đúng hai thứ áp dụng cho mọi bản mix: độ trong và âm lượng giọng.
+
+### Test
+
+Thêm trong `test_api`, `test_pipeline`, `test_jobs`, `test_deploy`: `rebeat`
+chạy được không cần reference, từ chối reference gửi kèm, không mang một tham số
+chuyển giọng nào, vẫn cần cam kết, vẫn tách nền, vẫn watermark — và
+`CONVERSION_MODE` là tập con thật sự của `JOB_MODES` với đúng một phần tử thiếu.
+
+### Còn phải verify
+
+- [ ] chạy thật một job `rebeat`: thời gian có ngắn hơn `beat` đúng bằng chặng
+      GPU đã bỏ không
+- [ ] giọng gốc đi thẳng từ separator vào mix — chuỗi `enhance` giờ chạy trên
+      output của separator chứ không phải của Seed-VC, và hai thứ đó có
+      artefact khác nhau. Có thể mặc định `Độ trong` cho mode này phải khác
+- [ ] `vocal_gain_db` mặc định 0: giọng gốc đã được mix sẵn trong bài, nên tỷ lệ
+      giọng/nền có thể lệch so với khi giọng là bản convert

@@ -84,7 +84,19 @@ PROGRESS = {
 # back: same separation, same conversion, and then the original backing track is
 # replaced rather than mixed. It converts as `singing` for the same reason
 # `song` does — it is somebody singing.
-JOB_MODES = ("song", "beat", "vocal", "speech", "tts")
+#
+# `rebeat` is the one job in this app that **converts nothing**. It separates,
+# keeps the singer exactly as they were, and puts a different backing track
+# under them. It is here because bundling it into `beat` made changing a beat
+# cost a voice sample, a consent question about somebody's voice and a second
+# GPU pass, none of which a person who only wants a different backing track
+# should be asked for.
+JOB_MODES = ("song", "beat", "rebeat", "vocal", "speech", "tts")
+
+# Which checkpoint converts each mode — and therefore which modes convert at
+# all. `rebeat` is deliberately absent: it has no conversion mode because it
+# does not convert, and a placeholder entry here would be a lie that
+# `clean_params` would then read as a real answer.
 CONVERSION_MODE = {
     "song": "singing",
     "beat": "singing",
@@ -92,6 +104,9 @@ CONVERSION_MODE = {
     "speech": "speech",
     "tts": "speech",
 }
+# The modes that need a reference voice. `rebeat` is the only one that does
+# not, which is the whole point of it.
+CONVERTING_MODES = tuple(CONVERSION_MODE)
 
 
 class JobError(RuntimeError):

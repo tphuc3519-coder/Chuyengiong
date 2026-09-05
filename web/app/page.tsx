@@ -16,6 +16,7 @@ import {
   AUDIO_ACCEPT,
   MAX_INPUT_BYTES,
   SOURCE_MAX_SEC,
+  convertsVoice,
   defaultParams,
   forMode,
   maxCharsFor,
@@ -46,6 +47,7 @@ import { useConversion } from "@/lib/useConversion";
 const SOURCE_LABEL: Record<Exclude<Mode, "tts">, string> = {
   song: "Bài hát",
   beat: "Bài hát",
+  rebeat: "Bài hát",
   vocal: "Giọng hát đã tách",
   speech: "Đoạn thoại",
 };
@@ -75,11 +77,14 @@ export default function Page() {
   // The `beat` branch needs exactly one of the two, and the backend refuses a
   // job carrying neither — so the button waits for it rather than letting the
   // upload find out.
+  const needsVoice = convertsVoice(mode);
+  const beatMode = mode === "beat" || mode === "rebeat";
   const hasBeat =
-    mode !== "beat" ||
+    !beatMode ||
     params.beatSource === "remake" ||
     (params.beatSource === "generate" ? params.beatPrompt.trim().length > 0 : beat !== null);
-  const ready = hasSource && hasBeat && !tooLong && reference !== null && consent && !busy;
+  const ready =
+    hasSource && hasBeat && !tooLong && (!needsVoice || reference !== null) && consent && !busy;
 
   // `/submit` reports what is left of the hourly allowance, and `reset` wipes
   // the run state — so keep it here, where it survives into the next attempt.
@@ -100,7 +105,7 @@ export default function Page() {
   }
 
   function convert() {
-    if (!ready || !reference) return;
+    if (!ready || (needsVoice && !reference)) return;
     void start({
       mode,
       params,
@@ -108,9 +113,9 @@ export default function Page() {
       // backend never reads `text`.
       source: mode === "tts" ? null : source,
       text,
-      beat: mode === "beat" && params.beatSource === "upload" ? beat : null,
-      reference,
-      referenceName: reference.name || "reference.wav",
+      beat: beatMode && params.beatSource === "upload" ? beat : null,
+      reference: needsVoice ? reference : null,
+      referenceName: reference?.name || "reference.wav",
       consent,
     });
   }
@@ -186,9 +191,9 @@ export default function Page() {
             )}
           </fieldset>
 
-          {mode === "beat" && (
+          {beatMode && (
             <fieldset className="step">
-              <legend>2b · Beat mới</legend>
+              <legend>{needsVoice ? "2b · Beat mới" : "3 · Beat mới"}</legend>
               <BeatSource
                 params={params}
                 beat={beat}
@@ -199,10 +204,18 @@ export default function Page() {
             </fieldset>
           )}
 
-          <fieldset className="step">
-            <legend>3 · Giọng mẫu</legend>
-            <ReferencePicker file={reference} onFile={setReference} />
-          </fieldset>
+          {/*
+            The one mode with no voice in it. Hiding the step rather than
+            disabling it: `rebeat` keeps the singer it was given, and the
+            backend refuses a reference sent to it — so an empty picker here
+            would be an invitation to a 400.
+          */}
+          {needsVoice && (
+            <fieldset className="step">
+              <legend>3 · Giọng mẫu</legend>
+              <ReferencePicker file={reference} onFile={setReference} />
+            </fieldset>
+          )}
 
           <fieldset className="step">
             <legend>4 · Tuỳ chọn</legend>
@@ -211,7 +224,7 @@ export default function Page() {
 
           <fieldset className="step">
             <legend>5 · Đồng thuận</legend>
-            <ConsentGate checked={consent} onChange={setConsent} />
+            <ConsentGate checked={consent} onChange={setConsent} usesReference={needsVoice} />
           </fieldset>
 
           {state.phase === "error" && state.error && (

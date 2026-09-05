@@ -17,6 +17,7 @@ def test_deploy_registers_everything_the_pipeline_needs():
         "cleanup",
         "run_song_pipeline",
         "run_beat_pipeline",
+        "run_rebeat_pipeline",
         "run_vocal_pipeline",
         "run_speech_pipeline",
         "run_tts_pipeline",

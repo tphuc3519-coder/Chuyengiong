@@ -2,6 +2,8 @@
 
     song:    input ──► separate ──► vocal ──► convert ──► mix ──► output.mp3
                             └────► instrumental ───────────┘
+    rebeat:  input ──► separate ──► vocal ──────────────────────► mix ──► output.mp3
+                            └────► instrumental ──► (đo BPM/key)  ↑ beat mới
     beat:    input ──► separate ──► vocal ──► convert ──────────► mix ──► output.mp3
                             └────► instrumental ──► (đo BPM/key)  ↑
              beat file ────────────────────────────► fit ─────────┤
@@ -92,7 +94,11 @@ AUTO_DETECT_MODES = ("speech",)
 
 # Which job modes run the separator. Both of them start from a mixed recording
 # and need the voice on its own; they differ in what goes back underneath it.
-SEPARATING_MODES = ("song", "beat")
+SEPARATING_MODES = ("song", "beat", "rebeat")
+
+# Which modes replace the backing track, and therefore need a beat source.
+# `beat` also converts the voice; `rebeat` leaves it exactly as it was.
+BEAT_MODES = ("beat", "rebeat")
 
 # Mirrored from `beatgen.MAX_PROMPT_CHARS`, and duplicated rather than imported
 # for the reason every constant in this module is: `pipeline` runs on the API
@@ -137,37 +143,46 @@ def clean_params(mode: str, raw: dict | None = None) -> dict:
     """
     raw = dict(raw or {})
     jobs.check_mode(mode)
-    conversion_mode = jobs.CONVERSION_MODE[mode]
 
-    # None is a value here, not a missing one: it means "work it out from the
-    # audio" (plan §7). `or` would flatten it into 0, which is a real setting.
-    shift = raw.get("semitone_shift")
     params = {
-        "semitone_shift": None if shift is None else clamp_semitone_shift(shift, conversion_mode),
-        "diffusion_steps": clamp_diffusion_steps(raw.get("diffusion_steps") or 0, conversion_mode),
         "vocal_gain_db": clamp_gain_db(raw.get("vocal_gain_db") or 0),
-        # How hard the sampler is pushed towards the reference voice, and how
-        # much of `enhance`'s chain runs on the result. Both are `None`-means-
-        # default rather than falsy-means-default: 0 is a real setting for each
-        # of them and `or` would swallow it.
-        "cfg_rate": clamp_cfg_rate(raw.get("cfg_rate")),
+        # How much of `enhance`'s chain runs on the voice. `None`-means-default
+        # rather than falsy-means-default: 0 is a real setting — no filtering at
+        # all — and `or` would swallow it.
         "clarity": clamp_clarity(raw.get("clarity")),
-        # A trained voice to convert with, or "" for zero shot. Cleaned rather
-        # than checked: whether a profile exists is a question for the GPU
-        # container that has the Volume mounted, and an unusable *name* is not
-        # worth failing a job over when zero shot is right there.
-        "voice_profile": voices.clean_name(raw.get("voice_profile")),
         "source_ext": safe_ext(raw.get("source_ext")),
         # Not a client setting: `WATERMARK` is deployment config, resolved once
         # when the job is created so the record says what was actually done to
         # this file rather than what the config happens to say later.
         "watermark": watermark.enabled(),
     }
+
+    # Everything about the conversion, and only for the modes that have one.
+    # `rebeat` keeps the singer it was given, so a pitch shift, a step count and
+    # a voice profile are not settings it has — recording them anyway would put
+    # numbers in the job record that nothing read and `/status` would report.
+    if mode in jobs.CONVERTING_MODES:
+        conversion_mode = jobs.CONVERSION_MODE[mode]
+        # None is a value here, not a missing one: it means "work it out from
+        # the audio" (plan §7). `or` would flatten it into 0, a real setting.
+        shift = raw.get("semitone_shift")
+        params["semitone_shift"] = (
+            None if shift is None else clamp_semitone_shift(shift, conversion_mode)
+        )
+        params["diffusion_steps"] = clamp_diffusion_steps(
+            raw.get("diffusion_steps") or 0, conversion_mode
+        )
+        params["cfg_rate"] = clamp_cfg_rate(raw.get("cfg_rate"))
+        # A trained voice to convert with, or "" for zero shot. Cleaned rather
+        # than checked: whether a profile exists is a question for the GPU
+        # container that has the Volume mounted, and an unusable *name* is not
+        # worth failing a job over when zero shot is right there.
+        params["voice_profile"] = voices.clean_name(raw.get("voice_profile"))
     if mode in SEPARATING_MODES:
         params["separation_model"] = check_model(
             raw.get("separation_model") or DEFAULT_SEPARATION_MODEL
         )
-    if mode == "beat":
+    if mode in BEAT_MODES:
         # An unknown source falls back rather than failing: `upload` is the one
         # that needs no GPU and no model, so it is the safe answer, and
         # `api.submit` will refuse it anyway if no file came with it.
@@ -440,7 +455,6 @@ def run_beat_pipeline(job_id: str, params: dict) -> str:
     that point is identical, which is the whole reason `beats.py` takes audio
     and not a source.
     """
-    from . import beats
     from .conversion import VoiceConverter
     from .mixing import mix
     from .separation import INSTRUMENTAL_STEM, VOCAL_STEM, Separator
@@ -460,20 +474,7 @@ def run_beat_pipeline(job_id: str, params: dict) -> str:
             storage.put(job_id, INSTRUMENTAL, instrumental)
             data_vol.commit()
 
-        beat = _done_already(job_id, BEAT)
-        if beat is None and params["beat_source"] == "generate":
-            # An uploaded beat is already on the Volume under this name, put
-            # there by `_start_job`; a described one has to be made, and a
-            # remade one is built from the original further down — it needs the
-            # song's own chords, which nothing has measured yet.
-            jobs.update(job_id, jobs.GENERATING)
-            from .beatgen import BeatGenerator
-
-            beat = BeatGenerator().generate.remote(
-                prompt=params["beat_prompt"], seed=params["beat_seed"]
-            )
-            storage.put(job_id, BEAT, beat)
-            data_vol.commit()
+        beat = _generate_beat(job_id, params)
 
         jobs.update(job_id, jobs.CONVERTING)
         converted = _done_already(job_id, CONVERTED)
@@ -496,18 +497,7 @@ def run_beat_pipeline(job_id: str, params: dict) -> str:
             data_vol.commit()
 
         jobs.update(job_id, jobs.MIXING)
-        bed = _done_already(job_id, BED)
-        if bed is None:
-            if params["beat_source"] == "remake":
-                bed, note = _remake(instrumental, params)
-            else:
-                bed, plan, beat_track, song = beats.analyse_and_fit(beat, instrumental)
-                note = f"beat {beat_track} / song {song} -> {plan}"
-            print(f"[beat] {job_id}: {note}")
-            jobs.record_params(job_id, {"beat_fit": note})
-            storage.put(job_id, BED, bed)
-            data_vol.commit()
-
+        bed = _beat_bed(job_id, params, instrumental, beat)
         if not storage.exists(job_id, OUTPUT):
             storage.put(
                 job_id,
@@ -529,6 +519,110 @@ def run_beat_pipeline(job_id: str, params: dict) -> str:
         jobs.fail(job_id, _error_text(exc))
         data_vol.commit()
         _finished(job_id, "beat", params, started, exc)
+        raise
+
+
+def _beat_bed(job_id: str, params: dict, instrumental: bytes, beat: bytes | None) -> bytes:
+    """The replacement backing track, whichever of the three ways it arrives.
+
+    Written once and called from both beat branches: `beat` and `rebeat` differ
+    only in whether the voice on top of the bed was converted, and a copy of
+    this is the version where one of them silently stops being watermarked.
+    """
+    from . import beats
+
+    bed = _done_already(job_id, BED)
+    if bed is not None:
+        return bed
+    if params["beat_source"] == "remake":
+        bed, note = _remake(instrumental, params)
+    else:
+        bed, plan, beat_track, song = beats.analyse_and_fit(beat, instrumental)
+        note = f"beat {beat_track} / song {song} -> {plan}"
+    print(f"[beat] {job_id}: {note}")
+    jobs.record_params(job_id, {"beat_fit": note})
+    storage.put(job_id, BED, bed)
+    data_vol.commit()
+    return bed
+
+
+def _generate_beat(job_id: str, params: dict) -> bytes | None:
+    """The described beat, made on a GPU. `None` for the sources that need none.
+
+    An uploaded beat is already on the Volume under this name, put there by
+    `_start_job`; a remade one is built from the song further down, because it
+    needs chords nothing has measured yet.
+    """
+    beat = _done_already(job_id, BEAT)
+    if beat is not None or params["beat_source"] != "generate":
+        return beat
+
+    jobs.update(job_id, jobs.GENERATING)
+    from .beatgen import BeatGenerator
+
+    beat = BeatGenerator().generate.remote(prompt=params["beat_prompt"], seed=params["beat_seed"])
+    storage.put(job_id, BEAT, beat)
+    data_vol.commit()
+    return beat
+
+
+@app.function(image=api_image, volumes={DATA_DIR: data_vol}, timeout=PIPELINE_TIMEOUT, retries=0)
+def run_rebeat_pipeline(job_id: str, params: dict) -> str:
+    """separate → (sinh beat) → mix. The one branch that converts nothing.
+
+    `queued → separating → [generating] → mixing → done`, and there is no
+    `converting` in it because there is nothing to convert: the singer comes out
+    of the separator and goes into the mix untouched. That is the entire
+    difference from `run_beat_pipeline`, and it is why this exists as a mode of
+    its own — changing a backing track should not cost a voice sample, a consent
+    question about somebody's voice, and a second GPU pass.
+
+    Cheaper by a whole GPU stage, and shorter by every step that could go wrong
+    in one.
+    """
+    from .mixing import mix
+    from .separation import INSTRUMENTAL_STEM, VOCAL_STEM, Separator
+
+    started = time.monotonic()
+    data_vol.reload()
+    try:
+        jobs.update(job_id, jobs.SEPARATING)
+        vocal = _done_already(job_id, VOCAL)
+        instrumental = _done_already(job_id, INSTRUMENTAL)
+        if vocal is None or instrumental is None:
+            stems = Separator(model=params["separation_model"]).separate.remote(
+                storage.get(job_id, INPUT), params["source_ext"]
+            )
+            vocal, instrumental = stems[VOCAL_STEM], stems[INSTRUMENTAL_STEM]
+            storage.put(job_id, VOCAL, vocal)
+            storage.put(job_id, INSTRUMENTAL, instrumental)
+            data_vol.commit()
+
+        beat = _generate_beat(job_id, params)
+
+        jobs.update(job_id, jobs.MIXING)
+        bed = _beat_bed(job_id, params, instrumental, beat)
+        if not storage.exists(job_id, OUTPUT):
+            storage.put(
+                job_id,
+                OUTPUT,
+                mix(
+                    vocal,
+                    bed,
+                    vocal_gain_db=params["vocal_gain_db"],
+                    watermark=_watermark(job_id, params),
+                    clarity=params["clarity"],
+                ),
+            )
+            data_vol.commit()
+
+        jobs.update(job_id, jobs.DONE)
+        _finished(job_id, "rebeat", params, started)
+        return job_id
+    except Exception as exc:
+        jobs.fail(job_id, _error_text(exc))
+        data_vol.commit()
+        _finished(job_id, "rebeat", params, started, exc)
         raise
 
 
@@ -698,6 +792,7 @@ def run_tts_pipeline(job_id: str, params: dict) -> str:
 PIPELINES = {
     "song": run_song_pipeline,
     "beat": run_beat_pipeline,
+    "rebeat": run_rebeat_pipeline,
     "vocal": run_vocal_pipeline,
     "speech": run_speech_pipeline,
     "tts": run_tts_pipeline,
