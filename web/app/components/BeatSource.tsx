@@ -127,19 +127,29 @@ export function BeatSource({
         </>
       ) : (
         <>
+          {/*
+            Nói trước khi hỏi. Người dùng vừa bấm một nút tên "Đổi beat" nên rất
+            dễ chờ app tự làm ra beat; câu này là chỗ duy nhất đính chính điều
+            đó, và nó phải nằm *trên* ô chọn file chứ không phải dưới.
+          */}
+          <p className="field-note">
+            App không tự sáng tác beat. Bạn đưa beat mới vào đây, app sẽ đo bài gốc rồi kéo beat cho
+            khớp và ghép giọng lên.
+          </p>
           <FileDrop
             file={beat}
             onFile={onBeat}
             accept={AUDIO_ACCEPT}
             maxBytes={MAX_INPUT_BYTES}
-            label="Beat thay thế"
-            hint="Kéo thả hoặc bấm để chọn · beat sẽ được kéo về đúng tốc độ và tông của bài"
+            label="Beat mới của bạn"
+            hint="Kéo thả hoặc bấm để chọn · beat instrumental, không có lời"
             disabled={disabled}
           />
           <p className="field-note">
             Beat được đo BPM và tông rồi cắt tròn ô nhịp, dịch tông, kéo tempo và lặp cho khớp bài —
-            nên nó không cần cùng tốc độ hay cùng tông với bản gốc. Chất lượng bản phối là chất
-            lượng file bạn đưa vào: phần này khớp nhạc, nó không sáng tác.
+            nên nó <strong>không cần</strong> cùng tốc độ hay cùng tông với bản gốc. Đổi lại, chất
+            lượng bản phối chính là chất lượng file bạn đưa vào: phần này khớp nhạc, nó không sáng
+            tác.
           </p>
         </>
       )}

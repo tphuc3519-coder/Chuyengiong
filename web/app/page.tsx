@@ -192,7 +192,7 @@ export default function Page() {
 
           {beatMode && (
             <fieldset className="step">
-              <legend>{needsVoice ? "2b · Beat mới" : "3 · Beat mới"}</legend>
+              <legend>{needsVoice ? "2b · Beat của bạn" : "3 · Beat của bạn"}</legend>
               <BeatSource
                 params={params}
                 beat={beat}
