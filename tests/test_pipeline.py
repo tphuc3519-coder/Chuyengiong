@@ -533,3 +533,74 @@ def test_a_restart_redoes_only_what_is_missing(volume_root, monkeypatch, job_sto
     assert ran["source"] == b"vocal-stem"
     assert storage.get(job_id, pipeline.CONVERTED) == b"fresh"
     assert jobs.get(job_id, job_store)["status"] == jobs.DONE
+
+
+# --- the class the pipeline actually calls --------------------------------
+
+
+def test_the_generator_is_reached_through_the_lookup_not_the_imported_class(
+    volume_root, monkeypatch, job_store
+):
+    """The bug this pins produced, three minutes into a paid job:
+
+        AttributeError: 'function' object has no attribute 'remote'
+
+    `app.cls(...)` returns a *new* object and leaves `BeatGenerator` alone, so
+    the name imported from `beatgen` is a plain class and `.remote` on its
+    bound method never existed. `beatgen.generator()` is the accessor that
+    knows this; `_generate_beat` has to go through it.
+    """
+    from modal_app import beatgen
+
+    job_id = "b" * 32
+    jobs.create(job_id, "beat", params={}, store=job_store)
+    monkeypatch.setattr(jobs, "job_dict", job_store)
+
+    called = {}
+
+    class Fake:
+        def __call__(self):
+            return self
+
+        @property
+        def generate(self):
+            return self
+
+        def remote(self, **kwargs):
+            called.update(kwargs)
+            return b"generated-beat"
+
+    monkeypatch.setattr(beatgen, "generator", lambda: Fake())
+    params = pipeline.clean_params("beat", {"beat_source": "generate", "beat_prompt": "boom bap"})
+
+    assert pipeline._generate_beat(job_id, params) == b"generated-beat"
+    assert called["prompt"] == "boom bap"
+    # `generate` and `derive` differ only in these two.
+    assert called["init_wav"] is None
+    assert called["init_noise_level"] is None
+    assert storage.get(job_id, pipeline.BEAT) == b"generated-beat"
+
+
+def test_the_plain_class_is_the_one_without_remote_on_it():
+    """Stated here so the accessor's reason survives a refactor: the module
+    level name is undecorated on purpose — that is what keeps a deploy which
+    did not ask for the generator from building its image — and being
+    undecorated is exactly what makes it uncallable."""
+    from modal_app import beatgen
+
+    with pytest.raises(AttributeError):
+        beatgen.BeatGenerator().generate.remote  # noqa: B018
+
+
+def test_an_upload_source_never_reaches_the_generator(volume_root, monkeypatch, job_store):
+    from modal_app import beatgen
+
+    job_id = "c" * 32
+    jobs.create(job_id, "beat", params={}, store=job_store)
+    monkeypatch.setattr(jobs, "job_dict", job_store)
+
+    def no_gpu():
+        raise AssertionError("an uploaded beat paid for a GPU")
+
+    monkeypatch.setattr(beatgen, "generator", no_gpu)
+    assert pipeline._generate_beat(job_id, pipeline.clean_params("beat")) is None

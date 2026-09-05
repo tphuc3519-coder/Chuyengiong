@@ -2273,3 +2273,86 @@ thêm ở `test_beatgen.py`, `test_api.py`, `test_pipeline.py`. Những cái đ�
 - [ ] bài đổi hợp âm nhiều: `derive` có thật sự hết chỏi so với `generate` không
 - [ ] cửa sổ 47 giây của model so với bài 3 phút — `beats.fit` lặp nó, và lặp
       một vòng 8 ô nhịp lên cả bài là điều chưa nghe thử bao giờ
+
+---
+
+## 14.1 — `AttributeError: 'function' object has no attribute 'remote'`
+
+Lần đầu có người bấm chạy một beat sinh ra, và nó chết. Ba phút vào một job đã
+trả tiền GPU.
+
+```
+AttributeError: 'function' object has no attribute 'remote'
+```
+
+Chỗ gây lỗi trông y hệt bốn dòng bên cạnh nó:
+
+```python
+stems = Separator(model=...).separate.remote(...)      # chạy
+converted = VoiceConverter(mode=...).convert.remote(...)  # chạy
+beat = BeatGenerator().generate.remote(...)            # nổ
+```
+
+### `app.cls()` không decorate tại chỗ
+
+`@app.cls(...)` **trả về một object mới**, nó không sửa class được truyền vào.
+Với ba class kia thì không thấy được vì chúng viết dạng decorator ở module
+scope — tên trong module *chính là* object Modal trả về:
+
+```python
+Separator        modal.cls.Cls
+VoiceConverter   modal.cls.Cls
+Watermarker      modal.cls.Cls
+```
+
+`BeatGenerator` thì không. Phase 13.1 để nó **không decorate** ở module scope,
+có chủ ý: đó là thứ khiến một deploy không bật generator sẽ không bao giờ build
+image của nó — bài học của "một image hỏng chặn ba phase". `register()` gói nó
+lại và cất vào `_REGISTERED`, còn cái tên `BeatGenerator` trong module vẫn là
+một class Python trần. `BeatGenerator().generate` là bound method thường, và
+`.remote` trên đó là thuộc tính chưa từng tồn tại.
+
+Không có gì ở chỗ gọi nói ra điều đó. Bản chạy được và bản hỏng khác nhau đúng
+một dòng `import`, và cả hai đều compile.
+
+### Vì sao không phải là "cứ dùng `_REGISTERED`"
+
+Vì trong container chạy pipeline thì `_REGISTERED` là `None`.
+
+`register()` được gọi bởi `deploy.py`, trong tiến trình deploy.
+`run_beat_pipeline` chạy ở container khác, và container đó:
+
+```python
+@app.function(image=api_image, volumes={DATA_DIR: data_vol}, timeout=PIPELINE_TIMEOUT, retries=0)
+```
+
+— **không có `secrets=`**, nên `BEAT_GENERATOR` không nằm trong env của nó, và
+nó cũng không có lý do gì phải import `deploy`. Mọi cách sửa dựa vào việc
+`register()` đã chạy trong container đó đều là đoán.
+
+Nên `beatgen.generator()` dùng `_REGISTERED` khi có, còn không thì **tra cứu
+theo tên trên App đã deploy**:
+
+```python
+modal.Cls.from_name(APP_NAME, BeatGenerator.__name__)
+```
+
+Class đã deploy sẵn rồi. Đây là cách một container trỏ tới class nó không tự
+định nghĩa, và nó đúng bất kể container ấy import module nào.
+
+### Test bắt được đúng cái crash đó
+
+Cái đáng giữ là test hành vi, không phải test chính tả: `_generate_beat` chạy
+thật với một `generator()` giả. Bỏ bản sửa ra thì nó dựng lại đúng câu lỗi trên
+màn hình người dùng.
+
+```
+tests/test_pipeline.py::test_the_generator_is_reached_through_the_lookup_not_the_imported_class
+```
+
+Thêm một lưới chặn cho *loại* lỗi này chứ không riêng lần này: mọi entry point
+GPU mà pipeline với tay tới đều phải là object do Modal tạo ra. Nếu sau này có
+ai thêm một class nữa rồi quên decorate, `test_deploy.py` đỏ trước khi người
+dùng gặp.
+
+**610 passed, 3 skipped.**

@@ -123,3 +123,47 @@ def test_the_web_container_does_not_import_the_gpu_stack():
                 if line.startswith(("import ", "from ")) and "conversion" in line
             ]
         assert top_level == [], module
+
+
+def test_everything_a_pipeline_calls_remote_on_is_a_modal_object():
+    """The class of bug, not just the instance of it.
+
+    `BeatGenerator().generate.remote(...)` reads exactly like the four calls
+    beside it and was not one: that class is undecorated at module scope — on
+    purpose, so a deploy that did not ask for the generator never builds its
+    image — and `app.cls()` returns a *new* object rather than decorating that
+    one. The name in the module is therefore a plain class, and `.remote` on
+    its bound method is an attribute that never existed.
+
+    Nothing about the call site says so. This does: every GPU entry point the
+    pipeline reaches for has to be something Modal made, and `BeatGenerator` is
+    excluded here by name because it is reached through `beatgen.generator()`
+    instead — the accessor that exists for this reason.
+    """
+    import modal
+
+    from modal_app import conversion, separation, tts, watermark
+
+    for name, obj in (
+        ("Separator", separation.Separator),
+        ("VoiceConverter", conversion.VoiceConverter),
+        ("Watermarker", watermark.Watermarker),
+        *((f"ENGINES[{key!r}]", engine) for key, engine in tts.ENGINES.items()),
+    ):
+        assert isinstance(obj, modal.Cls), f"{name} is a {type(obj).__name__}, not a modal.Cls"
+
+
+def test_the_generators_accessor_is_the_only_way_the_pipeline_names_it():
+    """`_generate_beat` must not import the plain class back in.
+
+    Read as source rather than behaviour because that is the mistake worth
+    preventing: the working call and the broken one differ by one import line,
+    and both compile.
+    """
+    import inspect
+
+    from modal_app import pipeline
+
+    source = inspect.getsource(pipeline._generate_beat)
+    assert "beatgen.generator()" in source
+    assert "import BeatGenerator" not in source
