@@ -2000,9 +2000,24 @@ Ba cái còn lại có lý do riêng, đã đo bằng `pip install --dry-run`:
 hai nơi, phải lật cùng lúc. Một UI mời một nguồn mà API từ chối còn tệ hơn việc
 một trong hai cờ sai.
 
-Giờ `/health` trả về `beat_generator`, và trình duyệt hỏi một lần mỗi lần tải
-trang. Bản triển khai cũ quá đến mức không trả lời được thì coi như không có
-generator — cùng một kết luận, bằng đường khác.
+Giờ `/health` trả về `beat_generator`, và **`/api/config` hỏi hộ trình duyệt**
+một lần mỗi lần tải trang.
+
+Bản đầu tiên để chính trình duyệt gọi `GET ${apiBase}/health`, và nó im lặng
+đúng một vòng: cờ đã bật, image đã build, `/health` trả `true` — mà trang vẫn
+chỉ hiện ô kéo-thả file. Một request cross-origin có hai kiểu chết, CORS và
+mạng, mà cả hai rơi vào cùng cái `catch` với "bản này không có generator". Ba
+sự thật khác nhau, một chữ `false`, không cách nào phân biệt từ trong UI.
+
+Nên phép thử chuyển về phía server, nằm luôn trong request mà trang vốn đã gọi:
+cùng origin, không preflight, không cache trình duyệt chen vào. Probe hỏng thì
+`beatGenerator: false` chứ không bao giờ làm hỏng `/api/config` — nguồn "tải
+beat lên" vẫn chạy, và cả form không thể sập vì một tính năng người dùng có khi
+không dùng đến. Nó có `AbortSignal.timeout` vì không upload được gì trước khi
+câu trả lời này về.
+
+Bản triển khai cũ quá đến mức không trả lời được thì coi như không có generator
+— cùng một kết luận, bằng đường khác.
 
 Và nguồn beat mặc định đổi thành **"Máy làm beat"**, vì đó là điều mode này hứa.
 `effectiveBeatSource()` kẹp nó về `upload` ở nơi không có generator — tính ra chứ
