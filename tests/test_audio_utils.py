@@ -382,6 +382,29 @@ def test_too_short_is_still_refused():
         au.prepare_reference(voiced(3), 44100)
 
 
+def broadband(seconds: float, sample_rate: int = 44100, amplitude: float = 0.5) -> np.ndarray:
+    """Loud noise: a knock, a chair, a preamp turned up before anybody spoke."""
+    rng = np.random.default_rng(7)
+    return (amplitude * rng.standard_normal(int(seconds * sample_rate))).astype(np.float32)
+
+
+def test_a_loud_noise_is_not_scored_as_the_best_voice_in_the_recording():
+    """Level alone cannot tell a voice from a knock, and the knock wins: it is
+    louder than anything anybody says. `speech_flags` asks for periodicity as
+    well, which no amount of gain makes noise have."""
+    clip = np.concatenate([broadband(25), voiced(20)])
+    start, _ = au.usable_reference_window(clip, 44100)
+    assert start / 44100 == pytest.approx(25, abs=0.5)
+
+
+def test_a_quiet_voice_after_a_loud_noise_is_still_found():
+    """And the floor is measured against the loudest *voice*, not the loudest
+    frame — otherwise somebody talking softly after a slam is below it."""
+    clip = np.concatenate([broadband(25, amplitude=0.9), voiced(20, amplitude=0.03)])
+    start, _ = au.usable_reference_window(clip, 44100)
+    assert start / 44100 == pytest.approx(25, abs=0.5)
+
+
 def test_digital_silence_does_not_divide_by_zero():
     silence = np.zeros(int(45 * 44100), dtype=np.float32)
     start, stop = au.usable_reference_window(silence, 44100)

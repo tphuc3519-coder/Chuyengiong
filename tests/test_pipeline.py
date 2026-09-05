@@ -51,9 +51,48 @@ def test_vocal_gain_is_clamped():
     assert pipeline.clean_params("song", {"vocal_gain_db": 99})["vocal_gain_db"] == 12.0
 
 
+def test_the_new_knobs_default_to_the_middle_and_clamp_at_the_ends():
+    """Both are `None`-means-default rather than falsy-means-default: 0 is a
+    real setting for each of them — no guidance, and no post-processing — and
+    `or` would have swallowed it."""
+    from modal_app import enhance
+
+    plain = pipeline.clean_params("speech")
+    assert plain["cfg_rate"] == au.DEFAULT_CFG_RATE
+    assert plain["clarity"] == enhance.DEFAULT_CLARITY
+    assert pipeline.clean_params("speech", {"cfg_rate": 0, "clarity": 0})["cfg_rate"] == 0.0
+    assert pipeline.clean_params("speech", {"cfg_rate": 0, "clarity": 0})["clarity"] == 0.0
+    assert pipeline.clean_params("speech", {"cfg_rate": 9})["cfg_rate"] == au.CFG_RATE_MAX
+    assert pipeline.clean_params("speech", {"clarity": -3})["clarity"] == enhance.CLARITY_MIN
+
+
+def test_an_unusable_voice_name_becomes_no_voice_rather_than_an_error():
+    """Zero shot is what every job did before profiles existed, so a name that
+    could not be one is not worth failing over. A name that *is* usable and has
+    no profile behind it fails in the GPU container, which is the only place
+    that can be known."""
+    assert pipeline.clean_params("speech")["voice_profile"] == ""
+    assert pipeline.clean_params("speech", {"voice_profile": "../etc"})["voice_profile"] == ""
+    assert pipeline.clean_params("speech", {"voice_profile": "mai"})["voice_profile"] == "mai"
+
+
+def test_the_vocal_branch_converts_as_singing_and_keeps_the_key():
+    """It is the `song` branch without the separator, so it gets the singing
+    checkpoint's wider pitch range — and, like a song, it is not measured
+    against the reference: a take has a key and the point is to keep it."""
+    assert jobs.CONVERSION_MODE["vocal"] == "singing"
+    assert pipeline.clean_params("vocal", {"semitone_shift": 20})["semitone_shift"] == 12
+    assert (
+        pipeline.clean_params("vocal")["diffusion_steps"] == au.DEFAULT_DIFFUSION_STEPS["singing"]
+    )
+    assert "singing" not in pipeline.AUTO_DETECT_MODES
+
+
 def test_only_the_song_branch_carries_a_separation_model():
     assert pipeline.clean_params("song")["separation_model"] == "roformer"
     assert "separation_model" not in pipeline.clean_params("speech")
+    # `vocal` is the branch that exists to not run it.
+    assert "separation_model" not in pipeline.clean_params("vocal")
 
 
 def test_an_unknown_separation_model_is_refused():

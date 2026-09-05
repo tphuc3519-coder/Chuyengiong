@@ -32,11 +32,21 @@ import { useConversion } from "@/lib/useConversion";
  * behind a "next" button on a phone screen, and the run replaces the form in
  * place rather than navigating away from it.
  *
- * Step 2 is the one place the three modes differ: `song` and `speech` take a
+ * Step 2 is the one place the modes differ: everything except `tts` takes a
  * file, `tts` takes text. Everything after it — the voice sample, the tuning,
- * the gate, the run — is the same for all three, which is the point of putting
- * text in as a third *source* rather than as a second app.
+ * the gate, the run — is the same for all of them, which is the point of
+ * putting text in as another *source* rather than as a second app.
  */
+
+/**
+ * What step 2 calls the file it is asking for. `vocal` is the mode that says
+ * "this is already only a voice, do not go looking for a backing track in it".
+ */
+const SOURCE_LABEL: Record<Exclude<Mode, "tts">, string> = {
+  song: "Bài hát",
+  vocal: "Giọng hát đã tách",
+  speech: "Đoạn thoại",
+};
 export default function Page() {
   const [mode, setMode] = useState<Mode>("song");
   const [params, setParams] = useState<Params>(() => defaultParams("song"));
@@ -156,7 +166,7 @@ export default function Page() {
                 onFile={setSource}
                 accept={AUDIO_ACCEPT}
                 maxBytes={MAX_INPUT_BYTES}
-                label={mode === "song" ? "Bài hát" : "Đoạn thoại"}
+                label={SOURCE_LABEL[mode as Exclude<Mode, "tts">]}
                 hint={`Kéo thả hoặc bấm để chọn · tối đa ${SOURCE_MAX_SEC / 60} phút`}
               />
             )}

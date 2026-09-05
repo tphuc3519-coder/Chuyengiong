@@ -13,6 +13,11 @@ Three rules, all from the plan:
 * an `AI-generated` comment tag on every output we hand back (Phase 6 item 2,
   done here because this is the only place output bytes are created).
 
+Both entry points also take a `clarity` amount, which is `enhance`'s chain
+inserted **on the voice and nowhere else** — ahead of `amix` in `mix`, so a
+song's instrumental reaches the mix exactly as the separator produced it. Zero
+emits no filters at all, which is what keeps the old output reachable.
+
 `mix` and `to_mp3` take an optional `watermark` callable, applied to the
 normalised wav in between the mix and the encode (plan §8, "Cân nhắc thêm").
 It is a callable rather than an import because the model behind it needs torch
@@ -29,6 +34,8 @@ import tempfile
 import wave
 from collections.abc import Callable
 from pathlib import Path
+
+from . import enhance
 
 # -14 LUFS with 1 dB of headroom: the streaming reference, and the right target
 # for something that will be listened to on a phone.
@@ -138,6 +145,7 @@ def mix(
     instrumental_wav: bytes,
     vocal_gain_db: float = 0.0,
     watermark: Callable[[bytes], bytes] | None = None,
+    clarity: float | None = enhance.DEFAULT_CLARITY,
 ) -> bytes:
     """Converted vocal over the original instrumental -> mp3 bytes.
 
@@ -152,6 +160,10 @@ def mix(
     as wide as it arrived. `pan` rather than an `aformat` upmix because
     ffmpeg's mono-to-stereo conversion applies the -3 dB centre mix level,
     which would quietly move the vocal back down in the mix.
+
+    `clarity` runs first of all, on the vocal alone. Before the gain rather
+    than after it, because the de-esser and the denoiser both have thresholds
+    and a gain applied ahead of them would move what they act on.
     """
     gain = clamp_gain_db(vocal_gain_db)
     # `loudnorm` runs at 192 kHz internally and hands that rate on, so the wav
@@ -163,7 +175,7 @@ def mix(
     # vocal's, which is what this restores.
     rate = _sample_rate(vocal_wav)
     graph = (
-        f"[0:a]volume={gain:.2f}dB,{CENTRE}[v];"
+        f"[0:a]{enhance.chain(clarity, ',')}volume={gain:.2f}dB,{CENTRE}[v];"
         f"[v][1:a]amix=inputs=2:normalize=0:duration=longest[m];"
         f"[m]{LOUDNORM},aresample={rate}[out]"
     )
@@ -175,10 +187,15 @@ def to_mp3(
     audio_wav: bytes,
     gain_db: float = 0.0,
     watermark: Callable[[bytes], bytes] | None = None,
+    clarity: float | None = enhance.DEFAULT_CLARITY,
 ) -> bytes:
-    """The `speech` branch's output step: no mix, same level and same tagging."""
+    """The output step for every branch with nothing to mix into.
+
+    `speech`, `tts` and `vocal` all end here: no instrumental, same level, same
+    tagging, and the same clarity chain the song path applies to its vocal.
+    """
     gain = clamp_gain_db(gain_db)
-    graph = f"[0:a]volume={gain:.2f}dB,{LOUDNORM}[out]"
+    graph = f"[0:a]{enhance.chain(clarity, ',')}volume={gain:.2f}dB,{LOUDNORM}[out]"
     levelled = _ffmpeg([audio_wav], graph, ["-c:a", "pcm_s16le"], ".wav")
     return _apply(levelled, watermark)
 

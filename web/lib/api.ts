@@ -178,6 +178,11 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
   }
   form.set("diffusion_steps", String(input.params.diffusionSteps));
   form.set("vocal_gain_db", String(input.params.vocalGainDb));
+  // Always sent, never omitted: 0 is a real setting for both — no guidance, no
+  // post-processing — so "leave it out and let the server decide" is a
+  // different request from "send zero", and this form always has an answer.
+  form.set("cfg_rate", String(input.params.cfgRate));
+  form.set("clarity", String(input.params.clarity));
   form.set("consent", String(input.consent));
 
   return apiBase().then(

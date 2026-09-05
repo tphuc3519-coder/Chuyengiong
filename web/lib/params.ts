@@ -7,10 +7,21 @@
  * when a number moves there, move it here too.
  */
 
-export type Mode = "song" | "speech" | "tts";
+export type Mode = "song" | "vocal" | "speech" | "tts";
 
+/**
+ * `vocal` is `song` without the separator, and that is the whole difference.
+ *
+ * Separation is not free in either direction: it costs a GPU pass, and what it
+ * hands the converter is a stem carrying the artefacts every source separator
+ * leaves behind — smeared transients, a faint ghost of the backing track —
+ * which then get converted along with the voice. For a file that is already
+ * just a voice, both costs are paid for nothing, so this branch skips straight
+ * to the conversion and returns it with no mix.
+ */
 export const MODES: { id: Mode; label: string; hint: string }[] = [
   { id: "song", label: "Bài hát", hint: "Tách nhạc nền, đổi giọng, ghép lại" },
+  { id: "vocal", label: "Giọng hát", hint: "File đã tách sẵn — đổi giọng, giữ nguyên" },
   { id: "speech", label: "Giọng nói", hint: "Đổi giọng trực tiếp, nhanh hơn" },
   { id: "tts", label: "Văn bản", hint: "Gõ chữ, đọc lên bằng giọng mẫu" },
 ];
@@ -20,11 +31,44 @@ export const MODES: { id: Mode; label: string; hint: string }[] = [
  * `tts` is speech by the time the pitch is applied — the text has already been
  * read out loud — so it lives under the same limit.
  */
-export const MAX_SEMITONE_SHIFT: Record<Mode, number> = { song: 12, speech: 8, tts: 8 };
+export const MAX_SEMITONE_SHIFT: Record<Mode, number> = { song: 12, vocal: 12, speech: 8, tts: 8 };
 
 export const DIFFUSION_STEPS_MIN = 10;
 export const DIFFUSION_STEPS_MAX = 100;
-export const DEFAULT_DIFFUSION_STEPS: Record<Mode, number> = { song: 50, speech: 25, tts: 25 };
+export const DEFAULT_DIFFUSION_STEPS: Record<Mode, number> = {
+  song: 50,
+  // A vocal take converts with the singing checkpoint, so it wants the same
+  // number of steps a song does.
+  vocal: 50,
+  speech: 25,
+  tts: 25,
+};
+
+/**
+ * How much of the sample voice to take, mirrored from `CFG_RATE_*` in
+ * `modal_app/audio_utils.py`.
+ *
+ * Classifier-free guidance: the balance between what the model predicts having
+ * seen the reference and what it would have predicted without it. Up, and the
+ * result is more clearly the target and more obviously processed — a diffusion
+ * model's artefacts are conditioning artefacts, so pushing the conditioning
+ * harder pushes them too. Down, and more of whoever is on the source recording
+ * survives.
+ */
+export const CFG_RATE_MIN = 0;
+export const CFG_RATE_MAX = 1;
+export const DEFAULT_CFG_RATE = 0.7;
+
+/**
+ * How much of the clarity chain runs on the result, from `modal_app/enhance.py`.
+ *
+ * 0 is not "less" — it is no filter at all, which is the output this app
+ * produced before the chain existed. That is deliberate: every complaint about
+ * post-processing should have a one-slider answer.
+ */
+export const CLARITY_MIN = 0;
+export const CLARITY_MAX = 1;
+export const DEFAULT_CLARITY = 0.5;
 
 export const MAX_VOCAL_GAIN_DB = 12;
 
@@ -149,6 +193,10 @@ export const EXPRESSIVENESS_MAX = 1.5;
 export const DEFAULT_EXPRESSIVENESS = 1;
 
 export type Params = {
+  /** Classifier-free guidance, `CFG_RATE_MIN`…`CFG_RATE_MAX`. */
+  cfgRate: number;
+  /** How much of the output clarity chain to run, `CLARITY_MIN`…`CLARITY_MAX`. */
+  clarity: number;
   /**
    * null = auto-detect (plan §7). Not the same as 0, which is a deliberate
    * "leave the pitch where it is" — the backend distinguishes the two and
@@ -167,6 +215,8 @@ export type Params = {
 
 export function defaultParams(mode: Mode): Params {
   return {
+    cfgRate: DEFAULT_CFG_RATE,
+    clarity: DEFAULT_CLARITY,
     semitoneShift: null,
     diffusionSteps: DEFAULT_DIFFUSION_STEPS[mode],
     vocalGainDb: 0,
@@ -199,6 +249,11 @@ export function forMode(params: Params, next: Mode, previous: Mode): Params {
       params.semitoneShift === null ? null : clamp(params.semitoneShift, -limit, limit),
     diffusionSteps: untouched ? DEFAULT_DIFFUSION_STEPS[next] : params.diffusionSteps,
   };
+}
+
+/** `70%` — the two 0–1 sliders as their labels read them. */
+export function formatPercent(value: number): string {
+  return `${Math.round(value * 100)}%`;
 }
 
 /** `1,0×` — the speaking rate as the slider labels it. */

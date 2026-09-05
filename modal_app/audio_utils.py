@@ -40,6 +40,23 @@ DEFAULT_DIFFUSION_STEPS = {"speech": 25, "singing": 50}
 # tonal languages; singing carries the melody so it tolerates more.
 MAX_SEMITONE_SHIFT = {"speech": 8, "singing": 12}
 
+# Classifier-free guidance strength in Seed-VC's sampler, which the product
+# calls "how much of the sample voice to take".
+#
+# It is the balance between two predictions the model makes at every diffusion
+# step: one that has seen the reference and one that has not. At 0 the
+# conditioning is only what the architecture carries and the result drifts back
+# towards the source speaker; at 1 the reference wins every argument, which
+# sounds more like the target and also more like a machine — the artefacts a
+# diffusion model makes are conditioning artefacts, so pushing the conditioning
+# harder is pushing them harder too. 0.7 is upstream's default and the middle
+# of the useful range; the ends of the slider are both real settings and both
+# worse than the middle for most material, which is why it is in `Tinh chỉnh`
+# and not on the front page.
+CFG_RATE_MIN = 0.0
+CFG_RATE_MAX = 1.0
+DEFAULT_CFG_RATE = 0.7
+
 # Chunking defaults. `target`/`max`/`min` are the plan's; `search` is the
 # half-width of the window we look inside for a quiet frame to cut at.
 CHUNK_TARGET_SEC = 30.0
@@ -232,6 +249,52 @@ SPEECH_FRAME = 2048
 # not absolute, so a quietly recorded sample is judged on its own terms; low
 # enough to keep the tail of a word, high enough to drop room tone.
 SPEECH_FLOOR = 0.06
+# …and it has to be *periodic* as well as loud. A frame of voiced speech
+# crosses zero at twice its fundamental — 0.006 of the samples at 140 Hz and
+# 44.1 kHz — while hiss, fan noise and clipping distortion cross it on the
+# order of half the samples.
+#
+# Level alone is the obvious test and it is wrong in one case that is not rare
+# at all: a recording that opens with a loud noise — a chair, a knock, a
+# preamp turned up before anybody spoke — has its loudest stretch scored as its
+# best voice, and the model is handed twenty seconds of that. There is no level
+# at which the two can be told apart, which is why this is a second test rather
+# than a higher floor.
+ZCR_CEILING = 0.25
+# Which percentile of the voiced frames' peaks the level floor is measured
+# against. See `speech_flags`: not the maximum, which one lucky frame of noise
+# can be.
+VOICED_PEAK_PERCENTILE = 95.0
+
+
+def speech_flags(audio: np.ndarray) -> np.ndarray:
+    """One bool per `SPEECH_FRAME`: is somebody talking in this frame.
+
+    Periodic first, then loud — and the order is the whole of it. `SPEECH_FLOOR`
+    is relative to a peak, and if that peak is taken over every frame then a
+    recording with one loud noise in it measures every quiet *word* against the
+    noise. Somebody talking softly after a slammed door scores as silence, and
+    the window that gets picked is the door.
+
+    So the peak is taken over the periodic frames only: the loudest thing that
+    was a voice, which is what the floor was always meant to be a fraction of.
+    A high percentile rather than the maximum, because "periodic" is a test on
+    one frame and a long stretch of noise will pass it once by luck — and one
+    frame at three times the level of anything anybody said would put the floor
+    above the whole recording.
+    """
+    usable = len(audio) - len(audio) % SPEECH_FRAME
+    if usable <= 0:
+        return np.zeros(0, dtype=bool)
+    frames = np.asarray(audio[:usable], dtype=np.float32).reshape(-1, SPEECH_FRAME)
+    periodic = np.diff(np.signbit(frames), axis=1).mean(axis=1) <= ZCR_CEILING
+    peaks = np.abs(frames).max(axis=1)
+    voiced_peak = (
+        float(np.percentile(peaks[periodic], VOICED_PEAK_PERCENTILE)) if periodic.any() else 0.0
+    )
+    if voiced_peak <= 0:
+        return np.zeros(len(frames), dtype=bool)
+    return periodic & (peaks >= voiced_peak * SPEECH_FLOOR)
 
 
 def usable_reference_window(audio: np.ndarray, sample_rate: int) -> tuple[int, int]:
@@ -241,8 +304,7 @@ def usable_reference_window(audio: np.ndarray, sample_rate: int) -> tuple[int, i
     and the first N seconds of a recording is the worst available guess at it:
     that is where somebody is still settling, or the room is, or nobody has
     started talking yet. So score every candidate window by how much of it is
-    actually voice — frames above a fraction of the clip's own peak — and take
-    the best.
+    actually voice — `speech_flags` — and take the best.
 
     Ties go to the earliest window, which keeps a clip that is uniformly good
     landing where it always did.
@@ -251,12 +313,9 @@ def usable_reference_window(audio: np.ndarray, sample_rate: int) -> tuple[int, i
     if len(audio) <= limit:
         return 0, len(audio)
 
-    usable = len(audio) - len(audio) % SPEECH_FRAME
-    frames = np.abs(audio[:usable]).reshape(-1, SPEECH_FRAME).max(axis=1)
-    peak = float(frames.max()) if len(frames) else 0.0
-    if peak <= 0:
-        return 0, limit  # digital silence; nothing to choose between
-    speech = (frames >= peak * SPEECH_FLOOR).astype(np.int32)
+    speech = speech_flags(audio).astype(np.int32)
+    if not speech.size or not speech.any():
+        return 0, limit  # digital silence, or nothing periodic anywhere in it
 
     per_window = max(1, limit // SPEECH_FRAME)
     if len(speech) <= per_window:
@@ -300,6 +359,19 @@ def check_source(audio: np.ndarray, sample_rate: int) -> np.ndarray:
 def clamp_semitone_shift(shift: int, mode: str) -> int:
     limit = MAX_SEMITONE_SHIFT[check_mode(mode)]
     return int(max(-limit, min(limit, int(shift))))
+
+
+def clamp_cfg_rate(rate: float | None) -> float:
+    """How hard the sampler is pushed towards the reference. Clamped, not refused.
+
+    Same rule as every slider in this app: a value out of range is a client
+    bug, and the job behind it has already booked a GPU.
+    """
+    try:
+        value = DEFAULT_CFG_RATE if rate is None else float(rate)
+    except (TypeError, ValueError):
+        return DEFAULT_CFG_RATE
+    return max(CFG_RATE_MIN, min(CFG_RATE_MAX, value))
 
 
 def clamp_diffusion_steps(steps: int | None, mode: str) -> int:

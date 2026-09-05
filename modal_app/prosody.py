@@ -38,6 +38,16 @@ mechanical enough to be written down:
   did to Japanese. Overall F0 does go up on a question, so this is a real cue,
   just a quieter one.
 
+* **No two sentences are read identically.** Everything above is a rule, and a
+  rule applied exactly is the tell: two sentences of the same kind in the same
+  position come out at the same pace, the same height and the same pause, to
+  the sample. Nobody reads like that — sentence-level rate varies by a few
+  percent and mean F0 by around a semitone between neighbouring sentences of
+  the same speaker, and that variance is not noise, it is the difference
+  between a person and a metronome. `_jitter` puts a small, *deterministic*
+  amount of it back: derived from the sentence's own text, so the same text
+  read twice gives the same recording and a bug is reproducible.
+
 * **Emotion is rate, pitch, range, loudness and pause length together.** The
   acoustic literature is consistent about the direction of each: happiness and
   anger raise F0, widen its range and speed the delivery up; sadness lowers and
@@ -67,6 +77,7 @@ every rule above without a container.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 # --- styles ---------------------------------------------------------------
@@ -328,6 +339,36 @@ MAX_SENTENCE_PITCH_ST = 2.5
 # still counts as having it.
 FINAL_LENGTHENING = 0.96
 
+# How much every sentence is allowed to differ from the rule that produced it.
+#
+# Small on purpose, and small in three different units. The measured
+# sentence-to-sentence variation in read speech is larger than all of these;
+# what is wanted here is not a simulation of it but the removal of the
+# artificial *exactness*, and the failure mode of overdoing it — a reading that
+# wanders — is much worse than the failure mode of underdoing it, which is the
+# reading this already had.
+JITTER_RATE = 0.03
+JITTER_PITCH_ST = 0.25
+JITTER_PAUSE = 0.15
+
+
+def _jitter(text: str, index: int, count: int = 3) -> tuple[float, ...]:
+    """`count` numbers in [-1, 1], fixed by `text` and its position.
+
+    A hash and not a random number generator, and `hashlib` and not `hash()`,
+    which is salted per process. The property being bought is that the same
+    text produces the same recording every time: a reading that varies run to
+    run cannot be compared against the last one, and a complaint about a
+    sentence could not be reproduced to be fixed.
+
+    The index is in the digest as well as the text, so a paragraph that repeats
+    a sentence does not repeat its delivery.
+    """
+    digest = hashlib.blake2b(f"{index}:{text}".encode(), digest_size=2 * count).digest()
+    return tuple(
+        int.from_bytes(digest[i * 2 : i * 2 + 2], "big") / 32767.5 - 1.0 for i in range(count)
+    )
+
 
 @dataclass(frozen=True)
 class Beat:
@@ -423,6 +464,13 @@ def plan(
             if last_in_block:
                 rate *= FINAL_LENGTHENING
 
+            # The wobble, before any of the depth scaling below: it rides the
+            # same `expressiveness` as every other deviation, so a flat reading
+            # is still exactly flat.
+            wobble_rate, wobble_pitch, wobble_pause = _jitter(segment, len(beats))
+            rate *= 1.0 + JITTER_RATE * wobble_rate
+            pitch += JITTER_PITCH_ST * wobble_pitch
+
             if last_in_block and last_block:
                 pause = FINAL_PAUSE_SEC
             elif last_in_block:
@@ -444,7 +492,9 @@ def plan(
                     synth_rate=heard / semitone_ratio(moved),
                     pitch=moved,
                     gain_db=style_gain + _depth(depth, gain_db),
-                    pause_sec=pause * style_pause,
+                    pause_sec=pause
+                    * style_pause
+                    * (1.0 + _depth(depth, JITTER_PAUSE * wobble_pause)),
                     variation=variation,
                     duration_variation=duration_variation,
                 )

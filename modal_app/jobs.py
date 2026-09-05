@@ -57,8 +57,18 @@ PROGRESS = {QUEUED: 0, SEPARATING: 5, SYNTHESIZING: 10, CONVERTING: 30, MIXING: 
 # time it gets there: the synthesiser has already turned the text into a
 # recording of somebody talking, and converting it is the same job as
 # converting one the user uploaded.
-JOB_MODES = ("song", "speech", "tts")
-CONVERSION_MODE = {"song": "singing", "speech": "speech", "tts": "speech"}
+#
+# `vocal` and `song` share the *singing* checkpoint and differ only in whether
+# the separator runs. It exists because separation is not free in either
+# direction: it costs a GPU pass, and what it hands the converter is a stem
+# with the artefacts every source separator leaves — the smeared transients and
+# the faint ghost of the backing track that then get converted along with the
+# voice, and that account for a good part of why a converted song sounds
+# processed. A recording that is already just a voice should not pay either
+# price, so `vocal` skips straight to the conversion and returns it as-is: no
+# stem, no mix, and the take keeps its own key.
+JOB_MODES = ("song", "vocal", "speech", "tts")
+CONVERSION_MODE = {"song": "singing", "vocal": "singing", "speech": "speech", "tts": "speech"}
 
 
 class JobError(RuntimeError):
