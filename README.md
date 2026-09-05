@@ -2020,6 +2020,30 @@ chuyển hợp âm.
 Hợp với rap, hip-hop, nhạc điện tử. Bài mà giọng đi giai điệu nhiều thì vẫn chỏi
 ở những ô nhịp đổi hợp âm, và không prompt nào sửa được điều đó.
 
+### Bật "máy làm beat" trên deployment
+
+Hai biến, đặt trong **Settings → Secrets and variables → Actions** của repo:
+
+| Tên | Đặt ở tab | Giá trị |
+|---|---|---|
+| `BEAT_GENERATOR` | **Variables** | `1` |
+| `HF_TOKEN` | **Secrets** | token đọc của Hugging Face |
+
+Token lấy thế này, và **thứ tự quan trọng** — chấp nhận điều khoản trước, tạo
+token sau:
+
+1. đăng nhập huggingface.co, mở `stabilityai/stable-audio-open-1.0`, bấm nút
+   chấp nhận điều khoản trên trang model (weights là gated, không có bước này
+   thì token hợp lệ vẫn nhận 401);
+2. Settings → Access Tokens → New token, quyền **read** là đủ;
+3. dán vào `HF_TOKEN` ở tab Secrets.
+
+Rồi chạy lại workflow **Deploy Modal** (Actions → Deploy Modal → Run workflow),
+hoặc push bất cứ gì vào `main`.
+
+Nếu deploy đỏ: xoá biến `BEAT_GENERATOR` đi là mọi thứ còn lại trở về xanh ngay.
+Đó là lý do cái cờ tồn tại.
+
 ### Còn phải verify
 
 - [ ] **Image có build được thật không.** `pip install --dry-run` xanh với đúng
