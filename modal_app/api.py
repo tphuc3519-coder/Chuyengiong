@@ -77,8 +77,17 @@ web.add_middleware(
 
 @web.get("/health")
 async def health() -> dict:
-    """Liveness probe. Deliberately touches no Volume and no GPU."""
-    return {"status": "ok", "app": APP_NAME}
+    """Liveness probe, plus what this deployment can actually do.
+
+    `beat_generator` is here so the browser can ask instead of being told at
+    build time. It was a constant in `web/lib/params.ts` for one commit, which
+    meant two flags in two repositories that had to be flipped together — and a
+    UI offering a source the API refuses is a worse failure than either flag
+    being wrong on its own.
+
+    Still touches no Volume and no GPU: it reads an environment variable.
+    """
+    return {"status": "ok", "app": APP_NAME, "beat_generator": beatgen.enabled()}
 
 
 @web.get("/voices")

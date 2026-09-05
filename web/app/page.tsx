@@ -18,11 +18,13 @@ import {
   SOURCE_MAX_SEC,
   convertsVoice,
   defaultParams,
+  effectiveBeatSource,
   forMode,
   maxCharsFor,
   type Mode,
   type Params,
 } from "@/lib/params";
+import { capabilities } from "@/lib/api";
 import { useConversion } from "@/lib/useConversion";
 
 /**
@@ -63,6 +65,8 @@ export default function Page() {
   const [beat, setBeat] = useState<File | null>(null);
   const [consent, setConsent] = useState(false);
 
+  // What this deployment ships, asked once rather than baked into the bundle.
+  const [canGenerate, setCanGenerate] = useState(false);
   const [remaining, setRemaining] = useState<number | null>(null);
   const [detected, setDetected] = useState<number | null>(null);
 
@@ -79,14 +83,27 @@ export default function Page() {
   // upload find out.
   const needsVoice = convertsVoice(mode);
   const beatMode = mode === "beat" || mode === "rebeat";
+  // Computed, never written back into `params`: a `useEffect` that corrected
+  // the stored choice would leave a window where the form believed one thing
+  // and the request said another.
+  const beatSource = effectiveBeatSource(params, canGenerate);
   const hasBeat =
-    !beatMode ||
-    (params.beatSource === "generate" ? params.beatPrompt.trim().length > 0 : beat !== null);
+    !beatMode || (beatSource === "generate" ? params.beatPrompt.trim().length > 0 : beat !== null);
   const ready =
     hasSource && hasBeat && !tooLong && (!needsVoice || reference !== null) && consent && !busy;
 
   // `/submit` reports what is left of the hourly allowance, and `reset` wipes
   // the run state — so keep it here, where it survives into the next attempt.
+  useEffect(() => {
+    let live = true;
+    void capabilities().then((able) => {
+      if (live) setCanGenerate(able.beatGenerator);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
   useEffect(() => {
     if (state.jobsRemaining !== null) setRemaining(state.jobsRemaining);
   }, [state.jobsRemaining]);
@@ -107,12 +124,12 @@ export default function Page() {
     if (!ready || (needsVoice && !reference)) return;
     void start({
       mode,
-      params,
+      params: { ...params, beatSource },
       // `tts` sends the text and no file; the other two send the file and the
       // backend never reads `text`.
       source: mode === "tts" ? null : source,
       text,
-      beat: beatMode && params.beatSource === "upload" ? beat : null,
+      beat: beatMode && beatSource === "upload" ? beat : null,
       reference: needsVoice ? reference : null,
       referenceName: reference?.name || "reference.wav",
       consent,
@@ -198,6 +215,7 @@ export default function Page() {
                 beat={beat}
                 onBeat={setBeat}
                 onChange={setParams}
+                canGenerate={canGenerate}
                 disabled={busy}
               />
             </fieldset>
@@ -270,7 +288,7 @@ export default function Page() {
                   ? "Gõ văn bản cần đọc để tiếp tục."
                   : "Chọn file nguồn để tiếp tục."
                 : !hasBeat
-                  ? params.beatSource === "generate"
+                  ? beatSource === "generate"
                     ? "Mô tả beat muốn sinh để tiếp tục."
                     : "Chọn file beat thay thế để tiếp tục."
                   : tooLong

@@ -144,6 +144,16 @@ def generator_on(monkeypatch):
     monkeypatch.setattr(api.beatgen, "enabled", lambda: True)
 
 
+def test_health_says_whether_this_deployment_can_make_a_beat(client, monkeypatch):
+    """Asked rather than baked into the browser bundle. It was a build-time
+    constant in the web app for one commit — two flags in two repositories that
+    had to be flipped together, and a UI offering a source the API refuses is a
+    worse failure than either flag being wrong alone."""
+    assert client.get("/health").json()["beat_generator"] is False
+    monkeypatch.setattr(api.beatgen, "enabled", lambda: True)
+    assert client.get("/health").json()["beat_generator"] is True
+
+
 def test_a_generated_beat_is_refused_where_the_generator_is_not_deployed(client, started):
     """Refused at submit rather than three minutes into a pipeline with no
     container to run it: the generator is only attached to the App on

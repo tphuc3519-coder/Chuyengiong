@@ -133,6 +133,36 @@ export function apiBase(): Promise<string> {
   return apiBasePromise;
 }
 
+/**
+ * What the deployment can do, asked rather than assumed.
+ *
+ * `beat_generator` was a build-time constant here for one commit — two flags,
+ * in two repositories, that had to be flipped together. A UI offering a source
+ * the API refuses is a worse failure than either flag being wrong alone, so the
+ * browser asks now.
+ *
+ * Fetched once per page load. A deployment too old to answer simply has no
+ * generator, which is the same conclusion by a different route.
+ */
+export type Capabilities = { beatGenerator: boolean };
+
+let capabilitiesPromise: Promise<Capabilities> | null = null;
+
+export function capabilities(): Promise<Capabilities> {
+  capabilitiesPromise ??= (async () => {
+    try {
+      const base = await apiBase();
+      const response = await fetch(`${base}/health`, { cache: "no-store" });
+      const body = await response.json();
+      return { beatGenerator: Boolean(body?.beat_generator) };
+    } catch {
+      // Never throws: not knowing means not offering, and the form still works.
+      return { beatGenerator: false };
+    }
+  })();
+  return capabilitiesPromise;
+}
+
 function detail(body: string, fallback: string): string {
   try {
     const parsed = JSON.parse(body);

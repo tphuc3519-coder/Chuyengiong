@@ -21,6 +21,17 @@ export function convertsVoice(mode: Mode): boolean {
 }
 
 /**
+ * The beat source that will actually be used, given what the deployment ships.
+ *
+ * Computed rather than stored, so there is no window where the form believes
+ * one thing and the request says another — which is what a `useEffect` writing
+ * the choice back into state would have created.
+ */
+export function effectiveBeatSource(params: Params, canGenerate: boolean): BeatSource {
+  return canGenerate ? params.beatSource : "upload";
+}
+
+/**
  * `beat` is `song` with the backing track replaced rather than kept: same
  * separation, same conversion, and then the original instrumental is measured
  * for tempo and key and thrown away. What goes back under the voice is a beat
@@ -131,8 +142,9 @@ export const MAX_VOCAL_GAIN_DB = 12;
  * `upload` — a file the user already has the right to use. No GPU, no model,
  * and the licence of what comes out is the licence they came with.
  *
- * `generate` — music invented from a description. **Off on most deployments**
- * — see `BEAT_GENERATOR_ENABLED`. Nothing to do with the
+ * `generate` — music invented from a description. Whether a deployment ships
+ * it is asked at run time (`capabilities()` in `lib/api.ts`), not baked in
+ * here: it needs a container image that not every deployment builds. Nothing to do with the
  * original song, which is the point and also the limit: it cannot know the
  * song's chord progression. The model will not land on the BPM it is asked
  * for either, and does not need to — the result is measured and fitted
@@ -146,20 +158,6 @@ export const MAX_VOCAL_GAIN_DB = 12;
  * source that reaches that bar, because there a person made the arrangement.
  */
 export type BeatSource = "upload" | "generate";
-
-/**
- * Whether this deployment ships the beat generator, mirrored from
- * `BEAT_GENERATOR` in `modal_app/beatgen.py`.
- *
- * Off, because its container image does not build yet — and `modal deploy`
- * builds every registered image in one pass, so a broken one fails the whole
- * deploy rather than its own function. Until somebody has watched that image
- * build, the backend refuses the source with a 400 and this hides the option
- * rather than offering a button that cannot work.
- *
- * Flip both when it is fixed: this, and `BEAT_GENERATOR=1` on the deployment.
- */
-export const BEAT_GENERATOR_ENABLED = false;
 
 export const BEAT_PROMPT_CHARS = 300;
 export const BEAT_PROMPT_EXAMPLES = [
@@ -320,7 +318,10 @@ export type Params = {
 
 export function defaultParams(mode: Mode): Params {
   return {
-    beatSource: "upload",
+    // `generate` is the default because it is what the mode promises: the app
+    // makes the beat. Where the deployment does not ship the generator the page
+    // clamps this to `upload` — see `effectiveBeatSource`.
+    beatSource: "generate",
     beatPrompt: "",
     beatSeed: BEAT_RANDOM_SEED,
     cfgRate: DEFAULT_CFG_RATE,

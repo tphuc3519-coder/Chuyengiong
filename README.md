@@ -26,6 +26,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 13 | Mode "Đổi beat" đứng riêng — giữ nguyên giọng gốc, không cần giọng mẫu | 🟡 code xong, chờ chạy thật |
 | 13.1 | Sửa deploy đỏ: image của beatgen chặn cả ba phase | 🟢 deploy xanh lại, sinh beat tắt sau cờ |
 | 13.2 | Nghe thật lần đầu: gỡ "Phối lại", sửa tempo sai 3:2 | 🟢 đo trên nhạc thật |
+| 13.3 | Sửa đúng dòng làm chết deploy, bật lại "máy làm beat" | 🟡 pip resolve xanh, chờ build thật |
 
 ## Cấu trúc
 
@@ -1953,3 +1954,78 @@ Kết quả trên chính bản Ryu No Kage: **153.0 BPM** (trước là 102.7), 
       may, không phải vì tin cậy
 - [ ] 3/11 đoạn vẫn đọc 103 BPM. Cả bài thì đúng, nhưng nếu sau này cần đo theo
       đoạn thì chưa đủ
+
+---
+
+## 13.3 — Một dòng, ba phase
+
+Sau khi gỡ "Phối lại", app không còn cách nào **tự** làm ra beat: nguồn duy nhất
+còn lại là người dùng tải beat lên. Phản hồi đúng và thẳng: *"sao bảo tôi đưa
+beat khác vào, bạn phải phối chứ"*.
+
+Thứ chặn đường đó là image của `beatgen` — và nguyên nhân, khi cuối cùng chạy
+được trình giải phụ thuộc, là một dòng:
+
+```
+ERROR: Cannot install einops==0.8.0 and stable-audio-tools==0.0.16
+The conflict is caused by:
+    stable-audio-tools 0.0.16 depends on einops==0.7.0
+```
+
+`einops` bị ghim ở 0.8.0 trong cùng lệnh cài, trong khi package ghim chính nó ở
+0.7.0. Không có gì để giải. Và vì `modal deploy` build mọi image trong một lượt,
+một dòng đó kéo theo cả Phase 11, 12 và 13.
+
+### Luật rút ra, viết thành test
+
+**Danh sách này chỉ được ghim những thứ `base_image` đã giữ.** Package tự ghim
+phụ thuộc của nó, và package thắng. `test_beatgen.py` giờ từ chối bất kỳ tên nào
+ngoài `stable-audio-tools`, `torch`, `torchaudio`, `transformers`.
+
+Ba cái còn lại có lý do riêng, đã đo bằng `pip install --dry-run`:
+
+* **torch/torchaudio** lặp lại ở đúng version của `base_image`. Để yên thì trình
+  giải lấy torchaudio 2.11 đặt cạnh torch 2.4 — cài được và không chạy được.
+* **transformers 4.46.3** vì lý do `tts.py` đã viết dài: 5.x đòi torch ≥ 2.5, gặp
+  2.4 thì in **một dòng** vào log build rồi đi tiếp với mọi model class thành
+  stub. Stable Audio Open điều kiện hoá bằng T5, nên cái stub đó là cả tính năng.
+* **protobuf ở layer riêng**, sau. `descript-audiotools` chặn protobuf dưới 3.20
+  cho một logger không ai dùng, còn agent của Modal cần ≥ 3.20. Cùng một
+  `pip_install` thì trình giải phải thoả cái chặn; ở layer sau thì nó đè lên.
+  `conversion.py` đã làm đúng thế cho seed-vc và mang bản dài của câu chuyện.
+
+### Cờ tính năng: hỏi backend, đừng ghim vào bundle
+
+`BEAT_GENERATOR_ENABLED` từng là hằng số trong `web/lib/params.ts` — hai cờ, ở
+hai nơi, phải lật cùng lúc. Một UI mời một nguồn mà API từ chối còn tệ hơn việc
+một trong hai cờ sai.
+
+Giờ `/health` trả về `beat_generator`, và trình duyệt hỏi một lần mỗi lần tải
+trang. Bản triển khai cũ quá đến mức không trả lời được thì coi như không có
+generator — cùng một kết luận, bằng đường khác.
+
+Và nguồn beat mặc định đổi thành **"Máy làm beat"**, vì đó là điều mode này hứa.
+`effectiveBeatSource()` kẹp nó về `upload` ở nơi không có generator — tính ra chứ
+không ghi ngược vào state, để không có khoảnh khắc nào form tin một đằng và
+request gửi một nẻo.
+
+### Cái này vẫn không phải "phối lại bài của bạn"
+
+Nói rõ vì đây là chỗ dễ hiểu nhầm nhất, và UI cũng nói đúng câu này: Stable Audio
+Open **sáng tác theo mô tả**, nó không đọc vòng hợp âm bài gốc. Nó cho ra nhạc
+thật — nhạc cụ thật, bản phối thật, khác hẳn máy đánh trống của Phase 12 — rồi
+`beats.py` kéo về đúng tốc độ và tông của bài. Nhưng nó không đi theo các đoạn
+chuyển hợp âm.
+
+Hợp với rap, hip-hop, nhạc điện tử. Bài mà giọng đi giai điệu nhiều thì vẫn chỏi
+ở những ô nhịp đổi hợp âm, và không prompt nào sửa được điều đó.
+
+### Còn phải verify
+
+- [ ] **Image có build được thật không.** `pip install --dry-run` xanh với đúng
+      bộ pin này, và đó mới là *giải được phụ thuộc* — chưa phải là *build xong*
+      trên Modal. Cờ `BEAT_GENERATOR` vẫn mặc định tắt đúng vì lý do đó: bật lên,
+      deploy, nếu đỏ thì tắt lại và không kéo theo gì khác
+- [ ] `HF_TOKEN` phải có, weights của Stable Audio Open là gated
+- [ ] beat sinh ra có thật sự không có giọng hát trong đó không
+- [ ] nghe thử: nó có hơn hẳn máy đánh trống Phase 12 không, và hơn tới đâu

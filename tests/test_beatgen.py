@@ -52,6 +52,31 @@ def test_steps_are_clamped_to_a_useful_range():
     assert beatgen.clamp_steps(10_000) == beatgen.MAX_STEPS
 
 
+def test_nothing_in_the_requirements_fights_the_package_itself():
+    """The one line that failed every deploy for three phases:
+
+        ERROR: Cannot install einops==0.8.0 and stable-audio-tools==0.0.16
+        The conflict is caused by:
+            stable-audio-tools 0.0.16 depends on einops==0.7.0
+
+    `einops` was pinned here to a version the package forbids. The package pins
+    its own dependencies; this list may pin the things `base_image` already
+    holds, and nothing else."""
+    allowed = {"stable-audio-tools", "torch", "torchaudio", "transformers"}
+    for requirement in beatgen.BEATGEN_REQUIREMENTS:
+        name = requirement.split("==")[0].split(">")[0].split("<")[0].strip()
+        assert name in allowed, f"{name} is not ours to pin"
+
+
+def test_protobuf_is_forced_after_the_package_and_not_beside_it():
+    """`descript-audiotools` caps protobuf below 3.20 for a logger nothing here
+    touches, and Modal's own agent needs 3.20. In the same `pip_install` the
+    resolver has to satisfy the cap; in a later layer it lands on top of it.
+    `conversion.py` carries the long version of this story."""
+    assert beatgen.PROTOBUF_SPEC not in beatgen.BEATGEN_REQUIREMENTS
+    assert beatgen.PROTOBUF_SPEC.startswith("protobuf>=3.20")
+
+
 def test_the_prompt_limit_matches_the_one_the_pipeline_enforces():
     """`pipeline` runs on the API image and cannot import this module, so the
     number exists twice. This is the test that keeps the copies equal."""
