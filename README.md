@@ -24,6 +24,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 11 | Đổi beat — đo BPM/tông, khớp beat có sẵn hoặc sinh beat mới | 🟡 code xong, chờ nghe thật trên GPU |
 | 12 | Phối lại bài gốc — đọc vòng hợp âm rồi dựng lại bằng tiếng tự tổng hợp | 🟡 code xong, chờ nghe thật |
 | 13 | Mode "Đổi beat" đứng riêng — giữ nguyên giọng gốc, không cần giọng mẫu | 🟡 code xong, chờ chạy thật |
+| 13.1 | Sửa deploy đỏ: image của beatgen chặn cả ba phase | 🟢 deploy xanh lại, sinh beat tắt sau cờ |
 
 ## Cấu trúc
 
@@ -1813,3 +1814,62 @@ chuyển giọng nào, vẫn cần cam kết, vẫn tách nền, vẫn watermark
       artefact khác nhau. Có thể mặc định `Độ trong` cho mode này phải khác
 - [ ] `vocal_gain_db` mặc định 0: giọng gốc đã được mix sẵn trong bài, nên tỷ lệ
       giọng/nền có thể lệch so với khi giọng là bản convert
+
+---
+
+## 13.1 — Một image hỏng chặn ba phase
+
+Phase 11, 12 và 13 đều đã merge và **không có phase nào lên production**. API
+thật vẫn trả lời bằng code của Phase 10, nên một job `rebeat` gửi lên nhận
+`422`: phiên bản đó chưa biết mode ấy, và ở đó `reference` còn là field bắt
+buộc nên FastAPI từ chối ngay khi validate, trước cả khi vào thân hàm.
+
+Nguyên nhân là một dòng trong log deploy:
+
+```
+failed to run builder command "python -m pip install einops==0.8.0
+  'protobuf>=3.20,<7' stable-audio-tools==0.0.16": container exit status: 1
+Image build for im-O19YwE2Ch5GisKJiWZjztC failed.
+```
+
+`stable-audio-tools` là một package **training**: nó kéo theo
+pytorch-lightning, wandb, gradio, encodec, laion-clap, k-diffusion và hơn chục
+thứ nữa, vài trong số đó tự pin torch — trên một base image đã có torch 2.4.0
+và numpy<2. Gỡ được chỗ đó là một việc thật, và nó cần output pip thật
+(`modal image logs <id>`) chứ không phải một phỏng đoán.
+
+### Bài học là về bán kính ảnh hưởng, không phải về pip
+
+`modal deploy` build **mọi image đã đăng ký trong một lượt**. Nên một image
+hỏng không làm hỏng function của chính nó — nó làm hỏng cả lần deploy, và kéo
+theo mọi thay đổi không liên quan trong cùng push. Ba phase code chạy được nằm
+im sau một tính năng chưa ai từng nhìn thấy build xong.
+
+Sửa bằng cấu trúc chứ không bằng cách vá pin:
+
+* `beatgen.enabled()` đọc `BEAT_GENERATOR`, mặc định **tắt** — ngược với
+  `watermark.enabled()`, và ngược có lý do: watermark bật trừ khi tắt đi, còn
+  cái này tắt trừ khi có người bật, vì chưa ai xem image của nó build xong.
+* `BeatGenerator` không còn `@app.cls` ở module scope. Nó được gắn vào App bên
+  trong `register()`, và `deploy.py` chỉ gọi `register()` khi cờ bật.
+* `beatgen_image` cũng thành một hàm. Modal chỉ build image mà object đã đăng
+  ký tham chiếu tới, nên một image mồ côi *lẽ ra* bị bỏ qua — nhưng "lẽ ra bị
+  bỏ qua" là một khẳng định về nội tại của người khác, mà thứ vừa hỏng chính là
+  một lần deploy chết vì image không ai cần. Không tạo ra nó là một bảo đảm;
+  không gắn nó vào là một kỳ vọng.
+* `api.submit` từ chối `beat_source=generate` bằng 400 có câu chữ, thay vì để
+  job chạy ba phút rồi chết vì không có container nào.
+* UI **ẩn** nút "Tự sinh beat" khi cờ tắt — không phải disable, vì backend từ
+  chối thẳng nguồn đó và một nút xám là quảng cáo cho thứ không có.
+
+Hai test giữ cho nó không tái diễn: `BeatGenerator` **không** được đăng ký
+trong một deploy chưa bật cờ, và nó **có** được đăng ký khi bật.
+
+### Bật lại khi nào
+
+Khi ai đó ngồi gỡ `BEATGEN_REQUIREMENTS` và **nhìn thấy image build xong**.
+Lúc đó: `BEAT_GENERATOR=1` và `HF_TOKEN` trên deployment, và
+`BEAT_GENERATOR_ENABLED = true` trong `web/lib/params.ts`.
+
+Hai nguồn beat còn lại — tải lên và phối lại — không cần model nào, không cần
+image nào, và chạy được ngay.

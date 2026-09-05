@@ -24,4 +24,20 @@ from . import (  # noqa: F401  (registration)
 )
 from .app import app
 
+# The beat generator is registered only when the deployment asks for it.
+#
+# Not squeamishness — arithmetic about blast radius. `modal deploy` builds every
+# registered image in one pass, so an image that fails to build does not fail
+# its own function, it fails the deploy and takes every unrelated change in the
+# same push with it. `beatgen_image` does not build today (see the comment on
+# `BEATGEN_REQUIREMENTS`), and while it was imported here unconditionally three
+# phases of working code sat undeployed behind it.
+#
+# So: an image nobody has watched build does not get to hold the deploy hostage.
+# `beatgen` is imported above for `enabled()` alone — importing the module does
+# not register anything, because the `@app.cls` that would is built inside
+# `register()` rather than at module scope.
+if beatgen.enabled():
+    beatgen.register()
+
 __all__ = ["app"]

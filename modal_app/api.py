@@ -33,7 +33,7 @@ import modal
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import audit, jobs, pipeline, ratelimit, storage, voices
+from . import audit, beatgen, jobs, pipeline, ratelimit, storage, voices
 from .app import APP_NAME, DATA_DIR, MODEL_DIR, api_image, app, config_secret, data_vol, model_vol
 from .audio_utils import AudioError
 from .prosody import DEFAULT_EMOTION, DEFAULT_EXPRESSIVENESS
@@ -335,6 +335,16 @@ async def submit(
                 raise HTTPException(400, "this mode needs a beat file, or a different source")
             beat_bytes = await _read_upload(beat, MAX_BEAT_BYTES, "beat")
         elif source_of_beat == "generate":
+            # Refused here rather than three minutes into a pipeline that has
+            # no container to run it: `deploy.py` only registers the generator
+            # when the deployment asks for it, so on most deployments this
+            # source does not exist at all.
+            if not beatgen.enabled():
+                raise HTTPException(
+                    400,
+                    "generated beats are not enabled on this deployment; "
+                    "upload a beat or rebuild the song's own backing track",
+                )
             if not params.get("beat_prompt"):
                 raise HTTPException(400, "describe the beat to generate, or upload one")
             if beat is not None:
