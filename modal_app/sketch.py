@@ -1,7 +1,7 @@
 """A deliberately crude synth take of a song's own chords.
 
-    Chart + Track ──► render() ──► sketch.wav ──► Stable Audio Open
-                                                  (init_audio)
+    Chart + Track ──► render() ──► sketch.wav ──► ACE-Step
+                                                  (audio2audio)
                                                         │
                                                    real instruments
 
@@ -16,10 +16,9 @@ that gap is not a tuning problem — it is the distance between generating
 waveforms from arithmetic and a sampled instrument library. So it went.
 
 What comes after it is diffusion, and diffusion changes what the synthesis is
-*for*. `generate_diffusion_cond` takes an `init_audio`: start the sampler from
-a noised version of this instead of from noise, and the output keeps the
-harmony, the tempo and the shape of what it started from while the timbre is
-re-imagined from scratch. So the sketch does not have to sound good. It has to
+*for*. ACE-Step takes reference audio: given this instead of nothing, it writes
+its own instruments over the harmony, the tempo and the bar lines of what it
+was handed. So the sketch does not have to sound good. It has to
 be **harmonically unambiguous and rhythmically square**, and then get out of
 the way.
 
@@ -41,7 +40,7 @@ job:**
 
 **And the copyright argument, which is the whole point of the detour.** The
 straightforward way to get the model to follow a song's harmony is to feed it
-the song: separate the instrumental, pass *that* as `init_audio`. It works, and
+the song: separate the instrumental, pass *that* as the reference. It works, and
 what comes out is a derivative of the master recording — the exact thing this
 branch exists to avoid, and the thing audio fingerprinting is built to find
 through precisely this kind of transformation.

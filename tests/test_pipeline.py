@@ -577,7 +577,7 @@ def test_the_generator_is_reached_through_the_lookup_not_the_imported_class(
     assert called["prompt"] == "boom bap"
     # `generate` and `derive` differ only in these two.
     assert called["init_wav"] is None
-    assert called["init_noise_level"] is None
+    assert called["init_strength"] is None
     assert storage.get(job_id, pipeline.BEAT) == b"generated-beat"
 
 

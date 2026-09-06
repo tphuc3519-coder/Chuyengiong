@@ -2,7 +2,7 @@
 
     instrumental + Track ──► detect() ──► Chart([Chord, Chord, …])
                                                     │
-                                          sketch.render() ──► init_audio
+                                          sketch.render() ──► ref audio
 
 The measurement `sketch.py` needs and `analysis.py` does not provide: tempo
 says *when* and key says *where*, and neither says what the harmony is doing
@@ -12,7 +12,7 @@ between one bar and the next.
 `arrange.py`, whose synthesised bed was the *finished* backing track — and that
 bed lost to a human arrangement by a distance no tuning closes, so both went.
 What is downstream of it now is `sketch.py`, which renders the same chart badly
-on purpose and hands it to Stable Audio Open as `init_audio`. The bar moved:
+on purpose and hands it to ACE-Step as reference audio. The bar moved:
 the sketch is not what anybody hears, it is how the model is told which chords
 to play. Ugly is fine there. Wrong is not, which is why the restriction below
 still matters as much as it ever did.

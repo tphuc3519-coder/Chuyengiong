@@ -548,12 +548,14 @@ def _beat_bed(job_id: str, params: dict, instrumental: bytes, beat: bytes | None
     return bed
 
 
-def _init_audio(job_id: str, params: dict, instrumental: bytes) -> tuple[bytes, float, str]:
-    """What `derive` starts the sampler from, and how much of it should survive.
+def _init_audio(job_id: str, params: dict, instrumental: bytes) -> tuple[bytes, float, str, float]:
+    """What `derive` writes over, and how closely the model should follow it.
 
-    Returns `(wav, noise_level, prompt)`. The prompt comes back because this is
-    where the song's own tempo and key are known: a user who typed nothing gets
-    a description written from the measurement rather than a refusal.
+    Returns `(wav, strength, prompt, seconds)`. The last three come back
+    because this is where the instrumental is measured, and measuring it twice
+    to learn the same things would be a decode nobody needs: the prompt is
+    written from the tempo and key when the user typed nothing, and the length
+    is the song's own so the bed is one continuous arrangement.
 
     **The sketch branch is the reason this feature is not just "feed it the
     song".** `chords.detect` reads a chart — a sequence of triads, which is the
@@ -570,27 +572,35 @@ def _init_audio(job_id: str, params: dict, instrumental: bytes) -> tuple[bytes, 
 
     track = analyse_bytes(instrumental)
     prompt = params["beat_prompt"] or beatgen.describe(track)
-    seconds = beatgen.DEFAULT_SECONDS
+    # The song's own length, not a loop length. The previous model could only
+    # make 47 seconds, so a three minute song got one loop repeated four times
+    # — no intro, no chorus that lifts, and a seam every thirty seconds.
+    # ACE-Step writes the whole thing in one pass, so ask it for the whole
+    # thing and leave `beats.lay_under` nothing to repeat.
+    seconds = beatgen.clamp_seconds(track.duration_sec)
 
     if params["beat_init"] == "original":
+        # The whole instrumental, not a window out of the middle of it. The
+        # previous model could only write 47 seconds, so the reference was cut
+        # to match and taken a quarter of the way in to miss the intro. This
+        # one writes the whole song, so the reference is the whole song and the
+        # arrangement it follows keeps the shape it had.
         audio = decode_audio(instrumental, sketch.SAMPLE_RATE)
-        # A quarter of the way in rather than at the top. Songs open with
-        # intros — a held pad, a count-in, four bars of nothing — and an init
-        # taken from one asks the model to re-render a song that has not
-        # started. A quarter in is the first verse of almost anything.
-        start = int(0.25 * len(audio))
-        window = audio[start : start + int(seconds * sketch.SAMPLE_RATE)]
-        if len(window) < sketch.SAMPLE_RATE:
-            window = audio[: int(seconds * sketch.SAMPLE_RATE)]
-        return encode_wav(window, sketch.SAMPLE_RATE), beatgen.ORIGINAL_NOISE_LEVEL, prompt
+        return (
+            encode_wav(audio, sketch.SAMPLE_RATE),
+            beatgen.ORIGINAL_STRENGTH,
+            prompt,
+            seconds,
+        )
 
     chart = chords.detect_bytes(instrumental, track)
     print(f"[derive] {job_id}: {track} / {chart}")
     jobs.record_params(job_id, {"beat_chart": str(chart)})
     return (
         sketch.render_wav(chart, track, seconds, seed=max(0, params["beat_seed"])),
-        beatgen.SKETCH_NOISE_LEVEL,
+        beatgen.SKETCH_STRENGTH,
         prompt,
+        seconds,
     )
 
 
@@ -613,21 +623,30 @@ def _generate_beat(job_id: str, params: dict, instrumental: bytes | None = None)
     from . import beatgen
 
     init_wav: bytes | None = None
-    noise: float | None = None
+    strength: float | None = None
     prompt = params["beat_prompt"]
+    seconds = beatgen.DEFAULT_SECONDS
     if params["beat_source"] == "derive":
         if not instrumental:
             raise BeatError("nothing to derive a beat from: the instrumental is missing")
-        init_wav, noise, prompt = _init_audio(job_id, params, instrumental)
+        init_wav, strength, prompt, seconds = _init_audio(job_id, params, instrumental)
+    elif instrumental:
+        # `generate` invents its own music, but it should still be as long as
+        # the song it is going under: a bed that has to be looped has a seam,
+        # whatever wrote it.
+        from .analysis import analyse_bytes
+
+        seconds = beatgen.clamp_seconds(analyse_bytes(instrumental).duration_sec)
 
     # `beatgen.generator()`, never the imported class: `app.cls()` returns a new
     # object rather than decorating that one, so the name in the module has no
     # `.remote` on it. See the docstring there.
     beat = beatgen.generator()().generate.remote(
         prompt=prompt,
+        seconds=seconds,
         seed=params["beat_seed"],
         init_wav=init_wav,
-        init_noise_level=noise,
+        init_strength=strength,
     )
     storage.put(job_id, BEAT, beat)
     data_vol.commit()

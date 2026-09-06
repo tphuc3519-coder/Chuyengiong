@@ -36,14 +36,14 @@ rate_dict = modal.Dict.from_name("vc-ratelimit", create_if_missing=True)
 #                    means on, which is the default (`watermark.enabled`)
 #   JOBS_PER_HOUR    a positive integer puts the per-IP cap back; empty means
 #                    no cap, which is where this now starts (`ratelimit.max_jobs`)
-#   HF_TOKEN         a Hugging Face token whose account has accepted Stable
-#                    Audio Open's licence. Only the beat generator needs it, and
-#                    only generated beats need the generator — everything else
-#                    on the deployment works without it (`beatgen.BeatGenerator`)
+#   HF_TOKEN         optional. The beat generator's weights are Apache 2.0 and
+#                    ungated since it moved to ACE-Step, so nothing requires a
+#                    token any more — it is still forwarded because an
+#                    authenticated download is rate-limited less harshly
+#                    (`beatgen.BeatGenerator`)
 #   BEAT_GENERATOR   set to 1/true/yes/on to ship the beat generator. Off by
-#                    default because its image does not build yet, and a broken
-#                    image fails the whole deploy rather than its own function
-#                    (`beatgen.enabled`)
+#                    default because a broken image fails the whole deploy
+#                    rather than its own function (`beatgen.enabled`)
 CONFIG_KEYS = (
     "ALLOWED_ORIGINS",
     "RATE_LIMIT_SALT",
