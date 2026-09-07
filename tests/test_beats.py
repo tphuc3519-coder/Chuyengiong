@@ -347,3 +347,145 @@ def test_silence_is_refused_rather_than_divided_by():
         beats.balance(encode_wav(np.zeros(SR, dtype=np.float32), SR), SR)
     with pytest.raises(beats.BeatError):
         beats.balance(b"")
+
+
+# --- bar alignment --------------------------------------------------------
+
+
+def bars(bpm: float, seconds: float, offset: float = 0.0, tone: float = 55.0) -> np.ndarray:
+    """A pulse whose bar line is audible: a low hit on beat one, a higher one
+    on the other three. `drums()` above cannot be used for this — every one of
+    its hits is identical, so it has a tempo and no metre at all."""
+    audio = np.zeros(int(seconds * SR), dtype=np.float32)
+
+    def blip(freq: float, decay: float, level: float) -> np.ndarray:
+        length = int(0.12 * SR)
+        env = np.exp(-np.arange(length) / (decay * SR))
+        return (level * env * np.sin(2 * np.pi * freq * np.arange(length) / SR)).astype(np.float32)
+
+    low, high = blip(tone, 0.05, 0.9), blip(tone * 8, 0.01, 0.5)
+    period = 60.0 / bpm
+    index, time = 0, offset
+    while time < seconds - 0.15:
+        hit = low if index % beats.BEATS_PER_BAR == 0 else high
+        start = int(time * SR)
+        audio[start : start + len(hit)] += hit[: max(0, len(audio) - start)]
+        time += period
+        index += 1
+    return audio
+
+
+def test_the_loop_is_cut_from_the_bar_line_not_from_the_first_beat():
+    """The whole point of measuring a downbeat. Cutting from beat three of a
+    bar and then looping puts the beat's bar one on the song's beat three, and
+    it stays there for the length of the song."""
+    source = track(bpm=120, offset=0.1, duration=20.0)
+    source = an.Track(**{**source.__dict__, "downbeat_sec": 0.6, "downbeat_margin": 0.4})
+    plan = beats.plan_fit(source, track(bpm=120))
+    assert plan.loop_start_sec == pytest.approx(0.6)
+
+
+def test_the_beat_is_placed_on_the_songs_bar_line():
+    target = track(bpm=120, offset=0.2)
+    target = an.Track(**{**target.__dict__, "downbeat_sec": 1.2, "downbeat_margin": 0.4})
+    plan = beats.plan_fit(track(bpm=120), target)
+    assert plan.align_sec == pytest.approx(1.2)
+
+
+def test_without_a_bar_line_it_falls_back_to_the_beat_and_says_so():
+    """Not a failure: a bed on the beat is in time, which is where this module
+    started. What is not allowed is committing to a bar line nobody found."""
+    plan = beats.plan_fit(track(bpm=120, offset=0.1), track(bpm=120, offset=0.4))
+    assert plan.loop_start_sec == pytest.approx(0.1)
+    assert plan.align_sec == pytest.approx(0.4)
+    assert any("bar line" in reason for reason in plan.reasons)
+
+
+def test_the_plan_prints_where_the_beat_is_going():
+    plan = beats.plan_fit(track(bpm=120), track(bpm=120, offset=0.4))
+    assert "onto 0.40s" in str(plan)
+
+
+@needs_ffmpeg
+def test_a_fitted_beat_lands_on_the_songs_bar_line_and_not_just_its_beat():
+    """End to end, on audio whose metre is real: the bed's own bar one has to
+    arrive where the song's bar one is, not merely somewhere on the grid."""
+    beat = encode_wav(bars(96, 20, offset=0.4), SR)
+    song = encode_wav(bars(120, 30, offset=0.7, tone=70.0), SR)
+    bed, plan, source, target = beats.analyse_and_fit(beat, song)
+    assert source.has_downbeat and target.has_downbeat
+    # Against the bar line the song was *built* with, not against the plan —
+    # comparing the output to the plan that produced it would pass however
+    # wrong the plan was.
+    assert plan.align_sec == pytest.approx(0.7, abs=0.06)
+
+    # Where the bed's own low hits land, read back off the finished audio.
+    audio = decode_audio(bed, SR)
+    window = int(0.02 * SR)
+    smoothed = np.convolve(np.abs(audio[: int(4 * SR)]), np.ones(window) / window, mode="same")
+    bar = beats.BEATS_PER_BAR * 60.0 / target.bpm
+    hit = float(np.argmax(smoothed)) / SR
+    assert min((hit - 0.7) % bar, (0.7 - hit) % bar) < 0.06
+
+
+@needs_ffmpeg
+def test_the_bed_starts_at_the_top_of_the_file_rather_than_after_a_silence():
+    """A song's first downbeat is essentially never at t=0, so delaying the
+    loop until it would leave every job's first bar with no backing track —
+    which is heard as the beat coming in late. The loop is entered part way
+    through instead."""
+    beat = encode_wav(drums(120, 8), SR)
+    song = encode_wav(bars(120, 24, offset=1.3, tone=70.0), SR)
+    bed, plan, _, target = beats.analyse_and_fit(beat, song)
+    assert plan.align_sec > 0.5, "the test needs a song that does not start on the beat"
+    head = decode_audio(bed, SR)[: int(0.5 * SR)]
+    assert float(np.abs(head).max()) > 0.01
+
+
+@needs_ffmpeg
+def test_the_loop_seam_does_not_click():
+    """A loop spliced to itself steps from wherever the waveform ended to
+    wherever it began, and that step repeats every few bars. The fades at each
+    end are six milliseconds and remove it.
+
+    Measured on the finished bed rather than on the loop, because the seam only
+    exists once the loop has been repeated — and because the fade has to be
+    scheduled from the loop's *measured* length, which is the thing `stretch`
+    cannot know and `lay_under` can.
+    """
+    # A **cosine**, so the waveform is at full amplitude at both cut points —
+    # with a sine it would start and end at zero on its own and the fades would
+    # have nothing to prove.
+    time = np.arange(int(2 * SR)) / SR
+    raw = (0.7 * np.cos(2 * np.pi * 101 * time)).astype(np.float32)
+    assert abs(float(raw[0])) > 0.6 and abs(float(raw[-1])) > 0.6
+
+    loop = encode_wav(raw, SR)
+    length = beats._wav_seconds(loop)
+    bed = decode_audio(beats.lay_under(loop, 6.0, align_sec=0.0), SR)
+
+    # Every seam inside the bed, and the biggest jump between two neighbouring
+    # samples across each of them.
+    for seam in (length, 2 * length):
+        window = bed[int((seam - 0.002) * SR) : int((seam + 0.002) * SR)]
+        assert float(np.abs(np.diff(window)).max()) < 0.05, f"click at {seam}s"
+        assert float(np.abs(window).min()) < 0.05, f"no ramp to zero at {seam}s"
+
+    # And the loop is otherwise untouched — this is a seam fade, not an envelope.
+    middle = bed[int(0.4 * SR) : int(1.5 * SR)]
+    assert float(np.abs(middle).max()) > 0.6
+
+
+@needs_ffmpeg
+def test_the_loop_length_is_read_back_rather_than_recomputed():
+    plan = beats.Fit(semitones=0, tempo_ratio=1.0, loop_start_sec=0.0, loop_length_sec=2.0)
+    time = np.arange(int(3 * SR)) / SR
+    loop = beats.stretch(
+        encode_wav((0.5 * np.sin(2 * np.pi * 220 * time)).astype(np.float32), SR), plan, SR
+    )
+    assert beats._wav_seconds(loop) == pytest.approx(2.0, abs=0.01)
+
+
+def test_a_loop_that_cannot_be_measured_is_an_error_and_not_a_guess():
+    with pytest.raises(beats.BeatError):
+        beats._wav_seconds(b"not a wav")

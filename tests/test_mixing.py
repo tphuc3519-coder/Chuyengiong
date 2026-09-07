@@ -14,7 +14,7 @@ import subprocess
 import numpy as np
 import pytest
 
-from modal_app import mixing
+from modal_app import mixing, styles
 from modal_app.audio_utils import (
     decode_audio,
     decode_wav_channels,
@@ -326,3 +326,188 @@ def test_the_mix_is_not_four_times_the_size_it_needs_to_be():
     mixing.mix(tone(1.0), stereo_tone(1.0), 0.0, watermark=lambda wav: captured.append(wav) or wav)
     # 1s of 16-bit stereo at SR, plus a header.
     assert len(captured[0]) < SR * 2 * 2 * 1.1
+
+
+# --- the bed ---------------------------------------------------------------
+
+
+def bursts(seconds: float, freq: float = 900.0, on: float = 1.0) -> bytes:
+    """A voice that starts and stops, so ducking has gaps to be measured in."""
+    audio = np.zeros(int(seconds * SR), dtype=np.float32)
+    window = np.hanning(int(on * SR)).astype(np.float32)
+    tone = np.sin(2 * np.pi * freq * np.arange(int(on * SR)) / SR).astype(np.float32)
+    for start in range(0, int(seconds), 2):
+        audio[start * SR : start * SR + len(window)] = 0.6 * window * tone
+    return encode_wav(audio, SR)
+
+
+def band_power_db(data: bytes, start: float, end: float, low: float, high: float) -> float:
+    """How much energy sits in one band over one slice, in dB."""
+    audio = decode_audio(data, SR)[int(start * SR) : int(end * SR)]
+    power = np.abs(np.fft.rfft(audio)) ** 2
+    freqs = np.fft.rfftfreq(len(audio), 1.0 / SR)
+    return 10 * np.log10(max(float(power[(freqs > low) & (freqs < high)].sum()), 1e-12))
+
+
+@needs_ffmpeg
+def test_a_mix_with_no_bed_profile_is_the_graph_this_module_always_had():
+    """The property that keeps the old output reachable: `song` mode mixes a
+    vocal back over the instrumental it was separated from, and nothing in a
+    style has any business touching that balance."""
+    voice, bed = bursts(6), tone(6, freq=110.0)
+    plain = mixing.mix(voice, bed)
+    steady = band_power_db(plain, 0.35, 0.75, 90, 130)
+    gap = band_power_db(plain, 1.35, 1.75, 90, 130)
+    assert steady == pytest.approx(gap, abs=0.2)
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("style_id", ["ballad", "auto", "trap"])
+def test_the_bed_gets_out_of_the_way_while_the_voice_is_singing(style_id):
+    """The filter that most separates a record from a karaoke track. Measured
+    in the bed's own band so the voice on top of it is not what is being
+    read."""
+    voice, bed = bursts(6), tone(6, freq=110.0)
+    mixed = mixing.mix(voice, bed, bed=styles.mix_for(style_id))
+    ducked = band_power_db(mixed, 0.35, 0.75, 90, 130)
+    open_ = band_power_db(mixed, 1.35, 1.75, 90, 130)
+    assert open_ - ducked > 0.5
+
+
+@needs_ffmpeg
+def test_asking_for_more_ducking_gets_more_ducking():
+    """`duck_db` is a dial with a scale on it rather than a calibrated number —
+    what has to hold is that it is monotonic."""
+    voice, bed = bursts(6), tone(6, freq=110.0)
+
+    def depth(duck_db: float) -> float:
+        profile = styles.Mixdown(duck_db=duck_db, pocket_db=0.0)
+        mixed = mixing.mix(voice, bed, bed=profile)
+        return band_power_db(mixed, 1.35, 1.75, 90, 130) - band_power_db(mixed, 0.35, 0.75, 90, 130)
+
+    assert depth(0.0) == pytest.approx(0.0, abs=0.2)
+    assert depth(6.0) > depth(3.0) > depth(1.5) > 0.3
+
+
+@needs_ffmpeg
+def test_the_vocal_gain_slider_is_a_level_and_not_a_ducking_control():
+    """The key is split off at the input, before the gain, so turning the voice
+    up changes the balance and not how hard the bed ducks. Taken after the gain
+    the two would be the same knob, which is not something a user could infer."""
+    voice, bed = bursts(6), tone(6, freq=110.0)
+    profile = styles.mix_for("lofi")
+
+    def depth(gain_db: float) -> float:
+        mixed = mixing.mix(voice, bed, vocal_gain_db=gain_db, bed=profile)
+        return band_power_db(mixed, 1.35, 1.75, 90, 130) - band_power_db(mixed, 0.35, 0.75, 90, 130)
+
+    assert depth(6.0) == pytest.approx(depth(0.0), abs=0.6)
+
+
+@needs_ffmpeg
+def test_a_quiet_voice_ducks_the_bed_as_far_as_a_loud_one_does():
+    """`sidechaincompress` compares the key against an absolute level, so
+    without normalising it first the same style would duck a quiet vocal not at
+    all and a loud one into the floor."""
+    bed = tone(6, freq=110.0)
+    loud = bursts(6)
+    quiet = encode_wav((decode_audio(loud, SR) * 0.1).astype(np.float32), SR)
+    profile = styles.mix_for("lofi")
+
+    def depth(voice: bytes) -> float:
+        mixed = mixing.mix(voice, bed, bed=profile)
+        return band_power_db(mixed, 1.35, 1.75, 90, 130) - band_power_db(mixed, 0.35, 0.75, 90, 130)
+
+    assert depth(quiet) == pytest.approx(depth(loud), abs=0.6)
+
+
+@needs_ffmpeg
+def test_the_bed_survives_a_voice_that_stops_before_the_song_does():
+    """`sidechaincompress` is a framesync filter and framesync stops at the
+    shorter input — so without `apad` on the key, a vocal that ends early cuts
+    the backing track off at that point. Measured: an 8 second bed with a 4
+    second key came back 4 seconds long."""
+    short_voice = bursts(3)
+    long_bed = tone(8, freq=110.0)
+    mixed = mixing.mix(short_voice, long_bed, bed=styles.mix_for("trap"))
+    assert duration_of(mixed) == pytest.approx(8.0, abs=0.2)
+    # And the bed is open again under the outro rather than stuck ducked.
+    assert band_power_db(mixed, 5.0, 6.0, 90, 130) > -60
+
+
+@needs_ffmpeg
+def test_the_pocket_takes_the_bed_out_of_the_band_the_voice_lives_in():
+    """The static half of making room, next to the dynamic half. It carves the
+    *place* the voice occupies rather than the moments it occupies it."""
+    voice = bursts(6)
+    time = np.arange(int(6 * SR), dtype=np.float32) / SR
+    wide = (0.2 * np.sin(2 * np.pi * 2400 * time) + 0.2 * np.sin(2 * np.pi * 200 * time)).astype(
+        np.float32
+    )
+    bed = encode_wav(wide, SR)
+
+    flat = mixing.mix(voice, bed, bed=styles.Mixdown(duck_db=0.0, pocket_db=0.0))
+    carved = mixing.mix(
+        voice, bed, bed=styles.Mixdown(duck_db=0.0, pocket_db=-5.0, pocket_hz=2400.0)
+    )
+
+    # The bell against the band three and a half octaves below it, as a ratio —
+    # `loudnorm` sits at the end of both mixes and hands back whatever make-up
+    # gain the file needs, so an absolute level here would be measuring that
+    # rather than the filter.
+    def tilt(mixed: bytes) -> float:
+        return band_power_db(mixed, 1.2, 1.8, 2300, 2500) - band_power_db(mixed, 1.2, 1.8, 180, 220)
+
+    assert tilt(flat) - tilt(carved) > 3.0
+
+
+@needs_ffmpeg
+def test_a_mono_bed_is_widened_at_unity_and_not_three_decibels_down():
+    """An `aformat` upmix applies the -3.01 dB centre mix level. Measured on a
+    0.5 amplitude tone: `aformat` returns 0.354, `pan` returns 0.500."""
+    mono = tone(2, freq=110.0, amplitude=0.5)
+    assert mixing._channels(mono) == 1
+    assert mixing._stereo(mono) == mixing.CENTRE
+    assert mixing._stereo(stereo_tone(2)) == ""
+
+
+def test_the_bed_chain_omits_every_filter_it_was_not_asked_for():
+    """The same rule `enhance.chain` follows: a style that asks for nothing has
+    to produce the graph this module had before styles existed."""
+    nothing = mixing.mix_bed(
+        styles.Mixdown(duck_db=0, pocket_db=0, low_shelf_db=0, bed_gain_db=0), 44100
+    )
+    assert nothing == "aresample=44100"
+    everything = mixing.mix_bed(
+        styles.Mixdown(duck_db=3, pocket_db=-3, low_shelf_db=2, bed_gain_db=1), 44100
+    )
+    for expected in ("bass=", "equalizer=", "volume="):
+        assert expected in everything
+
+
+def test_no_ducking_asked_for_builds_no_sidechain_at_all():
+    """A null compressor is still a compressor: it would resample, buffer and
+    round-trip the bed for nothing."""
+    graph = mixing.bed_graph(styles.Mixdown(duck_db=0.0), 44100, -3.0)
+    assert "sidechaincompress" not in graph
+    assert graph.endswith("[bed]")
+
+
+def test_a_deeper_duck_is_a_lower_threshold():
+    """The formula in `DUCK_LAW`, checked as a direction rather than a value."""
+
+    def threshold(duck_db: float) -> float:
+        graph = mixing.bed_graph(styles.Mixdown(duck_db=duck_db), 44100, 0.0)
+        return float(graph.split("threshold=")[1].split(":")[0])
+
+    assert threshold(9.0) < threshold(6.0) < threshold(3.0) < threshold(1.0) <= 1.0
+
+
+def test_the_key_is_padded_so_framesync_cannot_truncate_the_bed():
+    assert "apad" in mixing.bed_graph(styles.Mixdown(duck_db=3.0), 44100, -3.0)
+
+
+@needs_ffmpeg
+def test_a_peak_that_cannot_be_read_applies_no_correction_rather_than_a_wrong_one():
+    assert mixing._peak_db(b"not audio") == 0.0
+    assert mixing._peak_db(tone(1, amplitude=0.5)) == pytest.approx(-6.0, abs=0.3)

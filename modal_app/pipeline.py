@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import time
 
-from . import audit, jobs, storage, voices, watermark
+from . import audit, jobs, storage, styles, voices, watermark
 from .app import DATA_DIR, api_image, app, data_vol
 from .audio_utils import clamp_cfg_rate, clamp_diffusion_steps, clamp_semitone_shift
 from .beats import BeatError
@@ -212,6 +212,16 @@ def clean_params(mode: str, raw: dict | None = None) -> dict:
         source = raw.get("beat_source")
         params["beat_source"] = source if source in BEAT_SOURCES else DEFAULT_BEAT_SOURCE
         params["beat_prompt"] = str(raw.get("beat_prompt") or "").strip()[:BEAT_PROMPT_CHARS]
+        # Which kind of music, as a name rather than as a paragraph. Clamped to
+        # `auto` for anything unrecognised, which is the entry that adds
+        # nothing — so an old client or a typo gets the behaviour this app had
+        # before styles existed rather than a failed job.
+        #
+        # Recorded for every beat job including `upload`, and that is not an
+        # oversight: half of a style is the mix profile, and a bed somebody
+        # uploaded needs a place under the voice exactly as much as a generated
+        # one does. Only the prompt half is unused there.
+        params["beat_style"] = styles.clean_style(raw.get("beat_style"))
         init = str(raw.get("beat_init") or "").strip().lower()
         # Clamped, not refused — but note which way it clamps. An unrecognised
         # value lands on `sketch`, so the failure mode of a typo or an old
@@ -276,8 +286,11 @@ def _finished(
         profile=params.get("voice_profile") or None,
         model=params.get("separation_model"),
         # Whether a beat was described rather than uploaded — not the words,
-        # which are the user's the same way the audio is.
+        # which are the user's the same way the audio is. The style is a
+        # setting like the emotion is, and which styles anybody picks is the
+        # only way to find out whether the list is the right list.
         beat_source=params.get("beat_source"),
+        beat_style=params.get("beat_style"),
         # The language and the style, never the text: what was said is the
         # user's, the same way the audio is (plan §8 item 5). How it was read is
         # a setting, and knowing which styles anybody picks is the only way to
@@ -505,6 +518,10 @@ def run_beat_pipeline(job_id: str, params: dict) -> str:
                     vocal_gain_db=params["vocal_gain_db"],
                     watermark=_watermark(job_id, params),
                     clarity=params["clarity"],
+                    # The half of the style that applies however the bed got
+                    # here. `song` mode passes nothing and keeps the mix it
+                    # always had — see `mixing.mix`.
+                    bed=styles.mix_for(params["beat_style"]),
                 ),
             )
             data_vol.commit()
@@ -571,7 +588,10 @@ def _init_audio(job_id: str, params: dict, instrumental: bytes) -> tuple[bytes, 
     from .audio_utils import decode_audio, encode_wav
 
     track = analyse_bytes(instrumental)
-    prompt = params["beat_prompt"] or beatgen.describe(track)
+    # What the user typed, else what the style says, else what was measured.
+    # `styles.prompt_for` owns that order — see its docstring for why it is
+    # never a concatenation of the three.
+    prompt = styles.prompt_for(params["beat_style"], params["beat_prompt"], beatgen.describe(track))
     # The song's own length, not a loop length. The previous model could only
     # make 47 seconds, so a three minute song got one loop repeated four times
     # — no intro, no chorus that lifts, and a seam every thirty seconds.
@@ -624,7 +644,10 @@ def _generate_beat(job_id: str, params: dict, instrumental: bytes | None = None)
 
     init_wav: bytes | None = None
     strength: float | None = None
-    prompt = params["beat_prompt"]
+    # On `generate` there is no song to fall back on — `api.submit` refuses the
+    # combination of no description and no style — so the third argument is
+    # empty and the style is what speaks when the box was left blank.
+    prompt = styles.prompt_for(params["beat_style"], params["beat_prompt"])
     seconds = beatgen.DEFAULT_SECONDS
     if params["beat_source"] == "derive":
         if not instrumental:
@@ -699,6 +722,7 @@ def run_rebeat_pipeline(job_id: str, params: dict) -> str:
                     vocal_gain_db=params["vocal_gain_db"],
                     watermark=_watermark(job_id, params),
                     clarity=params["clarity"],
+                    bed=styles.mix_for(params["beat_style"]),
                 ),
             )
             data_vol.commit()

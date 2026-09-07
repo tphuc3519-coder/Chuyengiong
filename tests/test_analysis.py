@@ -207,3 +207,162 @@ def test_analyse_reports_both_measurements_and_the_length():
 
 def test_a_track_prints_as_something_a_log_line_can_use():
     assert "BPM" in str(an.analyse(clicks(120, seconds=8)))
+
+
+# --- the downbeat ---------------------------------------------------------
+
+
+def kit(
+    bpm: float,
+    seconds: float = 24.0,
+    offset: float = 0.0,
+    kicks: tuple[int, ...] = (0, 2),
+    snares: tuple[int, ...] = (1, 3),
+    bass: bool = True,
+) -> np.ndarray:
+    """A drum kit playing 4/4, with the bar starting at `offset`.
+
+    The point of building this rather than reusing `clicks` is that a click
+    track has no bar in it: every beat is identical, so there is no phase to
+    find and nothing to test. What makes a downbeat findable is that the
+    instruments differ — a kick under 100 Hz on beat one, a band-limited snare
+    two octaves above it on the backbeat — and that difference is exactly what
+    `DOWNBEAT_HZ` is there to read.
+    """
+    rng = np.random.default_rng(0)
+    audio = np.zeros(int(seconds * SR) + SR, dtype=np.float32)
+
+    kick_t = np.arange(int(0.22 * SR)) / SR
+    kick = (
+        np.exp(-kick_t / 0.07)
+        * np.sin(2 * np.pi * np.cumsum(110 * np.exp(-kick_t / 0.03) + 45) / SR)
+    ).astype(np.float32)
+
+    def band_noise(low: float, high: float, length: float, decay: float) -> np.ndarray:
+        count = int(length * SR)
+        spectrum = np.fft.rfft(rng.standard_normal(count))
+        freqs = np.fft.rfftfreq(count, 1.0 / SR)
+        spectrum[(freqs < low) | (freqs > high)] = 0
+        shaped = np.fft.irfft(spectrum, count)
+        peak = np.abs(shaped).max() or 1.0
+        return (shaped / peak * np.exp(-np.arange(count) / (decay * SR))).astype(np.float32)
+
+    snare = 0.6 * band_noise(180, 8000, 0.14, 0.03)
+    hat = 0.15 * band_noise(4000, 10000, 0.05, 0.006)
+
+    def add(sound: np.ndarray, at: float) -> None:
+        start = int(at * SR)
+        if 0 <= start < len(audio):
+            audio[start : start + len(sound)] += sound[: len(audio) - start]
+
+    period = 60.0 / bpm
+    index, time = 0, offset
+    while time < seconds - 0.3:
+        if index % 4 in kicks:
+            add(kick, time)
+        if index % 4 in snares:
+            add(snare, time)
+        add(hat, time)
+        add(hat, time + period / 2)
+        if bass and index % 4 == 0:
+            length = int(period * 2 * SR)
+            envelope = np.exp(-np.arange(length) / (period * 1.2 * SR))
+            add(
+                (0.4 * envelope * np.sin(2 * np.pi * 55 * np.arange(length) / SR)).astype(
+                    np.float32
+                ),
+                time,
+            )
+        time += period
+        index += 1
+    return audio[: int(seconds * SR)]
+
+
+def bar_error(track, true_offset: float) -> float:
+    """How far the found bar line is from the real one, the short way round."""
+    bar = 4 * 60.0 / track.bpm
+    found = track.downbeat_sec
+    return min((found - true_offset) % bar, (true_offset - found) % bar)
+
+
+@pytest.mark.parametrize("offset", [0.0, 0.13, 0.39, 0.75, 1.17, 1.82])
+def test_the_bar_line_is_found_wherever_the_song_starts(offset):
+    """The measurement this exists for. A bed aligned to the *beat* is in time
+    and in the wrong place in the bar — its kick lands on the song's beat two
+    and stays there — so the phase has to come out right for a song that does
+    not begin at t=0, which is every song."""
+    track = an.analyse(kit(120, offset=offset))
+    assert track.has_downbeat
+    assert bar_error(track, offset) < 0.1
+
+
+def test_the_downbeat_is_one_of_the_beats_and_not_between_them():
+    """It is a phase, not a search: whatever comes back has to sit on the grid
+    `tempo()` already found."""
+    track = an.analyse(kit(120, offset=0.39))
+    period = 60.0 / track.bpm
+    steps = (track.downbeat_sec - track.beat_offset_sec) / period
+    assert steps == pytest.approx(round(steps), abs=0.01)
+
+
+def test_a_kick_on_every_beat_is_declined_rather_than_guessed():
+    """Four-on-the-floor gives every phase the same low end. Answering anyway
+    would be a coin flip that then decides where a three minute bed sits."""
+    track = an.analyse(kit(120, kicks=(0, 1, 2, 3), snares=(), bass=False))
+    assert track.downbeat_margin < an.DOWNBEAT_MIN_MARGIN
+    assert not track.has_downbeat
+
+
+def test_nothing_in_the_low_end_means_no_bar_line_and_no_pretending():
+    """A track with no kick and no bass has nothing for this rule to read, and
+    saying so is the answer."""
+    track = an.analyse(kit(120, kicks=(), snares=(1, 3), bass=False))
+    assert not track.has_downbeat
+
+
+def test_a_track_with_no_bar_line_falls_back_to_its_first_beat():
+    """`bar_start_sec` is the single accessor every caller uses, so the
+    fallback lives in one place and cannot be forgotten in another."""
+    unsure = an.Track(
+        bpm=120.0,
+        beat_offset_sec=0.25,
+        key=0,
+        minor=False,
+        key_margin=0.2,
+        duration_sec=30.0,
+        downbeat_sec=0.75,
+        downbeat_margin=an.DOWNBEAT_MIN_MARGIN / 2,
+    )
+    assert unsure.bar_start_sec == 0.25
+    sure = an.Track(**{**unsure.__dict__, "downbeat_margin": 0.4})
+    assert sure.bar_start_sec == 0.75
+
+
+def test_a_track_written_before_downbeats_existed_still_works():
+    """The two fields default to "not measured", so every `Track(...)` in this
+    codebase that predates them behaves exactly as it did."""
+    old = an.Track(
+        bpm=120.0, beat_offset_sec=0.4, key=0, minor=False, key_margin=0.2, duration_sec=10.0
+    )
+    assert not old.has_downbeat
+    assert old.bar_start_sec == 0.4
+
+
+def test_no_pulse_means_no_downbeat_to_look_for():
+    silence = np.zeros(SR * 4, dtype=np.float32)
+    assert an.downbeat(silence, 0.0, 0.0) == (0.0, 0.0)
+    assert not an.analyse(silence).has_downbeat
+
+
+def test_less_than_a_bar_of_audio_has_no_phase_to_find():
+    assert an.downbeat(kit(120, seconds=1.2), 120.0, 0.0)[1] == 0.0
+
+
+def test_the_low_band_envelope_is_the_only_thing_that_changed():
+    """`max_hz` left out has to leave `tempo()` reading exactly the envelope it
+    always did — the band limit is a new caller, not a new behaviour."""
+    audio = kit(120, seconds=8)
+    assert np.array_equal(an.onset_envelope(audio), an.onset_envelope(audio, SR, None))
+    limited = an.onset_envelope(audio, SR, max_hz=an.DOWNBEAT_HZ)
+    assert len(limited) == len(an.onset_envelope(audio))
+    assert not np.array_equal(limited, an.onset_envelope(audio))

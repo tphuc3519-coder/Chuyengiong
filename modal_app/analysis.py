@@ -1,12 +1,13 @@
-"""How fast a track is and what key it is in.
+"""How fast a track is, where its bars begin, and what key it is in.
 
-    audio ──► onset_envelope ──► tempo()  ──► (bpm, chỗ phách đầu)
-          └─► chroma ─────────► key()    ──► (chủ âm, trưởng/thứ)
+    audio ──► onset_envelope ──┬─► tempo()    ──► (bpm, chỗ phách đầu)
+          │                    └─► downbeat() ──► (chỗ đầu ô nhịp)
+          └─► chroma ────────────► key()      ──► (chủ âm, trưởng/thứ)
 
-The two measurements a beat has to match before it can sit under somebody's
+The three measurements a beat has to match before it can sit under somebody's
 voice. `pitch.py` already answers "what note is this person on"; this answers
 "what is the song doing", which is a different question with different tools —
-F0 is about one voice at a time, and both of these are about everything at once.
+F0 is about one voice at a time, and all of these are about everything at once.
 
 numpy plus nothing, like `pitch.py` and `audio_utils.py`: it runs on the small
 CPU image inside the pipeline, and every rule in it is checked in CI against
@@ -29,6 +30,14 @@ is written down here rather than discovered later:
   share all seven notes. That is why `key()` returns the correlation margin as
   well as the answer: a small margin means "do not transpose anything on the
   strength of this".
+
+* **A downbeat is a guess about metre, not a measurement of it.** `downbeat()`
+  picks which of four beats carries the bar line by asking where the *low* end
+  fires, because in everything this app is pointed at the bar line is where the
+  kick is. That is a real rule and it is not a law: a song whose kick sits on
+  every beat, or on the backbeat, has nothing for it to read. So it returns a
+  margin too, and the caller that gets a small one is expected to fall back to
+  plain beat alignment rather than commit to a bar line it invented.
 """
 
 from __future__ import annotations
@@ -120,6 +129,47 @@ ONSET_LEAD_FRAMES = FRAME / HOP
 # match, an invented one costs it its tempo.
 PULSE_FLOOR = 50.0
 
+# --- downbeat -------------------------------------------------------------
+
+# 4/4. Stated here as well as in `beats` and `chords` because this is where it
+# is first *used to decide something* — a phase out of four — rather than
+# assumed while cutting.
+BEATS_PER_BAR = 4
+
+# Where the bar line announces itself.
+#
+# A kick drum and a bass note are the two things in a pop arrangement that
+# reliably land on beat one, and both live below this. Restricting the onset
+# envelope to that band is what makes the phase question answerable at all:
+# full band, a backbeat snare is the loudest onset in every bar and the answer
+# comes back two beats late — which is the single worst way a bed can be wrong,
+# because it is not late, it is in a different place in the bar and stays there
+# for the whole song.
+#
+# **120 rather than 200, and it was measured.** On a synthesised kit (kick on 1
+# and 3, band-limited snare on 2 and 4, hats on eighths, a bass note per bar)
+# the phase is picked correctly at every offset from 120 Hz up to 300, so the
+# cut-off is not deciding the answer — it is deciding the *margin*, which is
+# what `DOWNBEAT_MIN_MARGIN` then has to work with:
+#
+#     120 Hz  0.359      200 Hz  0.233
+#     150 Hz  0.301      300 Hz  0.189
+#
+# A snare is noise and noise reaches everywhere; the higher the cut-off, the
+# more of every backbeat is counted against the kick and the closer the four
+# phases score. 120 is below a snare's fundamental and above the fundamental of
+# anything a kick plays.
+DOWNBEAT_HZ = 120.0
+
+# How much the winning phase has to beat the runner-up, as a fraction of the
+# winner. Below this the bar line is a coin flip and the caller is told so.
+#
+# Placed low on purpose, and the trade is not symmetric. A missed downbeat
+# costs a bed its bar alignment and leaves it aligned to the beat, which is
+# what this app did before and is merely not ideal. An invented one puts the
+# bed's bar line on the song's beat two and keeps it there.
+DOWNBEAT_MIN_MARGIN = 0.08
+
 # --- key ------------------------------------------------------------------
 
 # Where pitch classes are worth counting. Below 65 Hz a bass note's harmonics
@@ -153,6 +203,16 @@ class Track:
     `key_margin` is how much the winning key beat the runner-up. Small means
     the track is not clearly in one key, or is sitting on the relative
     minor — either way, not something to transpose on.
+
+    `downbeat_sec` is the answer to the harder question, and it arrives with
+    `downbeat_margin` attached for exactly the reason `key_margin` does. Read
+    it through `bar_start_sec`, never directly: that property is where the
+    margin is checked, so there is one place in the codebase that decides
+    whether the bar line is trustworthy and every caller gets the same answer.
+
+    Both default to "not measured", which keeps every `Track(...)` written
+    before this existed valid and makes such a record behave exactly as it did
+    — `bar_start_sec` falls straight back to the first beat.
     """
 
     bpm: float
@@ -161,15 +221,34 @@ class Track:
     minor: bool
     key_margin: float
     duration_sec: float
+    downbeat_sec: float = 0.0
+    downbeat_margin: float = 0.0
 
     @property
     def key_name(self) -> str:
         return f"{NOTE_NAMES[self.key % 12]}{'m' if self.minor else ''}"
 
+    @property
+    def has_downbeat(self) -> bool:
+        """Whether the bar line was found well enough to act on."""
+        return self.downbeat_margin >= DOWNBEAT_MIN_MARGIN
+
+    @property
+    def bar_start_sec(self) -> float:
+        """Where a bar begins — or where a beat does, when that is all we know.
+
+        The single accessor for "line the beat up here". Falling back to the
+        first beat is not a failure: a bed on the beat and off the bar is a bed
+        that is in time, while a bed on a bar line that was guessed wrong is a
+        bed in the wrong place for three minutes.
+        """
+        return self.downbeat_sec if self.has_downbeat else self.beat_offset_sec
+
     def __str__(self) -> str:
+        bar = f", bar at {self.downbeat_sec:.2f}s" if self.has_downbeat else ", no clear bar line"
         return (
             f"{self.bpm:.1f} BPM, {self.key_name} "
-            f"(margin {self.key_margin:.3f}), {self.duration_sec:.1f}s"
+            f"(margin {self.key_margin:.3f}){bar}, {self.duration_sec:.1f}s"
         )
 
 
@@ -183,7 +262,11 @@ def _frames(audio: np.ndarray) -> np.ndarray:
     return audio[offsets] * np.hanning(FRAME).astype(np.float32)
 
 
-def onset_envelope(audio: np.ndarray) -> np.ndarray:
+def onset_envelope(
+    audio: np.ndarray,
+    sample_rate: int = ANALYSIS_RATE,
+    max_hz: float | None = None,
+) -> np.ndarray:
     """How much new sound starts at each frame. The input to every tempo guess.
 
     Spectral flux: the sum of how much each frequency bin *rose* since the last
@@ -204,11 +287,22 @@ def onset_envelope(audio: np.ndarray) -> np.ndarray:
     ratio rather than a quantity of anything. Nothing that reads it for tempo
     cares — autocorrelation and argmax are both blind to scale — and it is what
     lets `PULSE_FLOOR` be one number for quiet recordings and loud ones alike.
+
+    `max_hz` throws away every bin above it before any of that, which turns
+    this into "how much new *low* sound starts here" — the kick drum, and
+    `downbeat()` is the only caller that wants it. Left out, nothing about this
+    function changes: the whole spectrum is kept and `tempo()` reads exactly
+    the envelope it always did.
     """
     frames = _frames(audio)
     if not len(frames):
         return np.zeros(0, dtype=np.float32)
     spectrum = np.log1p(np.abs(np.fft.rfft(frames, axis=1)))
+    if max_hz is not None:
+        keep = np.fft.rfftfreq(FRAME, 1.0 / sample_rate) <= max_hz
+        if not keep.any():
+            return np.zeros(0, dtype=np.float32)
+        spectrum = spectrum[:, keep]
     level = float(spectrum.mean())
     if level <= 0:
         return np.zeros(0, dtype=np.float32)
@@ -402,6 +496,86 @@ def tempo(audio: np.ndarray, sample_rate: int = ANALYSIS_RATE) -> tuple[float, f
     return float(60.0 * frames_per_sec / period), float(seconds % (period / frames_per_sec))
 
 
+def downbeat(
+    audio: np.ndarray,
+    bpm: float,
+    beat_offset_sec: float,
+    sample_rate: int = ANALYSIS_RATE,
+) -> tuple[float, float]:
+    """`(seconds to the first downbeat, margin over the runner-up)`.
+
+    Takes the beat grid as given — `tempo()` has already found it, and finding
+    it twice would be two answers to one question. All this decides is *which
+    of the four beats in a bar is beat one*, which is a four-way choice and not
+    a search.
+
+    The rule is one sentence: **beat one is where the low end fires.** Every
+    beat position is scored by how much low-frequency onset energy lands on it
+    across the whole track, the four phases are compared, and the winner is the
+    bar line. On a pop arrangement that is the kick against the snare, and the
+    two are an octave and a half apart in frequency, which is why the band
+    limit does all the work here.
+
+    The margin is the winner's lead as a fraction of itself, and it is not a
+    formality. A four-on-the-floor house track has a kick on all four beats and
+    scores them almost equally; a track with no drums at all scores them all at
+    zero. Both come back with a margin near nothing, and `Track.bar_start_sec`
+    then declines to use the answer.
+
+    `(beat_offset_sec, 0.0)` for anything with no grid to walk, which is the
+    same "I have nothing" the rest of this module returns rather than a number
+    somebody might act on.
+    """
+    if bpm <= 0 or not math.isfinite(bpm):
+        return float(beat_offset_sec), 0.0
+    envelope = onset_envelope(audio, sample_rate, max_hz=DOWNBEAT_HZ)
+    frames_per_sec = sample_rate / HOP
+    period = 60.0 / bpm * frames_per_sec
+    if len(envelope) < BEATS_PER_BAR * period or period <= 0:
+        # Less than a bar of audio to read: there is no phase to find.
+        return float(beat_offset_sec), 0.0
+
+    # Back into envelope coordinates. `tempo()` handed out a time with the
+    # envelope's own lead already taken off it (`ONSET_LEAD_FRAMES`), so it has
+    # to go back on before the grid is walked in frames — otherwise every
+    # position is sampled four frames early and the phase is scored off the
+    # tail of the previous beat.
+    #
+    # Putting the lead back can push the first beat before frame zero, and the
+    # grid then has to start at the *next* beat instead. Which beat that is has
+    # to be tracked rather than taken modulo, because the phase that comes out
+    # below is counted from wherever this walk began: forget by how much and
+    # the answer comes back a beat early, on the grid and in the wrong place in
+    # the bar.
+    first_sec = float(beat_offset_sec)
+    start = first_sec * frames_per_sec - ONSET_LEAD_FRAMES
+    beat_sec = 60.0 / bpm
+    while start < 0:
+        first_sec += beat_sec
+        start += period
+
+    # The grid is fractional and a drummer is human, so each beat is scored by
+    # the loudest onset *near* it rather than by the one sample on it. An
+    # eighth of a beat either way, which is well inside the next beat and well
+    # outside a rounding error.
+    reach = max(1, int(round(period / 8)))
+    scores = np.zeros(BEATS_PER_BAR, dtype=np.float64)
+    for step in range(int((len(envelope) - start) / period) + 1):
+        centre = int(round(start + step * period))
+        low, high = max(0, centre - reach), min(len(envelope), centre + reach + 1)
+        if high <= low:
+            continue
+        scores[step % BEATS_PER_BAR] += float(envelope[low:high].max())
+
+    best = int(scores.argmax())
+    top = float(scores[best])
+    if top <= 0:
+        return float(beat_offset_sec), 0.0
+    runner_up = float(np.sort(scores)[-2])
+    margin = (top - runner_up) / top
+    return float(first_sec + best * beat_sec), float(margin)
+
+
 def chroma(audio: np.ndarray, sample_rate: int = ANALYSIS_RATE) -> np.ndarray:
     """Energy per pitch class over the whole file, summing to 1.
 
@@ -454,9 +628,14 @@ def key(audio: np.ndarray, sample_rate: int = ANALYSIS_RATE) -> tuple[int, bool,
 
 
 def analyse(audio: np.ndarray, sample_rate: int = ANALYSIS_RATE) -> Track:
-    """Both measurements plus the duration, as one record."""
+    """Every measurement plus the duration, as one record.
+
+    The downbeat runs last and depends on the tempo, which is the only ordering
+    constraint in here: there is no phase to pick without a grid to pick it on.
+    """
     bpm, offset = tempo(audio, sample_rate)
     tonic, minor, margin = key(audio, sample_rate)
+    bar, bar_margin = downbeat(audio, bpm, offset, sample_rate)
     return Track(
         bpm=bpm,
         beat_offset_sec=offset,
@@ -464,6 +643,8 @@ def analyse(audio: np.ndarray, sample_rate: int = ANALYSIS_RATE) -> Track:
         minor=minor,
         key_margin=margin,
         duration_sec=len(audio) / float(sample_rate),
+        downbeat_sec=bar,
+        downbeat_margin=bar_margin,
     )
 
 
