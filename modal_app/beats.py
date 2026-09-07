@@ -431,13 +431,21 @@ def balance(beat_wav: bytes, sample_rate: int = 44100) -> tuple[bytes, str]:
     Only generated beds go through this. An uploaded beat is somebody's
     finished production and re-balancing it would be this module deciding it
     knows better than whoever mixed it.
+
+    **Stereo in, stereo out, and one shelf for both channels.** The share is
+    measured on the two channels summed and the same gain curve is applied to
+    each, which is the only version of this that does not move the image: a
+    shelf fitted per channel would pull back whichever side happened to carry
+    more bass and swing the arrangement towards the other one. Level is set
+    from the peak and RMS *across* both channels for the same reason.
     """
     import numpy as np
 
-    from .audio_utils import decode_audio, encode_wav
+    from .audio_utils import decode_wav_channels, encode_wav_channels, to_pcm_wav
 
     try:
-        audio = np.asarray(decode_audio(beat_wav, sample_rate), dtype=np.float64)
+        decoded, _ = decode_wav_channels(to_pcm_wav(beat_wav, sample_rate))
+        audio = np.asarray(decoded, dtype=np.float64)
     except AudioError as exc:
         # Same wrapping `analyse_and_fit` does: everything a caller of this
         # module has to catch is a `BeatError`.
@@ -445,9 +453,10 @@ def balance(beat_wav: bytes, sample_rate: int = 44100) -> tuple[bytes, str]:
     if not len(audio):
         raise BeatError("no beat audio to balance")
 
-    spectrum = np.fft.rfft(audio)
-    freqs = np.fft.rfftfreq(len(audio), 1.0 / sample_rate)
-    power = np.abs(spectrum) ** 2
+    frames = len(audio)
+    freqs = np.fft.rfftfreq(frames, 1.0 / sample_rate)
+    # One measurement for the whole bed, taken on the channels summed.
+    power = np.abs(np.fft.rfft(audio.sum(axis=1))) ** 2
     total = float(power.sum())
     if total <= 0:
         raise BeatError("the generated beat is silent")
@@ -473,7 +482,14 @@ def balance(beat_wav: bytes, sample_rate: int = 44100) -> tuple[bytes, str]:
         blend = 0.5 - 0.5 * np.cos(np.pi * (freqs[knee] - LOW_HZ) / LOW_HZ)
         gain[knee] = shelf + (1.0 - shelf) * blend
 
-    out = np.fft.irfft(spectrum * gain, n=len(audio))
+    # One channel at a time, so the biggest array alive at once is one
+    # channel's spectrum rather than the whole bed's. Four minutes of stereo at
+    # 44.1 kHz is 10.6 million frames a side, and a complex128 spectrum of that
+    # is 170 MB — worth not holding two of.
+    out = np.empty_like(audio)
+    for channel in range(audio.shape[1]):
+        out[:, channel] = np.fft.irfft(np.fft.rfft(audio[:, channel]) * gain, n=frames)
+
     rms = float(np.sqrt((out**2).mean()))
     if rms > 0:
         out = out * (BALANCE_RMS / rms)
@@ -483,9 +499,10 @@ def balance(beat_wav: bytes, sample_rate: int = 44100) -> tuple[bytes, str]:
 
     note = (
         f"low {share * 100:.0f}% -> {LOW_SHARE_TARGET * 100:.0f}% "
-        f"(shelf {20 * math.log10(max(shelf, 1e-6)):+.1f} dB), rms {BALANCE_RMS:.2f}"
+        f"(shelf {20 * math.log10(max(shelf, 1e-6)):+.1f} dB), rms {BALANCE_RMS:.2f}, "
+        f"{audio.shape[1]}ch"
     )
-    return encode_wav(np.asarray(out, dtype=np.float32), sample_rate), note
+    return encode_wav_channels(np.asarray(out, dtype=np.float32), sample_rate), note
 
 
 def analyse_and_fit(

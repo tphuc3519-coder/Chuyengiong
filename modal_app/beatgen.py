@@ -342,12 +342,21 @@ class BeatGenerator:
         init_wav: bytes = None,
         init_strength: float = None,
     ) -> bytes:
-        """One instrumental, as 16-bit PCM wav.
+        """One instrumental, as 16-bit PCM wav, **in the model's own channels**.
 
-        Mono on the way out, because that is what everything downstream of it
-        takes: `analysis` measures mono, `beats` fits mono, and `mixing` puts
-        the vocal in the centre of a stereo pair anyway. A stereo bed is worth
-        having and is a change to the mix stage, not to this one.
+        Stereo when ACE-Step produced stereo, which it does. This used to
+        downmix to mono, on the reasoning that everything downstream took mono
+        — and that reasoning was true of every stage except the one that
+        mattered. `analysis` measures mono and always did; `beats` runs ffmpeg
+        filters that neither know nor care how many channels went through them;
+        and the mix is a stereo file. So the only thing the downmix achieved
+        was throwing away the width the model had already generated, one stage
+        before the stage that could have used it.
+
+        The vocal is mono and is placed in the centre by `mixing.CENTRE`, so a
+        stereo bed is not decoration: it is the difference between a voice
+        sitting in front of an arrangement and a voice sitting on top of a
+        thing at exactly the same place in the image.
 
         `seconds` is the song's own length rather than a loop length, which is
         the point of this model: what comes back is one continuous
@@ -368,7 +377,7 @@ class BeatGenerator:
         import time
         from pathlib import Path
 
-        from .audio_utils import decode_audio, encode_wav
+        from .audio_utils import decode_wav_channels, encode_wav_channels, to_pcm_wav
 
         text = clean_prompt(prompt)
         length = clamp_seconds(seconds)
@@ -418,11 +427,18 @@ class BeatGenerator:
             )
             if written is None or not written.stat().st_size:
                 raise BeatGenError("the generator produced no audio")
-            audio = decode_audio(written.read_bytes(), 44100)
+            # Through `to_pcm_wav` rather than `decode_audio`: the second one
+            # asks ffmpeg for one channel, which is where the downmix used to
+            # happen. This pair keeps whatever the model wrote, at the level it
+            # wrote it — asking for two channels instead would apply the
+            # -3.01 dB centre mix level to a mono file.
+            audio, _ = decode_wav_channels(to_pcm_wav(written.read_bytes(), 44100))
 
         # Level is `beats.balance`'s job and it runs after `stretch` has
         # transposed this; all that happens here is a guard against a file that
-        # would clip on the way into it.
+        # would clip on the way into it. Across both channels at once, so a
+        # peak on one side does not move the image by turning only that side
+        # down.
         import numpy as np
 
         peak = float(np.abs(audio).max())
@@ -432,9 +448,9 @@ class BeatGenerator:
         source = f"init {strength:.2f}" if init_wav else "from scratch"
         print(
             f"[BeatGenerator] {length:.0f}s in {time.time() - started:.1f}s "
-            f"({total_steps} steps, {source}): {text!r}"
+            f"({total_steps} steps, {audio.shape[1]}ch, {source}): {text!r}"
         )
-        return encode_wav(np.asarray(audio, dtype=np.float32), 44100)
+        return encode_wav_channels(np.asarray(audio, dtype=np.float32), 44100)
 
 
 # The decorated class, once something has asked for it. `None` means this

@@ -42,13 +42,13 @@ modal_app/
 ├── prosody.py      # đọc thế nào: ngắt nghỉ theo dấu câu, ngữ điệu, cảm xúc — Python thuần
 ├── reference.py    # làm sạch giọng mẫu trước khi nó thành timbre — numpy thuần, test được
 ├── enhance.py      # chuỗi lọc "độ trong" cho giọng đã convert — ffmpeg thuần
-├── analysis.py     # đo BPM, vị trí phách, vạch nhịp và tông của một bản nhạc — numpy thuần
+├── analysis.py     # đo BPM, phách, vạch nhịp (trầm + hoà thanh) và tông — numpy thuần
 ├── beats.py        # cắt/dịch/kéo/lặp một beat cho khớp ô nhịp của bài — ffmpeg thuần
 ├── styles.py       # 12 kiểu beat: mô tả cho máy sinh nhạc + cách phối — không import gì cả
 ├── beatgen.py      # sinh beat mới từ mô tả (ACE-Step) trên GPU
 ├── training.py     # fine-tune Seed-VC cho một giọng riêng trên GPU (công cụ vận hành)
 ├── voices.py       # giọng đã train nằm ở đâu, tên nào hợp lệ — không import gì cả
-├── mixing.py       # ffmpeg: mix vocal + nhạc nền, beat né theo giọng, encode mp3
+├── mixing.py       # ffmpeg: đo và đặt bed dưới giọng, né theo giọng, encode mp3
 ├── pipeline.py     # orchestration: spawn + nối các bước, cập nhật job state
 ├── storage.py      # file trên Volume + cron dọn rác
 ├── jobs.py         # state machine của job, lưu trong modal.Dict
@@ -2802,3 +2802,174 @@ vòng lặp → 1 đỏ; bỏ fade mối nối → 1 đỏ.
 - [ ] Bed vào từ giây 0 — nghe ra là tự nhiên hay là cụt đầu ô nhịp
 
 **719 passed, 3 skipped.**
+
+
+---
+
+## 16.1 — Ba thứ còn thiếu, đo rồi mới sửa
+
+> *"Làm kĩ hơn như này nữa, cải thiện tối đa"*
+
+Phase 16 làm beat khớp ô nhịp và biết nhường chỗ cho giọng. Còn ba lỗ hổng, và
+cả ba đều là loại **im lặng** — không có gì báo, chỉ là kết quả nghe kém hơn nó
+đáng được.
+
+### Bed bị bóp về mono, một bước trước chỗ cần nó
+
+`beatgen.generate` downmix về mono, lý do ghi trong docstring: *"đó là thứ mọi
+bước phía sau nhận"*. Lý do đó đúng với mọi bước **trừ bước quan trọng**.
+`analysis` đo mono và xưa nay vẫn thế; `beats` chạy filter ffmpeg vốn không biết
+và không quan tâm có mấy kênh đi qua; còn bản mix là file stereo. Nên việc
+downmix đạt được đúng một thứ: **vứt đi độ rộng mà model đã sinh ra rồi**, ngay
+trước bước duy nhất dùng được nó.
+
+Giọng là mono và bị `mixing.CENTRE` đặt vào giữa. Nên bed stereo không phải trang
+trí: nó là khác biệt giữa *giọng đứng trước một bản phối* và *giọng nằm chồng
+lên một khối âm ở đúng cùng một chỗ trong không gian*.
+
+Chỗ thứ hai bóp mono là `beats.balance` — nó `decode_audio` (mono) rồi
+`encode_wav` (mono), nên kể cả beat stereo người dùng upload cũng bị dẹt sau khi
+qua đó. Giờ shelf được **đo trên hai kênh cộng lại và áp y hệt cho từng kênh**,
+là phiên bản duy nhất không làm lệch ảnh stereo: fit riêng từng kênh thì kênh nào
+nhiều bass hơn sẽ bị kéo xuống nhiều hơn và cả bản phối nghiêng sang bên kia.
+
+Kèm một cái bẫy đo được: **không được xin ffmpeg `-ac 2`**. Với file mono nó áp
+mức -3.01 dB của kênh giữa — tone 0.5 vào, ra 0.354. Nên có `to_pcm_wav`: encode
+lại thành PCM 16-bit **không nói gì về số kênh**, rồi `decode_wav_channels` đọc
+xem có mấy kênh. Giữ nguyên cái đang có, ở đúng mức nó đang có.
+
+### Cân bằng giọng/beat là một điều ước, không phải một cài đặt
+
+`bed_gain_db` là gain áp lên *mức âm lượng nào tình cờ đi tới*. Mà ba nguồn đi
+tới ở ba mức hoàn toàn không liên quan: bed sinh ra rời `beats.balance` ở một RMS
+cố định, bed upload ở mức ai đó master, còn giọng ở mức Seed-VC trả về. Cùng một
+style, beat to và beat nhỏ ra hai bản mix khác hẳn nhau.
+
+Giờ **đo cả hai bên rồi mới đặt**. Trường đổi tên thành `bed_below_voice_db`: nó
+là *khoảng cách* giữa độ to của bed và của giọng, nên nó là một con số có nghĩa —
+dương là bed đứng sau giọng, âm là bed mới là thứ chính và giọng cưỡi lên trên,
+đúng mô tả thật của trap và nhạc club.
+
+Đo bằng `ebur128` chứ không phải `volumedetect`, và khác biệt đó là cả lý do bỏ
+thêm một lượt ffmpeg. Giọng hát là im lặng nhiều hơn là hát: đo trên một giọng
+mẫu 60% khoảng lặng, `mean_volume` nói **-16.8 dB** còn loudness tích hợp có gate
+nói **-13.2 LUFS**. Cân bed theo con số đầu là cân theo việc ca sĩ **nghỉ** bao
+nhiêu. Gate R128 bỏ mọi thứ thấp hơn 10 LU so với trung bình động, nên cái trả về
+là độ to của phần thật sự đang kêu — đúng thứ người ta muốn nói khi bảo cái này
+to hơn cái kia.
+
+Đo được: cùng style, bed vào ở amplitude 0.6 / 0.2 / 0.9 → cả ba đáp xuống trong
+phạm vi **0.5 dB** của nhau, và đúng chỗ style xin. Qua cả đồ thị (shelf, hốc
+giọng, né, `loudnorm`), bed upload nhỏ hơn 12 dB kết thúc cách bản kia **0.36
+dB**.
+
+Hai giới hạn nói thẳng thay vì bù trừ:
+
+* Bed được đo **trước** hốc giọng, kệ trầm và phần né của chính nó, nên style nào
+  né sâu sẽ nằm hơi lùi hơn con số ghi. Chiều đúng — né nhiều thì đáng nghe ra là
+  lùi hơn — còn sửa cho khớp thì phải đo một tín hiệu chưa tồn tại cho tới khi
+  đồ thị chạy xong.
+* Bản thân `bed_below_voice_db` vẫn là **suy luận, chưa đo**, y như cả bảng. Cái
+  hàm này mua được không phải một cân bằng *đúng*, mà một cân bằng **lặp lại
+  được**: con số đúng là bao nhiêu thì sau này một đôi tai quyết định, và từ giờ
+  nó có nghĩa như nhau trên mọi job.
+
+Kèm: **mọi bed đều bị cắt dưới 30 Hz ở bước mix.** `balance` đã làm việc đó nhưng
+nó không bao giờ chạy trên beat upload — mà beat upload mới đúng là file dễ có
+sub master sẵn nhất. Rumble tốn hai lần: nó ăn headroom, và `loudnorm` gần như
+không nghe thấy nó (K-weighting cắt mạnh ở dưới đó) nên nó vặn **cả bản mix** nhỏ
+lại để nhường chỗ cho thứ không ai nghe được.
+
+### Vạch nhịp: một luật không đủ, và luật thứ hai được chọn bằng số
+
+Luật "đầu ô nhịp là chỗ tiếng trầm nổ" đúng với nhạc có trống. Nó **không nói
+được gì** về hai thứ rất phổ biến: ballad piano không có kick, và
+four-on-the-floor có kick ở cả bốn phách.
+
+Luật thứ hai: **hợp âm đổi ở vạch nhịp.** Một vector chroma cho mỗi phách, rồi
+khoảng cách giữa phách này và phách trước, cộng theo pha. Chroma chứ không phải
+phổ thô, và mỗi hàng được chuẩn hoá về tổng 1 trước khi lấy hiệu — vì thứ cần đo
+là *nốt nào*, không phải to cỡ nào. Cùng một hợp âm chơi to và chơi nhỏ không
+được tính là đổi hợp âm; nếu tính thì đây chỉ là một bản sao tệ hơn của luật thứ
+nhất.
+
+Trọng số chọn bằng 180 phép đo — năm kiểu phối (kick-led không hoà thanh; band có
+trống và hợp âm mỗi ô nhịp; four-on-the-floor; ballad piano; bolero arpeggio), ở
+chín vị trí ô nhịp và bốn tốc độ, chấm theo ô nhịp mà **vật liệu được dựng ra**:
+
+| trọng số hoà thanh | đúng | **sai** | từ chối |
+|---|---|---|---|
+| 0.0 — chỉ tiếng trầm | 75 | 9 | 96 |
+| 0.3 | 119 | 9 | 52 |
+| **0.4** | **129** | **9** | **42** |
+| 0.5 | 128 | 10 | 42 |
+| 0.6 | 131 | 10 | 39 |
+| 0.7 | 132 | 10 | 38 |
+| 1.0 — chỉ hoà thanh | 97 | 28 | 55 |
+
+Hai điều trong bảng này quan trọng hơn tổng số.
+
+**Một, không luật nào tự nó dùng được.** Tiếng trầm từ chối hơn nửa số ca; hoà
+thanh một mình sai gấp ba lần — nó sập hoàn toàn ở bolero, nơi arpeggio đổi nốt
+mỗi phách nên chỗ nào cũng có "đổi hoà thanh" để tìm.
+
+**Hai, cột giữa mới là cột chọn 0.4 chứ không phải 0.7.** Trọng số cao hơn mua
+thêm hai ba câu trả lời đúng và trả bằng một câu sai — mà hai thứ đó không cùng
+đơn vị. Một vạch nhịp bị *từ chối* chỉ mất phần cải thiện và lùi về canh theo
+phách; một vạch nhịp *sai* đặt kick của bed lên phách hai của bài rồi để nó nằm
+đó cả bài. 0.4 là trọng số cuối cùng không lấy thêm gì từ cột sai của baseline mà
+vẫn gần gấp đôi số ca trả lời được.
+
+42 ca còn từ chối gần như toàn bộ là kiểu kick-led không có hoà thanh nào: kick ở
+phách 1 và 3, snare ở 2 và 4, thì hai pha đó **thật sự** không phân biệt được —
+không có gì trong bản ghi nói pha nào. Từ chối ở đó là câu trả lời đúng, không
+phải một ca trượt.
+
+Giá: 0.8 giây trên một bài bốn phút, so với `tempo()` đã tốn 3.65 giây trên cùng
+file đó.
+
+### Một lần đo sai, và vì sao nó đáng nhắc
+
+Vòng đo đầu tiên nói ở 150 BPM luật kết hợp **kém hơn** baseline: 9 câu sai so
+với 2. Suýt nữa thì bỏ luật thứ hai vì con số đó.
+
+Nó là lỗi của thước đo. Ở 150 BPM `tempo()` trả về **75** — mơ hồ theo quãng tám,
+đúng như `TEMPO_PRIOR_BPM` được viết ra để xử lý — nên bốn phách đo được trải
+đúng **hai** ô nhịp thật. Rơi vào một trong hai vạch nhịp thật bên trong đó là
+đúng về nhạc, mà thước đo lại chấm theo ô nhịp *suy ra từ tempo đo được* nên gọi
+một nửa là sai. `fold_tempo` cũng đưa bed về cùng quãng tám đó, nên cả hai đều
+đúng. Sửa thước đo — chấm theo ô nhịp vật liệu được dựng ra — thì cột sai đứng
+yên ở 9 từ trọng số 0.0 đến 0.4.
+
+Bài học không phải về cái thước. Là: **một phép đo nói "tệ hơn" cũng cần được
+kiểm tra đúng như một phép đo nói "tốt hơn".**
+
+### Test
+
+- `test_analysis.py` — vạch nhịp tìm được từ hợp âm khi trống không nói được gì
+  (four-on-the-floor + đổi hợp âm mỗi ô nhịp); hai luật được kiểm **riêng** để
+  luật nào hỏng thì biết là luật nào; hợp âm to và hợp âm nhỏ không phải là đổi
+  hợp âm; hai luật được đưa về cùng đơn vị trước khi cộng
+- `test_mixing.py` — loudness có gate khoảng lặng thật không; cùng style đặt bed
+  cùng chỗ dù nó vào ở mức nào; style muốn bed đứng trước thì được đứng trước;
+  nút âm lượng giọng kéo cân bằng theo; đo không được thì không bù; bed stereo ra
+  mix vẫn stereo
+- `test_beats.py` — beat stereo upload còn stereo tới tận bed; `balance` giữ cả
+  hai kênh và shelf y hệt nhau (chênh lệch 6 dB giữa hai kênh vào, ra vẫn đúng
+  6 dB)
+
+Bốn thay đổi được kiểm bằng cách phá code: bỏ luật hoà thanh → 4 đỏ; bỏ phép đo
+cân bằng → 5 đỏ; thêm `pan=mono` vào `stretch` → 1 đỏ; bỏ high-pass của bed → 2
+đỏ.
+
+### Còn phải verify bằng tai và bằng GPU
+
+- [ ] **ACE-Step có thật sự trả stereo không.** Nếu nó trả mono thì phần này
+      không hỏng gì — `to_pcm_wav` giữ nguyên 1 kênh — nhưng cũng không được gì,
+      và log của `BeatGenerator` giờ in số kênh ra để biết
+- [ ] 12 con số `bed_below_voice_db`: chiều thì chắc, **độ lớn thì chưa đo**
+- [ ] Vạch nhịp trên nhạc thật, không phải năm kiểu phối tổng hợp
+- [ ] Bed stereo dưới giọng mono: có ra "giọng đứng trước" không, hay chỉ ra rộng
+- [ ] Cắt 30 Hz trên beat upload: có ai thấy mất lực không
+
+**743 passed, 3 skipped.**

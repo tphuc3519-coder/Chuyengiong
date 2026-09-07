@@ -16,7 +16,13 @@ import pytest
 from modal_app import analysis as an
 from modal_app import beats
 from modal_app.analysis import Track
-from modal_app.audio_utils import decode_audio, encode_wav
+from modal_app.audio_utils import (
+    decode_audio,
+    decode_wav_channels,
+    encode_wav,
+    encode_wav_channels,
+    to_pcm_wav,
+)
 
 SR = 44100
 
@@ -489,3 +495,57 @@ def test_the_loop_length_is_read_back_rather_than_recomputed():
 def test_a_loop_that_cannot_be_measured_is_an_error_and_not_a_guess():
     with pytest.raises(beats.BeatError):
         beats._wav_seconds(b"not a wav")
+
+
+# --- a stereo bed ---------------------------------------------------------
+
+
+def stereo_beat(bpm: float, seconds: float, offset: float = 0.0) -> bytes:
+    """A beat whose two channels are audibly different, so a downmix shows up."""
+    left = bars(bpm, seconds, offset)
+    right = bars(bpm, seconds, offset, tone=82.5)
+    return encode_wav_channels(np.stack([left, right], axis=1).astype(np.float32), SR)
+
+
+@needs_ffmpeg
+def test_an_uploaded_stereo_beat_stays_stereo_all_the_way_to_the_bed():
+    """`stretch` and `lay_under` are ffmpeg filters that neither know nor care
+    how many channels went through them, and this is the test that keeps it
+    that way — a `-ac 1` added anywhere in either graph would fold somebody's
+    production to mono without a word."""
+    song = encode_wav(bars(120, 24, offset=0.5, tone=70.0), SR)
+    bed, _, _, _ = beats.analyse_and_fit(stereo_beat(96, 16, offset=0.3), song)
+    audio, _ = decode_wav_channels(to_pcm_wav(bed, SR))
+    assert audio.shape[1] == 2
+    assert not np.allclose(audio[:, 0], audio[:, 1])
+
+
+@needs_ffmpeg
+def test_balance_keeps_both_channels_and_shelves_them_identically():
+    """One shelf for both sides is the only version that does not move the
+    image: fitted per channel it would pull back whichever side happened to
+    carry more bass and swing the arrangement towards the other one."""
+    time = np.arange(4 * SR) / SR
+    # Same content both sides, right 6 dB down. Bass heavy, so the shelf fires.
+    mono = (0.9 * np.sin(2 * np.pi * 55 * time) + 0.1 * np.sin(2 * np.pi * 3000 * time)).astype(
+        np.float32
+    )
+    wav = encode_wav_channels(np.stack([mono, mono * 0.5], axis=1), SR)
+
+    out, note = beats.balance(wav, SR)
+    audio, _ = decode_wav_channels(to_pcm_wav(out, SR))
+    assert audio.shape[1] == 2
+    assert "2ch" in note
+    # The 6 dB the two channels differed by is still exactly 6 dB.
+    ratio = float(np.sqrt((audio[:, 0] ** 2).mean()) / np.sqrt((audio[:, 1] ** 2).mean()))
+    assert 20 * np.log10(ratio) == pytest.approx(6.0, abs=0.2)
+
+
+@needs_ffmpeg
+def test_balance_still_takes_a_mono_bed_and_gives_one_back():
+    time = np.arange(4 * SR) / SR
+    mono = (0.9 * np.sin(2 * np.pi * 55 * time)).astype(np.float32)
+    out, note = beats.balance(encode_wav(mono, SR), SR)
+    audio, _ = decode_wav_channels(to_pcm_wav(out, SR))
+    assert audio.shape[1] == 1
+    assert "1ch" in note

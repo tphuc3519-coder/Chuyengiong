@@ -151,10 +151,10 @@ def test_the_catalogue_serialises_to_what_a_browser_needs():
 
 def test_a_profile_out_of_range_is_pulled_back_rather_than_trusted():
     wild = styles.Mixdown(
-        bed_gain_db=99, duck_db=99, pocket_db=99, pocket_hz=99999, low_shelf_db=-99
+        bed_below_voice_db=99, duck_db=99, pocket_db=99, pocket_hz=99999, low_shelf_db=-99
     )
     tame = wild.clamped()
-    assert tame.bed_gain_db == styles.MAX_BED_GAIN_DB
+    assert tame.bed_below_voice_db == styles.MAX_BED_LEVEL_DB
     assert tame.duck_db == styles.MAX_DUCK_DB
     # A boost asked for in the pocket becomes no pocket at all, never a boost.
     assert tame.pocket_db == 0.0
@@ -206,3 +206,19 @@ def test_a_prompt_is_never_three_descriptions_stacked_together():
 def test_whitespace_is_not_a_description():
     measured = "120 BPM, key of C, drums and bass"
     assert styles.prompt_for("auto", "   \n ", measured) == measured
+
+
+def test_the_balance_says_which_genres_put_the_bed_in_front():
+    """`bed_below_voice_db` is an absolute placement now, not a trim on whatever
+    arrived — so the table can be read as a claim about the music, and this is
+    that claim. A ballad and a bolero are about the words; trap and club music
+    are about the bed and the voice rides on it."""
+    level = {style.id: style.mix.bed_below_voice_db for style in styles.STYLES}
+    assert level["ballad"] > 0 and level["bolero"] > 0 and level["acoustic"] > 0
+    assert level["trap"] < 0 and level["edm"] < 0
+    assert level["ballad"] > level["auto"] > level["trap"]
+
+
+def test_the_styles_disagree_about_the_balance_too():
+    levels = {style.mix.bed_below_voice_db for style in styles.STYLES}
+    assert max(levels) - min(levels) >= 4.0

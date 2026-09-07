@@ -53,7 +53,7 @@ from dataclasses import dataclass
 MAX_DUCK_DB = 9.0
 MAX_POCKET_DB = 6.0
 MAX_SHELF_DB = 6.0
-MAX_BED_GAIN_DB = 6.0
+MAX_BED_LEVEL_DB = 6.0
 
 
 @dataclass(frozen=True)
@@ -63,8 +63,16 @@ class Mixdown:
     Four numbers, and each answers a question a mixing engineer answers by
     hand:
 
-    * `bed_gain_db` — how loud the bed is against the voice. The blunt one, and
-      the one a listener notices first.
+    * `bed_below_voice_db` — how far the bed's own loudness sits below the
+      voice's, in dB. The blunt one, the one a listener notices first, and the
+      one that used to be impossible to set meaningfully: it was a gain applied
+      to whatever level happened to arrive, so the same style landed somewhere
+      different for a quiet upload and a loud one. `mixing.mix` now measures
+      both sides and places the bed, so this number is a **balance** rather
+      than a trim — the same style produces the same mix whatever it is handed.
+      Positive means the bed is quieter than the voice; negative means the bed
+      is the point and the voice rides on it, which is the honest description
+      of trap and of club music.
     * `duck_db` — how far the voice pushes the bed down *while it is singing*.
       This is the setting that makes a modern record sound modern: the bed is
       loud in the gaps and gets out of the way for the words, so nothing has to
@@ -78,11 +86,13 @@ class Mixdown:
     * `low_shelf_db` — the bed's own bottom end. Up for anything built on an
       808, down for anything whose weight would otherwise fight a low voice.
 
-    Everything is relative to the bed as it arrived. A style never touches the
-    voice — `enhance` owns that chain and the user owns its one slider.
+    Only the level is absolute. The three filters are relative to the bed as it
+    arrived, because there is nothing to compare a shelf against. A style never
+    touches the voice — `enhance` owns that chain and the user owns its one
+    slider.
     """
 
-    bed_gain_db: float = 0.0
+    bed_below_voice_db: float = 1.0
     duck_db: float = 3.0
     pocket_db: float = -2.0
     pocket_hz: float = 2400.0
@@ -97,7 +107,7 @@ class Mixdown:
         anything else.
         """
         return Mixdown(
-            bed_gain_db=_clamp(self.bed_gain_db, -MAX_BED_GAIN_DB, MAX_BED_GAIN_DB),
+            bed_below_voice_db=_clamp(self.bed_below_voice_db, -MAX_BED_LEVEL_DB, MAX_BED_LEVEL_DB),
             duck_db=_clamp(self.duck_db, 0.0, MAX_DUCK_DB),
             # Cuts only. A style asking to be *louder* where the voice is has
             # misunderstood what this control is.
@@ -117,8 +127,8 @@ def _clamp(value: float, low: float, high: float) -> float:
 
 
 # The profile every style is a departure from, and the one `song` mode would
-# get if it asked: a bed 3 dB out of the way while somebody sings, and a shallow
-# bell where the consonants are. Nothing else.
+# get if it asked: a bed placed 1 dB under the voice, 3 dB out of the way while
+# somebody sings, and a shallow bell where the consonants are. Nothing else.
 NEUTRAL = Mixdown()
 
 
@@ -185,7 +195,7 @@ STYLES: tuple[Style, ...] = (
         # shelf down a touch because a piano's own bottom octave and a low
         # voice occupy the same place.
         mix=Mixdown(
-            bed_gain_db=-0.5, duck_db=1.5, pocket_db=-1.5, pocket_hz=2200.0, low_shelf_db=-1.0
+            bed_below_voice_db=3.0, duck_db=1.5, pocket_db=-1.5, pocket_hz=2200.0, low_shelf_db=-1.0
         ),
     ),
     Style(
@@ -199,7 +209,7 @@ STYLES: tuple[Style, ...] = (
         # The genre is a texture and the voice is the event: a lo-fi bed can
         # sit loud and duck a long way without anybody hearing it move, because
         # nothing in it has a sharp transient to give the movement away.
-        mix=Mixdown(bed_gain_db=0.5, duck_db=4.0, pocket_db=-2.5, pocket_hz=2600.0),
+        mix=Mixdown(bed_below_voice_db=0.0, duck_db=4.0, pocket_db=-2.5, pocket_hz=2600.0),
     ),
     Style(
         id="trap",
@@ -214,7 +224,7 @@ STYLES: tuple[Style, ...] = (
         # The shelf goes *up*: an 808 that has been levelled by RMS is an 808
         # that is no longer the point.
         mix=Mixdown(
-            bed_gain_db=0.5, duck_db=6.0, pocket_db=-3.5, pocket_hz=2800.0, low_shelf_db=2.5
+            bed_below_voice_db=-2.0, duck_db=6.0, pocket_db=-3.5, pocket_hz=2800.0, low_shelf_db=2.5
         ),
     ),
     Style(
@@ -225,7 +235,9 @@ STYLES: tuple[Style, ...] = (
             "boom bap hip hop, dusty acoustic drum break, upright bass, "
             "jazzy piano chops, vinyl warmth, head-nodding groove"
         ),
-        mix=Mixdown(duck_db=4.0, pocket_db=-2.5, pocket_hz=2500.0, low_shelf_db=1.0),
+        mix=Mixdown(
+            bed_below_voice_db=-0.5, duck_db=4.0, pocket_db=-2.5, pocket_hz=2500.0, low_shelf_db=1.0
+        ),
     ),
     Style(
         id="bolero",
@@ -238,7 +250,7 @@ STYLES: tuple[Style, ...] = (
         # An arrangement people listen *to*, on records where the singer is
         # already forward. Almost no duck, and no shelving: leave it as the
         # arrangement it is.
-        mix=Mixdown(bed_gain_db=-0.5, duck_db=1.5, pocket_db=-1.5, pocket_hz=2200.0),
+        mix=Mixdown(bed_below_voice_db=2.5, duck_db=1.5, pocket_db=-1.5, pocket_hz=2200.0),
     ),
     Style(
         id="rnb",
@@ -248,7 +260,9 @@ STYLES: tuple[Style, ...] = (
             "contemporary r&b, laid-back drums, warm rhodes chords, round bass, "
             "subtle clean guitar, airy background texture"
         ),
-        mix=Mixdown(duck_db=4.0, pocket_db=-3.0, pocket_hz=2600.0, low_shelf_db=1.0),
+        mix=Mixdown(
+            bed_below_voice_db=0.5, duck_db=4.0, pocket_db=-3.0, pocket_hz=2600.0, low_shelf_db=1.0
+        ),
     ),
     Style(
         id="acoustic",
@@ -262,7 +276,7 @@ STYLES: tuple[Style, ...] = (
         # hard case: the pocket does the work and the duck stays small so the
         # guitar does not sound like it is being switched on and off.
         mix=Mixdown(
-            bed_gain_db=-0.5, duck_db=2.0, pocket_db=-2.5, pocket_hz=2200.0, low_shelf_db=-1.0
+            bed_below_voice_db=2.5, duck_db=2.0, pocket_db=-2.5, pocket_hz=2200.0, low_shelf_db=-1.0
         ),
     ),
     Style(
@@ -276,7 +290,7 @@ STYLES: tuple[Style, ...] = (
         # Distorted guitar is a wall in exactly the band a voice needs, so this
         # gets the deepest pocket in the table and a wide one by implication —
         # it is the genre where "the vocal is buried" is the default outcome.
-        mix=Mixdown(bed_gain_db=-1.0, duck_db=5.0, pocket_db=-4.0, pocket_hz=2400.0),
+        mix=Mixdown(bed_below_voice_db=-1.0, duck_db=5.0, pocket_db=-4.0, pocket_hz=2400.0),
     ),
     Style(
         id="edm",
@@ -290,7 +304,7 @@ STYLES: tuple[Style, ...] = (
         # listener hears the pumping as part of the music rather than as a
         # mistake.
         mix=Mixdown(
-            bed_gain_db=0.5, duck_db=6.0, pocket_db=-3.0, pocket_hz=2800.0, low_shelf_db=1.5
+            bed_below_voice_db=-2.0, duck_db=6.0, pocket_db=-3.0, pocket_hz=2800.0, low_shelf_db=1.5
         ),
     ),
     Style(
@@ -301,7 +315,7 @@ STYLES: tuple[Style, ...] = (
             "city pop funk, slap bass, clean chorus electric guitar, "
             "bright electric piano, tight drums, 80s production"
         ),
-        mix=Mixdown(duck_db=3.5, pocket_db=-3.0, pocket_hz=2600.0),
+        mix=Mixdown(bed_below_voice_db=0.0, duck_db=3.5, pocket_db=-3.0, pocket_hz=2600.0),
     ),
     Style(
         id="orchestral",
@@ -315,7 +329,7 @@ STYLES: tuple[Style, ...] = (
         # appear in and the duck has to make one. The pocket is shallow because
         # a bell in a string section is audible as a hole.
         mix=Mixdown(
-            bed_gain_db=-1.0, duck_db=5.0, pocket_db=-2.0, pocket_hz=2400.0, low_shelf_db=-1.0
+            bed_below_voice_db=1.5, duck_db=5.0, pocket_db=-2.0, pocket_hz=2400.0, low_shelf_db=-1.0
         ),
     ),
 )

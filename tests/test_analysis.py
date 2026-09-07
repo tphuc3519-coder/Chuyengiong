@@ -305,17 +305,18 @@ def test_the_downbeat_is_one_of_the_beats_and_not_between_them():
     assert steps == pytest.approx(round(steps), abs=0.01)
 
 
-def test_a_kick_on_every_beat_is_declined_rather_than_guessed():
-    """Four-on-the-floor gives every phase the same low end. Answering anyway
-    would be a coin flip that then decides where a three minute bed sits."""
+def test_a_kick_on_every_beat_with_no_harmony_is_declined_rather_than_guessed():
+    """Four-on-the-floor gives every phase the same low end, and with nothing
+    harmonic on top there is no second opinion to break the tie. Answering
+    anyway would be a coin flip that then decides where a three minute bed
+    sits."""
     track = an.analyse(kit(120, kicks=(0, 1, 2, 3), snares=(), bass=False))
     assert track.downbeat_margin < an.DOWNBEAT_MIN_MARGIN
     assert not track.has_downbeat
 
 
-def test_nothing_in_the_low_end_means_no_bar_line_and_no_pretending():
-    """A track with no kick and no bass has nothing for this rule to read, and
-    saying so is the answer."""
+def test_nothing_in_the_low_end_and_no_chord_changes_means_no_bar_line():
+    """Neither cue has anything to read, and saying so is the answer."""
     track = an.analyse(kit(120, kicks=(), snares=(1, 3), bass=False))
     assert not track.has_downbeat
 
@@ -366,3 +367,107 @@ def test_the_low_band_envelope_is_the_only_thing_that_changed():
     limited = an.onset_envelope(audio, SR, max_hz=an.DOWNBEAT_HZ)
     assert len(limited) == len(an.onset_envelope(audio))
     assert not np.array_equal(limited, an.onset_envelope(audio))
+
+
+def chords_per_bar(
+    bpm: float = 100.0,
+    seconds: float = 24.0,
+    offset: float = 0.0,
+    kicks: tuple[int, ...] = (0, 1, 2, 3),
+) -> np.ndarray:
+    """An arrangement whose bar line is stated by the *harmony* and not by the
+    drums: a chord change every bar over a kick on every beat.
+
+    This is the case the low-band cue alone cannot answer and a listener finds
+    trivially — four-on-the-floor is most of dance music, and the counting is
+    done from the chords.
+    """
+    audio = np.zeros(int(seconds * SR) + SR, dtype=np.float32)
+    progression = [[60, 64, 67], [57, 60, 64], [53, 57, 60], [55, 59, 62]]
+
+    kick_t = np.arange(int(0.2 * SR)) / SR
+    kick = (
+        np.exp(-kick_t / 0.06)
+        * np.sin(2 * np.pi * np.cumsum(110 * np.exp(-kick_t / 0.03) + 45) / SR)
+    ).astype(np.float32)
+
+    def add(sound: np.ndarray, at: float) -> None:
+        start = int(at * SR)
+        if 0 <= start < len(audio):
+            audio[start : start + len(sound)] += sound[: len(audio) - start]
+
+    period = 60.0 / bpm
+    bar = period * 4
+    index, time = 0, offset
+    while time < seconds - 0.3:
+        if index % 4 in kicks:
+            add(kick, time)
+        if index % 4 == 0:
+            length = int(bar * 0.95 * SR)
+            t = np.arange(length) / SR
+            chord = sum(note(midi, bar * 0.95)[:length] for midi in progression[(index // 4) % 4])
+            add((chord * np.minimum(t / 0.005, 1.0)).astype(np.float32), time)
+        time += period
+        index += 1
+    return audio[: int(seconds * SR)]
+
+
+@pytest.mark.parametrize("offset", [0.0, 0.23, 0.69, 1.15])
+def test_the_bar_line_is_found_from_the_chords_when_the_drums_cannot_say(offset):
+    """The whole reason there are two cues. A kick on all four beats says
+    nothing about which one is beat one; a chord change once a bar says it
+    plainly, and that is how a listener counts a dance track."""
+    track = an.analyse(chords_per_bar(offset=offset))
+    assert track.has_downbeat
+    assert bar_error(track, offset) < 0.12
+
+
+def test_the_harmonic_cue_alone_finds_what_the_low_band_alone_cannot():
+    """Held apart rather than only tested through the combination, so a
+    regression in either one is attributable."""
+    audio = chords_per_bar(offset=0.23)
+    bpm, beat = an.tempo(audio)
+    _, start, period = an._grid(bpm, beat, SR / an.HOP)
+
+    low = an._share(an._low_end_phases(audio, start, period, SR))
+    harmonic = an._share(an._harmonic_phases(audio, start, period, SR))
+    assert low is not None and harmonic is not None
+    # A kick on every beat: the low end has no opinion worth acting on.
+    assert float(low.max()) - float(np.sort(low)[-2]) < an.DOWNBEAT_MIN_MARGIN
+    # The chords do.
+    assert float(harmonic.max()) - float(np.sort(harmonic)[-2]) > an.DOWNBEAT_MIN_MARGIN
+
+
+def test_the_two_cues_are_made_comparable_before_they_are_added():
+    """One is onset energy and the other a distance between chroma vectors —
+    unrelated units. Normalising each to sum to 1 is what makes the weighting
+    mean "how strongly each cue prefers a phase" rather than "which cue got the
+    bigger numbers"."""
+    assert an._share(np.array([1.0, 2.0, 3.0, 4.0])).sum() == pytest.approx(1.0)
+    assert an._share(np.array([100.0, 200.0, 300.0, 400.0])).sum() == pytest.approx(1.0)
+    # Two vectors that prefer the same phase equally strongly must weigh the
+    # same however loud the recording they came from was.
+    assert an._share(np.array([1.0, 2.0, 3.0, 4.0])) == pytest.approx(
+        an._share(np.array([10.0, 20.0, 30.0, 40.0]))
+    )
+    assert an._share(np.zeros(4)) is None
+    assert an._share(None) is None
+
+
+def test_a_loud_chord_and_a_quiet_one_are_not_a_chord_change():
+    """Chroma rows are normalised before differencing, so the harmonic cue
+    measures *which notes* rather than how loud — otherwise it would be a
+    second, worse copy of the low-band cue."""
+    quiet = note(60, 1.0) + note(64, 1.0) + note(67, 1.0)
+    loud = quiet * 4.0
+    audio = np.concatenate([quiet, loud] * 8).astype(np.float32)
+    scores = an._harmonic_phases(audio, 0.0, len(quiet) / an.HOP, SR)
+    if scores is not None:
+        share = an._share(scores)
+        assert share is None or float(share.max()) - float(np.sort(share)[-2]) < 0.25
+
+
+def test_too_little_audio_to_see_a_change_twice_says_nothing():
+    """One chord change per bar means a single bar is a single sample of a
+    single phase, which is not evidence."""
+    assert an._harmonic_phases(chords_per_bar(seconds=2.0), 0.0, 21.5, SR) is None

@@ -38,6 +38,7 @@ stand-in.
 from __future__ import annotations
 
 import io
+import math
 import subprocess
 import tempfile
 import wave
@@ -95,6 +96,29 @@ DUCK_DETECTION = "peak"
 # would be pretending this is calibrated when what it actually is, is
 # monotonic, which is the property a dial needs.
 DUCK_LAW = 1.0 - 1.0 / DUCK_RATIO
+
+# How far the corrective gain may go when the bed is placed against the voice.
+#
+# The correction exists because the two sides arrive at unrelated levels: a
+# generated bed comes out of `beats.balance` at a fixed RMS, an uploaded one is
+# at whatever loudness somebody mastered it to, and a converted vocal is at
+# whatever Seed-VC produced. Without measuring, a style's balance is a wish.
+#
+# 15 dB covers every real case — a quiet upload against a hot vocal is maybe
+# 10 — and stops a nearly-silent bed from being amplified into its own noise
+# floor, which is the failure mode of an unbounded correction.
+MAX_BED_TRIM_DB = 15.0
+
+# Everything below this in the bed is rumble, and rumble is expensive twice
+# over: it eats headroom, and `loudnorm` at the end barely hears it (K-weighting
+# rolls off hard down there) so it turns the *whole mix* down to make room for
+# something nobody can hear.
+#
+# `beats.balance` already does this to a generated bed. Doing it here as well
+# is not a duplicate: `balance` never runs on an uploaded beat, and an uploaded
+# beat is exactly the file most likely to have a mastered-in sub nobody asked
+# for. Idempotent on a bed that has already had it.
+BED_HIGHPASS_HZ = 30.0
 
 # Bell width for the vocal pocket, as **Q** — `equalizer` is given `t=q`, so
 # this is a quality factor and not a number of octaves. 1.4 is a bandwidth of
@@ -206,13 +230,115 @@ def _peak_db(wav: bytes) -> float:
     return 0.0
 
 
-def mix_bed(profile: Mixdown, rate: int, stereo: str = "") -> str:
+def _loudness_db(wav: bytes) -> float | None:
+    """Integrated loudness in LUFS, or `None` when it cannot be measured.
+
+    `ebur128` rather than `volumedetect`, and the difference is the whole
+    reason this is worth a second ffmpeg pass. A lead vocal is more silence
+    than singing, and `mean_volume` averages the silence in: measured on a test
+    vocal that is 60% gaps, `mean_volume` said -16.8 dB while the gated
+    integrated loudness said -13.2 LUFS. Balancing a bed against the first
+    number places it against how much the singer *rests*.
+
+    The R128 gate is what fixes that — it discards everything more than 10 LU
+    below the running average, so what comes back is the loudness of the parts
+    that are actually playing. Which is the number a person means when they say
+    one thing is louder than another.
+
+    `None` for a file too short to gate (under ~0.4 s), for silence, and for
+    anything ffmpeg refuses — and every caller treats it as "apply no
+    correction" rather than guessing, because a balance computed from a
+    measurement that did not happen is worse than the level the file came with.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "in.wav"
+        path.write_bytes(wav)
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostats",
+                "-i",
+                str(path),
+                "-af",
+                "ebur128=framelog=quiet",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+        )
+    # The summary block prints "I:  -13.2 LUFS" a line or two after
+    # "Integrated loudness:". Read the last one, because a graph with more than
+    # one ebur128 in it would print more than one and the last is ours.
+    lines = proc.stderr.decode("utf-8", "replace").splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        if "Integrated loudness" not in lines[index]:
+            continue
+        for line in lines[index : index + 4]:
+            stripped = line.strip()
+            if stripped.startswith("I:"):
+                try:
+                    value = float(stripped.split()[1])
+                except (IndexError, ValueError):
+                    return None
+                # Silence reads as -inf, or as a floor near -70 with nothing
+                # above the absolute gate. Neither is a level to balance to.
+                return value if math.isfinite(value) and value > -70.0 else None
+        return None
+    return None
+
+
+def bed_trim_db(profile: Mixdown, vocal_wav: bytes, bed_wav: bytes, vocal_gain_db: float) -> float:
+    """The gain that puts the bed where the style says, relative to the voice.
+
+    This is the function that turns `bed_below_voice_db` from a wish into a
+    setting. Both sides are measured, and the bed is moved so its loudness
+    lands `bed_below_voice_db` under the voice's — so the same style produces
+    the same balance whether the beat arrived from a GPU at a fixed RMS or as
+    somebody's mastered upload eight dB louder.
+
+    **The vocal gain slider is part of the target, not applied after it.** The
+    voice the bed is being balanced against is the voice as the user asked for
+    it, so turning the voice up moves the bed down with it and the slider does
+    what a balance slider is expected to do. (The ducking is the one thing that
+    slider deliberately does not touch — see `mix`.)
+
+    Two honest limits, both stated rather than corrected for:
+
+    * The bed is measured **before** its own pocket, shelf and ducking, so a
+      style that ducks hard ends up a little quieter than the number says. The
+      direction is right — heavier ducking should read as a bed further back —
+      and correcting it would mean measuring a signal that does not exist until
+      after the graph has run.
+    * `bed_below_voice_db` itself is **reasoned, not measured**, exactly like
+      the rest of the table. What this function buys is not a correct absolute
+      balance, it is a *reproducible* one: whatever the right number turns out
+      to be, it will mean the same thing on every job once somebody with ears
+      has set it.
+
+    0.0 whenever either side cannot be measured, which leaves the two files at
+    the levels they came with — the behaviour this app had before.
+    """
+    voice = _loudness_db(vocal_wav)
+    bed = _loudness_db(bed_wav)
+    if voice is None or bed is None:
+        return 0.0
+    target = voice + clamp_gain_db(vocal_gain_db) - profile.clamped().bed_below_voice_db
+    return max(-MAX_BED_TRIM_DB, min(MAX_BED_TRIM_DB, target - bed))
+
+
+def mix_bed(profile: Mixdown, rate: int, stereo: str = "", trim_db: float = 0.0) -> str:
     """The bed's own filters, before the voice is anywhere near it.
 
-    Three, and every one of them is omitted when its setting is zero — the same
+    The shelf and the bell are omitted when their setting is zero — the same
     rule `enhance.chain` follows, and for the same reason: a style that asks
-    for nothing should produce the graph this module had before styles existed,
-    so "turn it off" is always reachable and always exactly the old behaviour.
+    for nothing should produce very nearly the graph this module had before
+    styles existed, so "turn it off" stays reachable.
+
+    `trim_db` is the measured placement from `bed_trim_db`, and it goes in
+    ahead of the tone shaping so the shelf and the bell act on the bed at the
+    level it will actually sit at rather than at the level it arrived with.
 
     `aresample` is not one of the three and is never omitted.
     `sidechaincompress` compares two streams sample for sample and refuses a
@@ -220,17 +346,22 @@ def mix_bed(profile: Mixdown, rate: int, stereo: str = "") -> str:
     different places at different rates as a matter of course.
     """
     profile = profile.clamped()
-    parts = [f"aresample={rate}"]
+    # Rumble first, before anything else looks at the bed: the shelf below is
+    # fitted to what is left, and a sub nobody wants should not be part of what
+    # it is fitted to.
+    parts = [f"aresample={rate}", f"highpass=f={BED_HIGHPASS_HZ:.0f}"]
     if stereo:
         parts.insert(0, stereo)
+    if trim_db:
+        # The measured placement, applied before the tone shaping so the shelf
+        # and the bell act on the bed at the level it will actually sit at.
+        parts.append(f"volume={trim_db:.2f}dB")
     if profile.low_shelf_db:
         parts.append(f"bass=g={profile.low_shelf_db:.2f}:f={SHELF_HZ:.0f}:t=q:w={SHELF_WIDTH}")
     if profile.pocket_db:
         parts.append(
             f"equalizer=f={profile.pocket_hz:.0f}:t=q:w={POCKET_WIDTH}:g={profile.pocket_db:.2f}"
         )
-    if profile.bed_gain_db:
-        parts.append(f"volume={profile.bed_gain_db:.2f}dB")
     return ",".join(parts)
 
 
@@ -244,7 +375,13 @@ def ducks(profile: Mixdown | None) -> bool:
     return profile is not None and profile.clamped().duck_db > 0
 
 
-def bed_graph(profile: Mixdown, rate: int, vocal_peak_db: float, stereo: str = "") -> str:
+def bed_graph(
+    profile: Mixdown,
+    rate: int,
+    vocal_peak_db: float,
+    stereo: str = "",
+    trim_db: float = 0.0,
+) -> str:
     """The whole second half of a ducked mix: `[1:a]` and `[key]` in, `[bed]` out.
 
     Expects a `[key]` label carrying the voice and leaves `[bed]` behind for
@@ -269,7 +406,7 @@ def bed_graph(profile: Mixdown, rate: int, vocal_peak_db: float, stereo: str = "
       different things a user should be able to set separately.
     """
     profile = profile.clamped()
-    bed = mix_bed(profile, rate, stereo)
+    bed = mix_bed(profile, rate, stereo, trim_db)
     if not ducks(profile):
         # No ducking asked for, so no `[key]` is read. `mix` asks the same
         # question before it splits one off — an unconsumed label is not a
@@ -377,8 +514,10 @@ def mix(
     than after it, because the de-esser and the denoiser both have thresholds
     and a gain applied ahead of them would move what they act on.
 
-    **`bed` is what makes a replacement backing track sound like one**, and
-    when it is None this function is exactly what it was before styles existed
+    **`bed` is what makes a replacement backing track sound like one.** With a
+    profile the bed is measured against the voice and *placed* rather than
+    merely gained — see `bed_trim_db` — then shelved, pocketed and ducked. When
+    it is None this function is exactly what it was before styles existed
     — same graph, same two filters, same output. That is deliberate and is
     worth keeping true: `song` mode mixes a vocal back over the instrumental it
     was separated from, which was balanced by whoever made the record, and a
@@ -396,6 +535,11 @@ def mix(
     # Putting the rate back settles both: `amix` had already agreed on the
     # vocal's, which is what this restores.
     rate = _sample_rate(vocal_wav)
+    # Measured before the graph is built, because it is an argument to the
+    # graph: two `ebur128` passes that decode and throw the audio away, which
+    # is a couple of seconds of CPU against a job that has already spent
+    # minutes of GPU.
+    trim = 0.0 if bed is None else bed_trim_db(bed, vocal_wav, instrumental_wav, gain)
     voice = f"{enhance.chain(clarity, ',')}volume={gain:.2f}dB,{CENTRE}"
     if bed is None:
         graph = (
@@ -414,7 +558,7 @@ def mix(
         graph = (
             f"{split}"
             f"[raw]{voice}[v];"
-            f"{bed_graph(bed, rate, _peak_db(vocal_wav), _stereo(instrumental_wav))};"
+            f"{bed_graph(bed, rate, _peak_db(vocal_wav), _stereo(instrumental_wav), trim)};"
             f"[v][bed]amix=inputs=2:normalize=0:duration=longest[m];"
             f"[m]{LOUDNORM},aresample={rate}[out]"
         )

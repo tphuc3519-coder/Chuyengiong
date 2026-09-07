@@ -20,6 +20,7 @@ from modal_app.audio_utils import (
     decode_wav_channels,
     encode_wav,
     encode_wav_channels,
+    to_pcm_wav,
 )
 
 SR = 44100
@@ -474,15 +475,27 @@ def test_a_mono_bed_is_widened_at_unity_and_not_three_decibels_down():
 def test_the_bed_chain_omits_every_filter_it_was_not_asked_for():
     """The same rule `enhance.chain` follows: a style that asks for nothing has
     to produce the graph this module had before styles existed."""
-    nothing = mixing.mix_bed(
-        styles.Mixdown(duck_db=0, pocket_db=0, low_shelf_db=0, bed_gain_db=0), 44100
-    )
-    assert nothing == "aresample=44100"
+    nothing = mixing.mix_bed(styles.Mixdown(duck_db=0, pocket_db=0, low_shelf_db=0), 44100)
+    assert nothing == "aresample=44100,highpass=f=30"
     everything = mixing.mix_bed(
-        styles.Mixdown(duck_db=3, pocket_db=-3, low_shelf_db=2, bed_gain_db=1), 44100
+        styles.Mixdown(duck_db=3, pocket_db=-3, low_shelf_db=2), 44100, trim_db=1.5
     )
     for expected in ("bass=", "equalizer=", "volume="):
         assert expected in everything
+
+
+def test_the_measured_placement_goes_in_before_the_tone_shaping():
+    """The shelf and the bell are fitted to the bed at the level it will sit
+    at, not at the level it happened to arrive with."""
+    chain = mixing.mix_bed(styles.Mixdown(low_shelf_db=2, pocket_db=-3), 44100, trim_db=-4.0)
+    assert chain.index("volume=") < chain.index("bass=") < chain.index("equalizer=")
+
+
+def test_every_bed_loses_its_rumble_whatever_it_came_from():
+    """`beats.balance` does this to a generated bed and never runs on an
+    uploaded one — and an uploaded beat is exactly the file most likely to
+    carry a mastered-in sub that `loudnorm` then turns the whole mix down for."""
+    assert f"highpass=f={mixing.BED_HIGHPASS_HZ:.0f}" in mixing.mix_bed(styles.NEUTRAL, 44100)
 
 
 def test_no_ducking_asked_for_builds_no_sidechain_at_all():
@@ -511,3 +524,121 @@ def test_the_key_is_padded_so_framesync_cannot_truncate_the_bed():
 def test_a_peak_that_cannot_be_read_applies_no_correction_rather_than_a_wrong_one():
     assert mixing._peak_db(b"not audio") == 0.0
     assert mixing._peak_db(tone(1, amplitude=0.5)) == pytest.approx(-6.0, abs=0.3)
+
+
+# --- placing the bed against the voice ------------------------------------
+
+
+@needs_ffmpeg
+def test_loudness_gates_the_silence_a_singer_leaves():
+    """The reason this is `ebur128` and not `volumedetect`. A lead vocal is more
+    silence than singing, and an ungated average measures how much the singer
+    *rests* — which is not what anybody means by how loud they are."""
+    gappy = decode_audio(bursts(20, on=1.5), SR)
+    steady = np.sin(2 * np.pi * 260 * np.arange(len(gappy)) / SR).astype(np.float32)
+    steady *= float(np.abs(gappy).max())
+
+    gated = mixing._loudness_db(encode_wav(gappy, SR))
+    solid = mixing._loudness_db(encode_wav(steady, SR))
+    assert gated is not None and solid is not None
+    # Two signals at the same peak. Ungated, the gappy one would read many dB
+    # quieter; gated, it is within a few of the steady one.
+    assert abs(gated - solid) < 6.0
+
+
+@needs_ffmpeg
+def test_nothing_measurable_is_reported_as_nothing_rather_than_guessed():
+    assert mixing._loudness_db(encode_wav(np.zeros(2 * SR, dtype=np.float32), SR)) is None
+    assert mixing._loudness_db(b"not audio") is None
+
+
+@needs_ffmpeg
+def test_the_same_style_places_the_bed_the_same_however_loud_it_arrived():
+    """The whole point of measuring. A generated bed leaves `beats.balance` at a
+    fixed RMS and an uploaded one is at whatever somebody mastered it to — so
+    without this a style's balance is a wish rather than a setting."""
+    voice = bursts(20, on=1.5)
+    profile = styles.mix_for("auto")
+    landed = []
+    for amplitude in (0.6, 0.2, 0.9):
+        bed = tone(20, freq=110.0, amplitude=amplitude)
+        trim = mixing.bed_trim_db(profile, voice, bed, 0.0)
+        landed.append(mixing._loudness_db(bed) + trim)
+    assert max(landed) - min(landed) < 0.5
+
+    # And it landed where the style asked, not merely consistently.
+    voice_lufs = mixing._loudness_db(voice)
+    assert landed[0] == pytest.approx(voice_lufs - profile.bed_below_voice_db, abs=0.5)
+
+
+@needs_ffmpeg
+def test_a_style_that_wants_the_bed_in_front_gets_it_in_front():
+    """Negative means the bed is the point and the voice rides on it, which is
+    the honest description of trap and of club music."""
+    voice, bed = bursts(20, on=1.5), tone(20, freq=110.0)
+    forward = mixing.bed_trim_db(styles.mix_for("trap"), voice, bed, 0.0)
+    behind = mixing.bed_trim_db(styles.mix_for("ballad"), voice, bed, 0.0)
+    assert forward > behind
+    assert forward - behind == pytest.approx(
+        styles.find("ballad").mix.bed_below_voice_db - styles.find("trap").mix.bed_below_voice_db,
+        abs=0.01,
+    )
+
+
+@needs_ffmpeg
+def test_the_vocal_gain_slider_moves_the_balance_with_it():
+    """Turning the voice up should move the bed down by the same amount — that
+    is what a balance slider means. It is also the one thing that slider must
+    *not* change: the ducking depth stays where the style put it."""
+    voice, bed = bursts(20, on=1.5), tone(20, freq=110.0)
+    profile = styles.mix_for("auto")
+    quiet = mixing.bed_trim_db(profile, voice, bed, -6.0)
+    loud = mixing.bed_trim_db(profile, voice, bed, 6.0)
+    assert loud - quiet == pytest.approx(12.0, abs=0.01)
+
+
+@needs_ffmpeg
+def test_a_bed_that_cannot_be_measured_is_left_at_the_level_it_came_with():
+    """No correction rather than a guess: the behaviour this app had before
+    anything was measured."""
+    voice = bursts(6)
+    silent = encode_wav(np.zeros(2 * SR, dtype=np.float32), SR)
+    assert mixing.bed_trim_db(styles.NEUTRAL, voice, silent, 0.0) == 0.0
+    assert mixing.bed_trim_db(styles.NEUTRAL, silent, tone(6), 0.0) == 0.0
+
+
+@needs_ffmpeg
+def test_the_correction_is_bounded_so_a_near_silent_bed_is_not_amplified():
+    voice = bursts(20, on=1.5)
+    whisper = tone(20, freq=110.0, amplitude=0.002)
+    assert mixing.bed_trim_db(styles.NEUTRAL, voice, whisper, 0.0) == mixing.MAX_BED_TRIM_DB
+
+
+@needs_ffmpeg
+def test_a_quiet_beat_and_a_loud_one_end_up_in_the_same_mix():
+    """End to end, through the whole graph: the measurement has to survive the
+    shelf, the pocket, the duck and `loudnorm`."""
+    voice = bursts(20, on=1.5)
+    profile = styles.mix_for("lofi")
+    levels = [
+        band_power_db(
+            mixing.mix(voice, tone(20, freq=110.0, amplitude=a), bed=profile), 2.2, 2.8, 90, 130
+        )
+        for a in (0.6, 0.15)
+    ]
+    assert abs(levels[0] - levels[1]) < 1.5
+
+
+# --- a stereo bed ---------------------------------------------------------
+
+
+@needs_ffmpeg
+def test_a_stereo_bed_arrives_in_the_mix_still_stereo():
+    """The vocal is mono and centred, so a stereo bed is the difference between
+    a voice in front of an arrangement and a voice on top of a thing in exactly
+    the same place in the image."""
+    voice = bursts(4)
+    mixed = mixing.mix(voice, stereo_tone(4, left=110.0, right=170.0), bed=styles.mix_for("auto"))
+    audio, _ = decode_wav_channels(to_pcm_wav(mixed, SR))
+    assert audio.shape[1] == 2
+    assert not np.allclose(audio[:, 0], audio[:, 1])

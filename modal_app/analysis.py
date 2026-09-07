@@ -32,12 +32,13 @@ is written down here rather than discovered later:
   strength of this".
 
 * **A downbeat is a guess about metre, not a measurement of it.** `downbeat()`
-  picks which of four beats carries the bar line by asking where the *low* end
-  fires, because in everything this app is pointed at the bar line is where the
-  kick is. That is a real rule and it is not a law: a song whose kick sits on
-  every beat, or on the backbeat, has nothing for it to read. So it returns a
-  margin too, and the caller that gets a small one is expected to fall back to
-  plain beat alignment rather than commit to a bar line it invented.
+  picks which of four beats carries the bar line from two cues that fail in
+  different places — where the *low end* fires, and where the *harmony*
+  changes. Neither is a law: a song with a kick on every beat has nothing for
+  the first to read, and a song that sits on one chord for eight bars has
+  nothing for the second. So it returns a margin too, and the caller that gets
+  a small one is expected to fall back to plain beat alignment rather than
+  commit to a bar line it invented.
 """
 
 from __future__ import annotations
@@ -160,6 +161,44 @@ BEATS_PER_BAR = 4
 # phases score. 120 is below a snare's fundamental and above the fundamental of
 # anything a kick plays.
 DOWNBEAT_HZ = 120.0
+
+# How the two cues are weighted against each other, after each has been
+# normalised to sum to 1.
+#
+# **0.4, and the column that chose it is the middle one.** Scored over 180
+# cases — five synthesised arrangements (kick-led with no harmony; a band with
+# drums and a chord per bar; four-on-the-floor; a piano ballad; a bolero
+# arpeggio) at nine bar positions and four tempos, marked against the bar the
+# material was *built* with:
+#
+#     weight   right   wrong   declined
+#     0.0        75       9       96      <- the low end alone
+#     0.3       119       9       52
+#     0.4       129       9       42      <- here
+#     0.5       128      10       42
+#     0.6       131      10       39
+#     0.7       132      10       38
+#     1.0        97      28       55      <- the harmony alone
+#
+# Two things in that table matter more than the totals. The first is that
+# **neither cue is any good on its own**: the low end declines more than half
+# the time, and the harmony alone gets three times as many answers outright
+# wrong — it collapses completely on the bolero, where an arpeggio changes note
+# on every beat and there is a chroma change everywhere to find.
+#
+# The second is the wrong column, which is why 0.4 wins rather than 0.7.
+# Weights above it buy two or three more right answers and pay for them with a
+# wrong one, and those are not the same currency: a declined bar line costs
+# only the improvement and falls back to beat alignment, while a wrong one puts
+# a bed's kick on the song's beat two and leaves it there for the whole song.
+# 0.4 is the last weight that takes nothing from the baseline's error count and
+# still nearly doubles what gets answered.
+#
+# The 42 that stay declined are almost all the kick-led case with no harmony at
+# all: a kick on beats one and three with a snare on two and four is
+# *genuinely* ambiguous between the two, and there is nothing in the recording
+# that says which. Declining there is the right answer, not a miss.
+HARMONIC_WEIGHT = 0.4
 
 # How much the winning phase has to beat the runner-up, as a fraction of the
 # winner. Below this the bar line is a coin flip and the caller is told so.
@@ -496,6 +535,141 @@ def tempo(audio: np.ndarray, sample_rate: int = ANALYSIS_RATE) -> tuple[float, f
     return float(60.0 * frames_per_sec / period), float(seconds % (period / frames_per_sec))
 
 
+def _grid(bpm: float, beat_offset_sec: float, frames_per_sec: float) -> tuple[float, float, float]:
+    """`(first beat in seconds, that beat in frames, one beat in frames)`.
+
+    `tempo()` hands out a time with the envelope's own lead already taken off
+    it (`ONSET_LEAD_FRAMES`), so it has to go back on before any grid is walked
+    in frames — otherwise every position is sampled four frames early and is
+    scored off the tail of the previous beat.
+
+    Putting the lead back can push the first beat before frame zero, and the
+    grid then has to start at the *next* beat instead. Which beat that is comes
+    back as the first return value rather than being taken modulo: the phase
+    both scorers below produce is counted from wherever the walk began, so
+    forgetting by how much returns an answer a beat early — on the grid, and in
+    the wrong place in the bar.
+    """
+    period = 60.0 / bpm * frames_per_sec
+    beat_sec = 60.0 / bpm
+    first_sec = float(beat_offset_sec)
+    start = first_sec * frames_per_sec - ONSET_LEAD_FRAMES
+    while start < 0:
+        first_sec += beat_sec
+        start += period
+    return first_sec, start, period
+
+
+def _low_end_phases(
+    audio: np.ndarray, start: float, period: float, sample_rate: int
+) -> np.ndarray | None:
+    """How much low-frequency onset energy lands on each of the four phases.
+
+    The first cue, and the one that works on anything with drums in it: **beat
+    one is where the low end fires.** A kick and a bass note are the two things
+    in a pop arrangement that reliably play there, and `DOWNBEAT_HZ` is placed
+    to hear them and not the snare.
+
+    Each beat is scored by the loudest onset *near* it rather than by the one
+    sample on it — the grid is fractional and a drummer is human. An eighth of
+    a beat either way, which is well inside the next beat and well outside a
+    rounding error.
+    """
+    envelope = onset_envelope(audio, sample_rate, max_hz=DOWNBEAT_HZ)
+    if len(envelope) < BEATS_PER_BAR * period:
+        return None
+    reach = max(1, int(round(period / 8)))
+    scores = np.zeros(BEATS_PER_BAR, dtype=np.float64)
+    for step in range(int((len(envelope) - start) / period) + 1):
+        centre = int(round(start + step * period))
+        low, high = max(0, centre - reach), min(len(envelope), centre + reach + 1)
+        if high <= low:
+            continue
+        scores[step % BEATS_PER_BAR] += float(envelope[low:high].max())
+    return scores
+
+
+def _harmonic_phases(
+    audio: np.ndarray, start: float, period: float, sample_rate: int
+) -> np.ndarray | None:
+    """How much the harmony changes at each of the four phases.
+
+    The second cue, and the one that answers the cases the first cannot:
+    **chords change on the bar line.** A piano ballad has no kick to read and a
+    four-on-the-floor track has a kick on all four beats, and both of them
+    still change chord once a bar — which is the thing a listener is actually
+    counting from.
+
+    One chroma vector per beat, then the distance between each beat's and the
+    previous one's, summed per phase. Chroma rather than the raw spectrum
+    because what matters is *which notes*, not how loud: a chord played quietly
+    and the same chord played loudly must not read as a change, and two
+    different chords at the same level must.
+
+    Each row is normalised to sum to 1 before differencing, for the same
+    reason — otherwise this measures where the arrangement gets louder, which
+    is a different question with a different answer (it is the first cue's
+    question, and it is already asked).
+    """
+    frames = _frames(audio)
+    if not len(frames):
+        return None
+    magnitude = np.abs(np.fft.rfft(frames, axis=1))
+    freqs = np.fft.rfftfreq(FRAME, 1.0 / sample_rate)
+    usable = (freqs >= KEY_MIN_HZ) & (freqs <= KEY_MAX_HZ)
+    if not usable.any():
+        return None
+    classes = np.rint(69 + 12 * np.log2(freqs[usable] / 440.0)).astype(int) % 12
+
+    # Bin the frames' energy into the twelve pitch classes in one pass.
+    kept = magnitude[:, usable]
+    per_frame = np.zeros((len(kept), 12), dtype=np.float64)
+    for pitch_class in range(12):
+        selected = classes == pitch_class
+        if selected.any():
+            per_frame[:, pitch_class] = kept[:, selected].sum(axis=1)
+
+    rows = []
+    step = 0
+    while True:
+        low = int(round(start + step * period))
+        high = int(round(start + (step + 1) * period))
+        if high > len(per_frame) or high <= low:
+            break
+        window = per_frame[low:high].sum(axis=0)
+        total = float(window.sum())
+        rows.append(window / total if total > 0 else np.zeros(12))
+        step += 1
+    # Two bars is the least this can say anything about: one change per bar
+    # means one bar gives a single sample of one phase.
+    if len(rows) < 2 * BEATS_PER_BAR:
+        return None
+
+    change = np.linalg.norm(np.diff(np.asarray(rows), axis=0), axis=1)
+    scores = np.zeros(BEATS_PER_BAR, dtype=np.float64)
+    for index, value in enumerate(change):
+        # `change[i]` is the difference between beat i+1 and beat i, so it is
+        # the change that happened *at* beat i+1.
+        scores[(index + 1) % BEATS_PER_BAR] += float(value)
+    return scores
+
+
+def _share(scores: np.ndarray | None) -> np.ndarray | None:
+    """A phase score vector as fractions of itself, or None if it says nothing.
+
+    The two cues are in unrelated units — one is onset energy, the other is a
+    distance between chroma vectors — so they have to be made comparable before
+    they can be added. Normalising each to sum to 1 also means the combination
+    weighs *how strongly each cue prefers a phase*, not how loud the recording
+    was, which is the only version of this that behaves the same on a quiet
+    ballad and a loud one.
+    """
+    if scores is None:
+        return None
+    total = float(scores.sum())
+    return scores / total if total > 0 else None
+
+
 def downbeat(
     audio: np.ndarray,
     bpm: float,
@@ -509,18 +683,17 @@ def downbeat(
     of the four beats in a bar is beat one*, which is a four-way choice and not
     a search.
 
-    The rule is one sentence: **beat one is where the low end fires.** Every
-    beat position is scored by how much low-frequency onset energy lands on it
-    across the whole track, the four phases are compared, and the winner is the
-    bar line. On a pop arrangement that is the kick against the snare, and the
-    two are an octave and a half apart in frequency, which is why the band
-    limit does all the work here.
+    Two cues, weighted by `HARMONIC_WEIGHT`, and the reason there are two is
+    that they fail in different places: the low end says nothing about a piano
+    ballad or a four-on-the-floor track, and the harmony says nothing about a
+    drum loop that sits on one chord. Where only one of them has anything to
+    say, it decides alone.
 
     The margin is the winner's lead as a fraction of itself, and it is not a
-    formality. A four-on-the-floor house track has a kick on all four beats and
-    scores them almost equally; a track with no drums at all scores them all at
-    zero. Both come back with a margin near nothing, and `Track.bar_start_sec`
-    then declines to use the answer.
+    formality. A kick on beats one and three with a snare on two and four and
+    no harmony at all is *genuinely* ambiguous between the two — nothing in the
+    recording says which — and that comes back with a margin near nothing so
+    `Track.bar_start_sec` declines to use it.
 
     `(beat_offset_sec, 0.0)` for anything with no grid to walk, which is the
     same "I have nothing" the rest of this module returns rather than a number
@@ -528,52 +701,28 @@ def downbeat(
     """
     if bpm <= 0 or not math.isfinite(bpm):
         return float(beat_offset_sec), 0.0
-    envelope = onset_envelope(audio, sample_rate, max_hz=DOWNBEAT_HZ)
     frames_per_sec = sample_rate / HOP
-    period = 60.0 / bpm * frames_per_sec
-    if len(envelope) < BEATS_PER_BAR * period or period <= 0:
-        # Less than a bar of audio to read: there is no phase to find.
+    first_sec, start, period = _grid(bpm, beat_offset_sec, frames_per_sec)
+    if period <= 0:
         return float(beat_offset_sec), 0.0
 
-    # Back into envelope coordinates. `tempo()` handed out a time with the
-    # envelope's own lead already taken off it (`ONSET_LEAD_FRAMES`), so it has
-    # to go back on before the grid is walked in frames — otherwise every
-    # position is sampled four frames early and the phase is scored off the
-    # tail of the previous beat.
-    #
-    # Putting the lead back can push the first beat before frame zero, and the
-    # grid then has to start at the *next* beat instead. Which beat that is has
-    # to be tracked rather than taken modulo, because the phase that comes out
-    # below is counted from wherever this walk began: forget by how much and
-    # the answer comes back a beat early, on the grid and in the wrong place in
-    # the bar.
-    first_sec = float(beat_offset_sec)
-    start = first_sec * frames_per_sec - ONSET_LEAD_FRAMES
-    beat_sec = 60.0 / bpm
-    while start < 0:
-        first_sec += beat_sec
-        start += period
+    low = _share(_low_end_phases(audio, start, period, sample_rate))
+    harmonic = _share(_harmonic_phases(audio, start, period, sample_rate))
+    if low is None and harmonic is None:
+        return float(beat_offset_sec), 0.0
+    if low is None:
+        combined = harmonic
+    elif harmonic is None:
+        combined = low
+    else:
+        combined = (1.0 - HARMONIC_WEIGHT) * low + HARMONIC_WEIGHT * harmonic
 
-    # The grid is fractional and a drummer is human, so each beat is scored by
-    # the loudest onset *near* it rather than by the one sample on it. An
-    # eighth of a beat either way, which is well inside the next beat and well
-    # outside a rounding error.
-    reach = max(1, int(round(period / 8)))
-    scores = np.zeros(BEATS_PER_BAR, dtype=np.float64)
-    for step in range(int((len(envelope) - start) / period) + 1):
-        centre = int(round(start + step * period))
-        low, high = max(0, centre - reach), min(len(envelope), centre + reach + 1)
-        if high <= low:
-            continue
-        scores[step % BEATS_PER_BAR] += float(envelope[low:high].max())
-
-    best = int(scores.argmax())
-    top = float(scores[best])
+    best = int(combined.argmax())
+    top = float(combined[best])
     if top <= 0:
         return float(beat_offset_sec), 0.0
-    runner_up = float(np.sort(scores)[-2])
-    margin = (top - runner_up) / top
-    return float(first_sec + best * beat_sec), float(margin)
+    runner_up = float(np.sort(combined)[-2])
+    return float(first_sec + best * 60.0 / bpm), float((top - runner_up) / top)
 
 
 def chroma(audio: np.ndarray, sample_rate: int = ANALYSIS_RATE) -> np.ndarray:
