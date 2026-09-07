@@ -69,6 +69,70 @@ const IDLE: RunState = {
 const MAX_POLL_FAILURES = 5;
 const MAX_DOWNLOAD_ATTEMPTS = 4;
 
+/**
+ * Where a running job's id is kept so a reloaded page can find it again.
+ *
+ * `resume` already existed for a dropped connection, and its own docstring said
+ * the alternative was "reading a job id out of the server's own logs, which is
+ * not something to ask of anyone". A page reload put somebody in exactly that
+ * position anyway, because the id lived only in React state — and on a phone a
+ * reload is not an unusual thing to do, it is a thumb landing slightly wrong.
+ *
+ * Only the id and when it started. No audio, no file names, nothing about the
+ * voice: the same rule the audit trail is under, and a job id is already a
+ * public thing — `/status` and `/download` take one from anybody.
+ */
+const RESUME_KEY = "chuyengiong:job";
+/**
+ * How long a saved id is worth trying, matching `DEFAULT_MAX_AGE_HOURS` in
+ * `modal_app/storage.py`. Past it the file is gone and resuming would spend a
+ * request to be told 410.
+ */
+const RESUME_TTL_MS = 6 * 60 * 60 * 1000;
+
+type SavedJob = { id: string; at: number };
+
+/**
+ * Every localStorage call here is wrapped, and that is not defensive habit:
+ * Safari in private mode throws on `setItem`, and a browser set to block site
+ * data throws on read. Losing the ability to resume is a small thing; taking
+ * the whole form down with it is not.
+ */
+function rememberJob(id: string): void {
+  try {
+    window.localStorage.setItem(RESUME_KEY, JSON.stringify({ id, at: Date.now() }));
+  } catch {
+    // No resume after a reload, and nothing else changes.
+  }
+}
+
+function forgetJob(): void {
+  try {
+    window.localStorage.removeItem(RESUME_KEY);
+  } catch {
+    /* see rememberJob */
+  }
+}
+
+/** The saved job if there is one and it can still exist on the server. */
+function savedJob(): SavedJob | null {
+  try {
+    const raw = window.localStorage.getItem(RESUME_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SavedJob>;
+    if (typeof parsed?.id !== "string" || typeof parsed?.at !== "number") return null;
+    // A job id is 32 hex characters; anything else did not come from here.
+    if (!/^[0-9a-f]{32}$/.test(parsed.id)) return null;
+    if (Date.now() - parsed.at > RESUME_TTL_MS) {
+      forgetJob();
+      return null;
+    }
+    return { id: parsed.id, at: parsed.at };
+  } catch {
+    return null;
+  }
+}
+
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, ms);
@@ -129,6 +193,7 @@ export function useConversion() {
 
   const reset = useCallback(() => {
     cancel();
+    forgetJob();
     setState(IDLE);
   }, [cancel]);
 
@@ -191,6 +256,9 @@ export function useConversion() {
           resultUrl: `${base}/download/${submitted.job_id}`,
           jobsRemaining: submitted.jobs_remaining ?? null,
         }));
+        // Written here rather than after the run finishes: the whole point is
+        // to survive a page that goes away *while* the job is running.
+        rememberJob(submitted.job_id);
 
         await collect(submitted.job_id, controller);
       } catch (error) {
@@ -234,6 +302,29 @@ export function useConversion() {
     },
     [cancel, collect],
   );
+
+  /**
+   * Pick up a job the page was watching before it was reloaded.
+   *
+   * Runs once, and only from `idle` — a saved id must never interrupt a run
+   * the user has already started in this page's life. `resume` does the rest,
+   * including the case where the job finished while the page was gone: it
+   * polls once, sees `done`, and fetches the file.
+   *
+   * The ref guard is not decoration. React's development StrictMode mounts
+   * every effect twice on purpose, and without it the second mount would
+   * cancel the first one's poll and start again — which looks exactly like a
+   * flaky resume and is not.
+   */
+  const resumed = useRef(false);
+  useEffect(() => {
+    if (resumed.current) return;
+    resumed.current = true;
+    const saved = savedJob();
+    if (saved) void resume(saved.id);
+    // `resume` is stable and re-running this is exactly what must not happen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return { state, start, resume, reset, cancel };
 }

@@ -114,6 +114,23 @@ yếu**, không phải mấy con số.
 
 ---
 
+## 3b. Lấy lại kết quả khi mất trang
+
+Job chạy ở Modal, không chạy trong trình duyệt — **reload trang không giết
+job**, và file nằm trên Volume 6 tiếng (`storage.DEFAULT_MAX_AGE_HOURS`).
+
+Trang giờ tự nhớ job id vào `localStorage` và tự nối lại khi mở lại. Nếu vì lý
+do gì đó không nối được (trình duyệt chặn site data, đổi máy, quá 6 tiếng), lấy
+tay:
+
+1. Job id in trong log Modal — tìm dòng `[beat] <id>:` hoặc `[derive] <id>:`
+2. Địa chỉ API: mở `https://<app>/api/config`, nó trả `{"apiBase": "..."}`
+3. Tải: mở `<apiBase>/download/<job_id>`
+
+`/status/<job_id>` cũng nhận cùng id nếu muốn xem job xong chưa.
+
+---
+
 ## 4. Đã đo xong — đừng đo lại
 
 | câu hỏi | trả lời | bằng chứng |
