@@ -637,3 +637,34 @@ def test_only_a_generated_bed_is_re_balanced(volume_root, monkeypatch, job_store
         assert pipeline._beat_bed(job_id, params, b"instrumental", b"beat") == expected
 
     assert balanced == [b"fitted-bed", b"fitted-bed"], "upload was re-balanced, or a source was not"
+
+
+# --- the beat style -------------------------------------------------------
+
+
+def test_a_style_is_recorded_for_every_beat_job_including_an_uploaded_one():
+    """Half of a style is the mix profile, and a bed somebody uploaded needs a
+    place under the voice exactly as much as a generated one does. Only the
+    prompt half goes unused there."""
+    for source in ("upload", "generate", "derive"):
+        params = pipeline.clean_params("beat", {"beat_source": source, "beat_style": "trap"})
+        assert params["beat_style"] == "trap"
+    assert pipeline.clean_params("rebeat", {"beat_style": "lofi"})["beat_style"] == "lofi"
+
+
+def test_a_style_nobody_recognises_costs_the_style_and_not_the_job():
+    """Clamped to the entry that adds nothing, so an old client or a typo gets
+    the behaviour this app had before styles existed."""
+    from modal_app import styles
+
+    for name in ("", None, "nonsense", 7):
+        assert pipeline.clean_params("beat", {"beat_style": name})["beat_style"] == (
+            styles.DEFAULT_STYLE
+        )
+
+
+def test_the_modes_with_no_beat_in_them_carry_no_style():
+    """A setting nothing reads is a setting `/status` would report and nobody
+    could act on — the same rule that keeps a pitch shift off `rebeat`."""
+    for mode in ("song", "vocal", "speech"):
+        assert "beat_style" not in pipeline.clean_params(mode, {"beat_style": "trap"})

@@ -167,6 +167,54 @@ body {
   color: var(--muted);
 }
 
+/* --- beat style ---------------------------------------------------------- */
+
+/* Twelve options, and the constraint that shapes this is the phone: a
+   `<select>` would hide eleven of them behind a tap, and one per row would be a
+   twelve-screen scroll. Two across on a phone and as many as fit above it. */
+.style-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+}
+
+.style-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: 0.4rem;
+}
+
+/* The same chrome as `.segment` and a smaller box, because there are four times
+   as many of them and the hint is three words rather than a sentence. */
+.style-chip {
+  min-height: var(--tap);
+  padding: 0.5rem 0.6rem;
+  text-align: left;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  font: inherit;
+}
+
+.style-chip.is-active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* The hint is the second line of a chip that is already small, so it gets the
+   room it needs and no more. Two lines at most; anything longer is on the
+   `title` for a pointer and read out in full by a screen reader. */
+.style-chip .segment-hint {
+  font-size: 0.78rem;
+  line-height: 1.25;
+}
+
 /* --- file drop ----------------------------------------------------------- */
 
 .drop {

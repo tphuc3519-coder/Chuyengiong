@@ -739,3 +739,49 @@ def test_a_download_that_serves_nothing_is_not_audited(client, monkeypatch, volu
     monkeypatch.setattr(jobs, "find", lambda job_id, store=None: as_status(jobs.CONVERTING))
     client.get(f"/download/{'e' * 32}")
     assert audit_lines(capsys.readouterr().out) == []
+
+
+# --- the beat style -------------------------------------------------------
+
+
+def test_a_style_is_passed_through_on_every_beat_source(client, started):
+    response = client.post("/submit", **beat_upload(beat_source="upload", beat_style="lofi"))
+    assert response.status_code == 200
+    assert started[0]["params"]["beat_style"] == "lofi"
+
+
+def test_a_style_is_enough_to_generate_from_without_a_description(client, started, generator_on):
+    """Picking "Trap" is as complete an answer as typing "trap, 140 BPM, 808
+    nặng". Requiring the second after the first would be the API asking a
+    question it already has the answer to."""
+    response = client.post(
+        "/submit", **upload(mode="beat", beat_source="generate", beat_style="trap")
+    )
+    assert response.status_code == 200
+    assert started[0]["params"]["beat_style"] == "trap"
+
+
+def test_generating_with_neither_a_style_nor_a_description_is_refused(
+    client, started, generator_on
+):
+    """`auto` describes nothing on purpose, so it is not an answer to "what
+    music should this be" — and there is no song to fall back on here."""
+    response = client.post(
+        "/submit", **upload(mode="beat", beat_source="generate", beat_style="auto")
+    )
+    assert response.status_code == 400
+    assert "style" in response.json()["detail"] or "kiểu" in response.json()["detail"]
+    assert not started
+
+
+def test_an_unknown_style_falls_back_rather_than_failing_the_job(client, started):
+    response = client.post("/submit", **beat_upload(beat_source="upload", beat_style="telepathy"))
+    assert response.status_code == 200
+    assert started[0]["params"]["beat_style"] == "auto"
+
+
+def test_health_reports_the_style_catalogue(client):
+    from modal_app import styles
+
+    body = client.get("/health").json()
+    assert body["beat_styles"] == styles.catalogue()

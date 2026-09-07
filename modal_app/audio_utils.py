@@ -228,6 +228,52 @@ def decode_audio(data: bytes, sample_rate: int) -> np.ndarray:
     return np.frombuffer(proc.stdout, dtype="<f4").astype(np.float32)
 
 
+def to_pcm_wav(data: bytes, sample_rate: int) -> bytes:
+    """Anything ffmpeg can read -> 16-bit PCM wav, **keeping its channels**.
+
+    The stereo-preserving counterpart of `decode_audio`, and the pair it forms
+    with `decode_wav_channels` is the whole point: that one reads every channel
+    but only understands plain 16-bit PCM, and this one turns anything into
+    exactly that. Together they are a lossless-in-shape read of a file whose
+    format nobody controls.
+
+    **No `-ac`, and that is the reason this exists rather than a `channels`
+    argument on `decode_audio`.** Asking ffmpeg for two channels applies the
+    -3.01 dB centre mix level to a mono source — measured: a 0.5 amplitude tone
+    comes back at 0.354 — so a decode that "keeps stereo" by requesting it
+    quietly turns every mono file down by 30%. Requesting nothing keeps
+    whatever was there at the level it was at, and the caller finds out how
+    many channels that was by looking at what it got.
+    """
+    if not data:
+        raise AudioError("empty audio file")
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "input"
+        out = Path(tmp) / "out.wav"
+        src.write_bytes(data)
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(src),
+                "-c:a",
+                "pcm_s16le",
+                "-ar",
+                str(sample_rate),
+                str(out),
+            ],
+            capture_output=True,
+        )
+        if proc.returncode != 0 or not out.is_file():
+            detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+            raise AudioError(f"could not decode audio: {detail[-1] if detail else 'no output'}")
+        return out.read_bytes()
+
+
 def duration_sec(audio: np.ndarray, sample_rate: int) -> float:
     return len(audio) / float(sample_rate)
 

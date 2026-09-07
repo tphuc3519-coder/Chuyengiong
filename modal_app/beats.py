@@ -9,13 +9,21 @@ are the whole answer to "đổi beat" — and the reason the answer is two modul
 that measuring is arithmetic anybody can check, while acting on it is four
 ffmpeg filters whose order matters.
 
-Four things happen, and each is one decision:
+Five things happen, and each is one decision:
 
-* **The loop is cut to whole bars.** An arbitrary upload does not end where a
-  bar ends, so looping it puts a seam in the middle of a beat and the whole
-  thing limps. Cutting from its first beat to the last complete bar before the
-  end costs a second of audio and buys a loop point that lands where a listener
-  expects one.
+* **The loop is cut to whole bars, from a bar line.** An arbitrary upload does
+  not end where a bar ends, so looping it puts a seam in the middle of a beat
+  and the whole thing limps. Cutting from its first *downbeat* to the last
+  complete bar before the end costs a second of audio and buys a loop point
+  that lands where a listener expects one.
+
+* **The bar lines are matched, not just the beats.** `analysis.downbeat` finds
+  which of four beats carries the bar line on each side, and the loop's own bar
+  one is placed on the song's. Aligning to the nearest *beat* instead — which
+  is what this module did first — is in time and in the wrong place: the bed's
+  kick lands on the song's beat two and stays there for three minutes. Where
+  either side has no clear bar line the alignment falls back to the beat, and
+  `Fit.reasons` says so.
 
 * **Transposition follows the relative key, not the tonic.** A minor loop under
   a major song does not want to be moved to that major tonic — it wants the
@@ -38,7 +46,9 @@ run for real in CI, like `mixing.py`.
 
 from __future__ import annotations
 
+import io
 import math
+import wave
 from dataclasses import dataclass
 
 from .analysis import KEY_MIN_MARGIN, Track
@@ -72,6 +82,21 @@ MAX_TRANSPOSE = 6
 # stop dead.
 TAIL_FADE_SEC = 1.5
 
+# A fade this long on each end of the loop, so the splice never clicks.
+#
+# Six milliseconds is a quarter of a cycle at 40 Hz and inaudible as a fade;
+# what it removes is the step discontinuity where the end of the loop meets its
+# own beginning. Cutting on a bar line puts the seam somewhere musically right
+# and does nothing at all about the waveform being at +0.3 on one side of it
+# and -0.4 on the other, which is a click, and a click that repeats every four
+# bars is the most recognisable sound a badly looped bed makes.
+#
+# Deliberately not a crossfade. A crossfade would overlap the two ends and
+# shorten the loop, and the loop's length is the one number in this module that
+# everything else is derived from — `lay_under` reads it back off the file to
+# place the bar lines.
+SEAM_FADE_SEC = 0.006
+
 
 class BeatError(ValueError):
     """A beat that cannot be fitted: no pulse in it, or nothing to loop."""
@@ -80,6 +105,12 @@ class BeatError(ValueError):
 @dataclass(frozen=True)
 class Fit:
     """What has to be done to a beat before it can sit under a track.
+
+    `align_sec` is where in the *song* the loop's first bar has to land — the
+    song's own bar line when one was found, and its first beat when one was
+    not. It is a separate field from anything about the loop because it is a
+    fact about the other side of the fit, and `lay_under` is the only thing
+    that reads it.
 
     `reasons` is why, in words, for the container log and for the person asking
     why their beat came back a semitone away from where they left it.
@@ -90,6 +121,7 @@ class Fit:
     loop_start_sec: float
     loop_length_sec: float
     reasons: tuple[str, ...] = ()
+    align_sec: float = 0.0
 
     @property
     def pitch_ratio(self) -> float:
@@ -99,7 +131,8 @@ class Fit:
         return (
             f"{self.semitones:+d} semitone(s), tempo x{self.tempo_ratio:.3f}, "
             f"loop {self.loop_start_sec:.2f}-"
-            f"{self.loop_start_sec + self.loop_length_sec:.2f}s"
+            f"{self.loop_start_sec + self.loop_length_sec:.2f}s "
+            f"onto {self.align_sec:.2f}s"
             + (f" ({'; '.join(self.reasons)})" if self.reasons else "")
         )
 
@@ -176,19 +209,31 @@ def plan_fit(source: Track, target: Track) -> Fit:
     if note:
         reasons.append(note)
 
-    # The loop: from the beat's own first beat to the last complete bar.
+    # Where each side's bar begins. `Track.bar_start_sec` is the single place
+    # that decides whether the downbeat estimate was good enough to use, so
+    # both of these are either a bar line or an honest fallback to a beat — and
+    # the reasons below say which, because "the beat is in time but sits a beat
+    # into the bar" is exactly the complaint this answers.
+    loop_start = source.bar_start_sec
+    align = target.bar_start_sec
+    if not source.has_downbeat:
+        reasons.append("no clear bar line in the beat, cut from its first beat")
+    if not target.has_downbeat:
+        reasons.append("no clear bar line in the song, beat placed on its first beat")
+
+    # The loop: from that bar line to the last complete bar before the end.
     period = 60.0 / source.bpm
     bar = period * BEATS_PER_BAR
-    usable = source.duration_sec - source.beat_offset_sec
+    usable = source.duration_sec - loop_start
     bars = int(usable // bar)
     if bars < MIN_LOOP_BARS:
         # Too short to cut into bars — use what there is rather than refuse. A
         # one-bar loop is still a loop, and a beat that is one long phrase is
         # better looped whole than not used.
         reasons.append(f"only {usable:.1f}s of beat, looped whole")
-        loop_start, loop_length = source.beat_offset_sec, usable
+        loop_length = usable
     else:
-        loop_start, loop_length = source.beat_offset_sec, bars * bar
+        loop_length = bars * bar
 
     if loop_length <= 0:
         raise BeatError("nothing left of the beat once it was cut to its pulse")
@@ -199,6 +244,7 @@ def plan_fit(source: Track, target: Track) -> Fit:
         loop_start_sec=loop_start,
         loop_length_sec=loop_length,
         reasons=tuple(reasons),
+        align_sec=align,
     )
 
 
@@ -221,6 +267,13 @@ def stretch(beat_wav: bytes, fit: Fit, sample_rate: int) -> bytes:
     `aresample` after `asetrate` is not optional — `asetrate` only relabels the
     stream's rate, and without a resample back everything downstream is playing
     at a rate it does not expect.
+
+    The seam fades are **not** applied here, and that is a decision rather than
+    an omission: `atempo` does not return exactly the length the arithmetic
+    says it will — at a ratio of 1.0 a two second loop came back 1.99893 s
+    long — so a fade-out scheduled from a computed length ends after the audio
+    does and gets cut off part way down, which is the click it was added to
+    remove. `lay_under` measures the file and fades it there.
     """
     pitch = fit.pitch_ratio
     graph = (
@@ -232,26 +285,66 @@ def stretch(beat_wav: bytes, fit: Fit, sample_rate: int) -> bytes:
     return _ffmpeg([beat_wav], graph, ["-c:a", "pcm_s16le"], ".wav")
 
 
-def lay_under(loop_wav: bytes, duration_sec: float, offset_sec: float = 0.0) -> bytes:
-    """The loop repeated to `duration_sec`, starting at `offset_sec`.
+def _wav_seconds(wav: bytes) -> float:
+    """How long a wav this module just wrote is.
 
-    A second pass rather than one graph, because looping needs the length of
-    what came *out* of the first one and ffmpeg cannot be asked mid-graph. Two
+    `wave` from the standard library, the same way `mixing._sample_rate` reads
+    a rate: the only file this is ever handed is the plain PCM one `stretch`
+    produced, so there is nothing to decode and nothing to guess.
+    """
+    try:
+        with wave.open(io.BytesIO(wav), "rb") as src:
+            rate = src.getframerate()
+            return src.getnframes() / float(rate) if rate else 0.0
+    except (wave.Error, EOFError) as exc:
+        raise BeatError(f"could not measure the fitted loop: {exc}") from exc
+
+
+def lay_under(loop_wav: bytes, duration_sec: float, align_sec: float = 0.0) -> bytes:
+    """The loop repeated to `duration_sec`, with its bar one on `align_sec`.
+
+    A second pass rather than one graph, because this needs the length of what
+    came *out* of the first one and ffmpeg cannot be asked mid-graph. Two
     passes of a 16-bit wav is a generation this material can afford; a guess at
-    that length is not.
+    that length is not — so the length is read back off the file rather than
+    recomputed from the plan.
 
-    `offset_sec` is where the song's first beat is, so the loop's own first beat
-    — which `stretch` put at its start — lands on it.
+    **The bed starts at zero and the bar line still lands where it should**,
+    and getting both at once is the whole content of this function. The obvious
+    way — delay the loop until `align_sec` — puts the bar line in the right
+    place and leaves the first bar or two of the song with no backing track at
+    all, which is audible as the beat "coming in late" on every single job,
+    because a song's first downbeat is essentially never at t=0.
+
+    So the loop is entered *part way through* instead. Reading from
+    `L - (align_sec mod L)` into an endlessly repeating loop puts bar one at
+    `align_sec`, at `align_sec + L`, and so on, while the output is continuous
+    from the first sample: whatever part of the bar was playing just before the
+    song's first downbeat is what the song opens on, which is what a bed does.
     """
     if duration_sec <= 0:
         raise BeatError("nothing to lay a beat under")
+    length = _wav_seconds(loop_wav)
+    if length <= 0:
+        raise BeatError("the fitted loop is empty")
+    # Where to start reading, so that bar one lands on `align_sec`. The second
+    # modulo turns an exact multiple back into 0 rather than into `length`,
+    # which `atrim` would read as "start after the end".
+    start = (length - (max(0.0, align_sec) % length)) % length
+
+    # The seam fades, applied to the loop **before** it is repeated, so every
+    # copy carries them and every splice between two copies is a ramp to zero
+    # and back rather than a step. This is the only place they can be applied
+    # from a length that is known rather than computed — see `stretch`.
+    seam = min(SEAM_FADE_SEC, length / 8.0)
     fade_from = max(0.0, duration_sec - TAIL_FADE_SEC)
     graph = (
+        f"[0:a]afade=t=in:st=0:d={seam:.6f},"
+        f"afade=t=out:st={length - seam:.6f}:d={seam:.6f},"
         # -1 loops forever; the trim is what ends it. `size` is in samples and
         # 2^31 is "all of it" — the loop is seconds long, not hours.
-        f"[0:a]aloop=loop=-1:size=2147483647,"
-        f"adelay={int(round(offset_sec * 1000))}:all=1,"
-        f"atrim=duration={duration_sec:.6f},asetpts=PTS-STARTPTS,"
+        f"aloop=loop=-1:size=2147483647,"
+        f"atrim=start={start:.6f}:duration={duration_sec:.6f},asetpts=PTS-STARTPTS,"
         f"afade=t=out:st={fade_from:.6f}:d={min(TAIL_FADE_SEC, duration_sec):.6f}[out]"
     )
     return _ffmpeg([loop_wav], graph, ["-c:a", "pcm_s16le"], ".wav")
@@ -275,7 +368,7 @@ def fit(
     plan = plan_fit(source, target)
     try:
         loop = stretch(beat_wav, plan, sample_rate)
-        return lay_under(loop, duration_sec, target.beat_offset_sec), plan
+        return lay_under(loop, duration_sec, plan.align_sec), plan
     except MixError as exc:
         raise BeatError(f"could not fit the beat: {exc}") from exc
 
@@ -338,13 +431,21 @@ def balance(beat_wav: bytes, sample_rate: int = 44100) -> tuple[bytes, str]:
     Only generated beds go through this. An uploaded beat is somebody's
     finished production and re-balancing it would be this module deciding it
     knows better than whoever mixed it.
+
+    **Stereo in, stereo out, and one shelf for both channels.** The share is
+    measured on the two channels summed and the same gain curve is applied to
+    each, which is the only version of this that does not move the image: a
+    shelf fitted per channel would pull back whichever side happened to carry
+    more bass and swing the arrangement towards the other one. Level is set
+    from the peak and RMS *across* both channels for the same reason.
     """
     import numpy as np
 
-    from .audio_utils import decode_audio, encode_wav
+    from .audio_utils import decode_wav_channels, encode_wav_channels, to_pcm_wav
 
     try:
-        audio = np.asarray(decode_audio(beat_wav, sample_rate), dtype=np.float64)
+        decoded, _ = decode_wav_channels(to_pcm_wav(beat_wav, sample_rate))
+        audio = np.asarray(decoded, dtype=np.float64)
     except AudioError as exc:
         # Same wrapping `analyse_and_fit` does: everything a caller of this
         # module has to catch is a `BeatError`.
@@ -352,9 +453,10 @@ def balance(beat_wav: bytes, sample_rate: int = 44100) -> tuple[bytes, str]:
     if not len(audio):
         raise BeatError("no beat audio to balance")
 
-    spectrum = np.fft.rfft(audio)
-    freqs = np.fft.rfftfreq(len(audio), 1.0 / sample_rate)
-    power = np.abs(spectrum) ** 2
+    frames = len(audio)
+    freqs = np.fft.rfftfreq(frames, 1.0 / sample_rate)
+    # One measurement for the whole bed, taken on the channels summed.
+    power = np.abs(np.fft.rfft(audio.sum(axis=1))) ** 2
     total = float(power.sum())
     if total <= 0:
         raise BeatError("the generated beat is silent")
@@ -380,7 +482,14 @@ def balance(beat_wav: bytes, sample_rate: int = 44100) -> tuple[bytes, str]:
         blend = 0.5 - 0.5 * np.cos(np.pi * (freqs[knee] - LOW_HZ) / LOW_HZ)
         gain[knee] = shelf + (1.0 - shelf) * blend
 
-    out = np.fft.irfft(spectrum * gain, n=len(audio))
+    # One channel at a time, so the biggest array alive at once is one
+    # channel's spectrum rather than the whole bed's. Four minutes of stereo at
+    # 44.1 kHz is 10.6 million frames a side, and a complex128 spectrum of that
+    # is 170 MB — worth not holding two of.
+    out = np.empty_like(audio)
+    for channel in range(audio.shape[1]):
+        out[:, channel] = np.fft.irfft(np.fft.rfft(audio[:, channel]) * gain, n=frames)
+
     rms = float(np.sqrt((out**2).mean()))
     if rms > 0:
         out = out * (BALANCE_RMS / rms)
@@ -390,9 +499,10 @@ def balance(beat_wav: bytes, sample_rate: int = 44100) -> tuple[bytes, str]:
 
     note = (
         f"low {share * 100:.0f}% -> {LOW_SHARE_TARGET * 100:.0f}% "
-        f"(shelf {20 * math.log10(max(shelf, 1e-6)):+.1f} dB), rms {BALANCE_RMS:.2f}"
+        f"(shelf {20 * math.log10(max(shelf, 1e-6)):+.1f} dB), rms {BALANCE_RMS:.2f}, "
+        f"{audio.shape[1]}ch"
     )
-    return encode_wav(np.asarray(out, dtype=np.float32), sample_rate), note
+    return encode_wav_channels(np.asarray(out, dtype=np.float32), sample_rate), note
 
 
 def analyse_and_fit(

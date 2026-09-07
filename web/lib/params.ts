@@ -193,6 +193,58 @@ export type BeatSource = "upload" | "generate" | "derive";
  */
 export type BeatInit = "sketch" | "original";
 
+/**
+ * The beat styles, mirrored from `modal_app/styles.py`.
+ *
+ * A "mode" in the sense the AI song apps use the word: picking one is not
+ * picking a filter, it is picking a set of instruments **and** a way of sitting
+ * them under a voice. Both halves live on the same record in the backend, and
+ * only the first half is visible here — the mix profile never reaches the
+ * browser, because nothing in the browser would do anything with it.
+ *
+ * Which means the style matters on `upload` too, and the picker is shown
+ * there. The prompt half is unused when the user brought their own beat; the
+ * mix half — how far the bed ducks under a syllable, where it is carved out
+ * for the consonants, how much bottom end it keeps — applies to any bed
+ * however it arrived.
+ *
+ * `auto` is first and is the default because it is the answer for somebody who
+ * does not want to choose: it describes no instruments, so the backend writes
+ * the prompt from the tempo and key it measured, and it mixes the way this app
+ * mixed before styles existed.
+ *
+ * Mirrored rather than fetched, like `MODES` and `EMOTIONS` are, so the picker
+ * renders on the first paint. `/health` serves the same list for a client that
+ * would rather ask — see `beat_styles` there.
+ */
+export const BEAT_STYLES: { id: string; label: string; hint: string }[] = [
+  { id: "auto", label: "Theo bài", hint: "Máy tự chọn theo tông và tốc độ đo được" },
+  { id: "ballad", label: "Ballad piano", hint: "Piano, đệm dây, trống chổi — hợp bài tình ca" },
+  { id: "lofi", label: "Lo-fi chill", hint: "Trống mềm, piano điện, tiếng băng cũ" },
+  { id: "trap", label: "Trap", hint: "808 nặng, hi-hat rải nhanh, phím tối" },
+  { id: "boombap", label: "Boom bap", hint: "Trống mộc bụi bặm, bass gỗ, piano jazz" },
+  { id: "bolero", label: "Bolero", hint: "Guitar thùng, organ nhẹ, nhịp rumba chậm" },
+  { id: "rnb", label: "R&B", hint: "Trống chậm, Rhodes ấm, bass tròn" },
+  { id: "acoustic", label: "Mộc", hint: "Guitar gảy, cajon, bass gỗ — không synth" },
+  { id: "rock", label: "Rock band", hint: "Guitar méo, trống thật, bass chạy" },
+  { id: "edm", label: "EDM / House", hint: "Kick đều bốn nhịp, bass ấm, synth sáng" },
+  { id: "citypop", label: "City pop", hint: "Bass slap, guitar chorus, phím điện sáng" },
+  { id: "orchestral", label: "Bán cổ điển", hint: "Dàn dây, piano, kèn — kiểu nhạc phim" },
+];
+
+export const DEFAULT_BEAT_STYLE = "auto";
+
+/**
+ * Whether this style tells the generator anything about the music.
+ *
+ * False for `auto` alone, and it is what decides whether the description box is
+ * required on `generate`: picking "Trap" is as complete an answer as typing
+ * one, and the backend applies exactly the same rule before it refuses a job.
+ */
+export function styleDescribesSound(styleId: string): boolean {
+  return styleId !== DEFAULT_BEAT_STYLE && BEAT_STYLES.some((s) => s.id === styleId);
+}
+
 export const BEAT_PROMPT_CHARS = 300;
 export const BEAT_PROMPT_EXAMPLES = [
   "boom bap, 90 BPM, piano buồn, trống mộc",
@@ -335,6 +387,12 @@ export type Params = {
   beatPrompt: string;
   /** `derive` only: what the generator starts from. */
   beatInit: BeatInit;
+  /**
+   * Which kind of music, from `BEAT_STYLES`. Sent on every beat job including
+   * `upload` — half of a style is the mix profile, and a bed somebody uploaded
+   * needs a place under the voice exactly as much as a generated one does.
+   */
+  beatStyle: string;
   beatSeed: number;
   /** Classifier-free guidance, `CFG_RATE_MIN`…`CFG_RATE_MAX`. */
   cfgRate: number;
@@ -367,6 +425,9 @@ export function defaultParams(mode: Mode): Params {
     // it changes.
     beatInit: "sketch",
     beatPrompt: "",
+    // The entry that adds nothing: no instruments named, and the mix this app
+    // had before styles existed.
+    beatStyle: DEFAULT_BEAT_STYLE,
     beatSeed: BEAT_RANDOM_SEED,
     cfgRate: DEFAULT_CFG_RATE,
     clarity: DEFAULT_CLARITY,

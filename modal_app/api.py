@@ -33,7 +33,7 @@ import modal
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import audit, beatgen, jobs, pipeline, ratelimit, storage, voices
+from . import audit, beatgen, jobs, pipeline, ratelimit, storage, styles, voices
 from .app import APP_NAME, DATA_DIR, MODEL_DIR, api_image, app, config_secret, data_vol, model_vol
 from .audio_utils import AudioError
 from .prosody import DEFAULT_EMOTION, DEFAULT_EXPRESSIVENESS
@@ -85,9 +85,21 @@ async def health() -> dict:
     UI offering a source the API refuses is a worse failure than either flag
     being wrong on its own.
 
-    Still touches no Volume and no GPU: it reads an environment variable.
+    `beat_styles` is here for the same reason one step further on. The browser
+    mirrors the list in `web/lib/params.ts` so the picker renders before this
+    call returns, but a mirror is a copy — and a deployment that has grown a
+    style, or lost one, is the side that knows. Serving it means the answer
+    exists; a client is free to keep using its own copy.
+
+    Still touches no Volume and no GPU: it reads an environment variable and a
+    tuple of dataclasses.
     """
-    return {"status": "ok", "app": APP_NAME, "beat_generator": beatgen.enabled()}
+    return {
+        "status": "ok",
+        "app": APP_NAME,
+        "beat_generator": beatgen.enabled(),
+        "beat_styles": styles.catalogue(),
+    }
 
 
 @web.get("/voices")
@@ -210,6 +222,11 @@ async def submit(
     # chose rather than a guess.
     beat_source: Annotated[str, Form()] = "",
     beat_prompt: Annotated[str, Form()] = "",
+    # Which kind of music, from `styles.STYLE_IDS`. Two settings under one
+    # name: what the generator is asked to play, and how the finished bed is
+    # placed under the voice. The second half applies to an uploaded beat too,
+    # which is why this is not inside the `generate`/`derive` branch.
+    beat_style: Annotated[str, Form()] = "",
     # `derive` only: what the generator starts from. `sketch` plays the song's
     # chords on this app's own oscillators; `original` hands over the separated
     # instrumental, which is a derivative of the master and is why the default
@@ -294,6 +311,7 @@ async def submit(
                 "clarity": clarity,
                 "beat_source": beat_source,
                 "beat_prompt": beat_prompt,
+                "beat_style": beat_style,
                 "beat_init": beat_init,
                 "beat_seed": beat_seed,
                 "voice_profile": voice_profile,
@@ -359,12 +377,21 @@ async def submit(
                 )
             if beat is not None:
                 raise HTTPException(400, "send a beat file or a description of one, not both")
-            # A description is the whole input on `generate` and there is
-            # nothing to fall back on. `derive` has the song: an empty box
-            # there means "use what you measured", and `pipeline` writes the
-            # prompt from the tempo and key rather than refusing.
-            if source_of_beat == "generate" and not params.get("beat_prompt"):
-                raise HTTPException(400, "describe the beat to generate, or upload one")
+            # Something has to say what the music is on `generate`, and there
+            # are now two things that can: a description, or a style. Picking
+            # "Trap" is as complete an answer as typing one, so the refusal is
+            # for the case where neither was given — the style is `auto`, which
+            # deliberately describes nothing, and the box is empty.
+            #
+            # `derive` has the song and needs neither: an empty box there means
+            # "use what you measured", and `pipeline` writes the prompt from
+            # the tempo and key rather than refusing.
+            if (
+                source_of_beat == "generate"
+                and not params.get("beat_prompt")
+                and not styles.find(params.get("beat_style")).describes_sound()
+            ):
+                raise HTTPException(400, "pick a style or describe the beat to generate")
 
     job_id = _start_job(mode, params, source_bytes, reference_bytes, client, beat_bytes)
     # The audit trail proper (plan §8 item 5): who asked, when, for what shape
@@ -383,6 +410,7 @@ async def submit(
         beat_bytes=len(beat_bytes) if beat_bytes else None,
         beat_source=params.get("beat_source"),
         beat_init=params.get("beat_init"),
+        beat_style=params.get("beat_style"),
         language=params.get("language"),
         emotion=params.get("emotion"),
         profile=params.get("voice_profile") or None,
