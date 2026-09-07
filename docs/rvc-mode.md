@@ -51,20 +51,20 @@ còn lại của app vẫn chạy.
 
 ## Bước 3 — Nạp model đầu tiên
 
-Vào voice-models.com, tìm giọng, copy link download. Rồi từ trình duyệt điện
-thoại mở app của bạn và gọi:
+Mở **`/rvc`** trên app. Dán link tải, đặt tên, bấm **Thêm giọng**. Danh sách
+giọng đã có nằm ngay dưới.
 
-```js
-await fetch("/api/rvc/add-model", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ url: "<link vừa copy>", name: "ten-giong" }),
-});
-```
+Link phải trỏ tới đúng file (`.zip` hoặc `.pth`), không phải trang tải. Nếu
+voice-models.com đưa sang Mega hay Pixeldrain: bấm tải cho nó chạy, rồi vào
+`chrome://downloads`, chuột phải mục vừa tải → Copy link address.
 
-Hoặc gắn tạm hai ô input + một nút trong UI để khỏi phải mở console.
+Tên gõ có dấu cũng được — cả trang lẫn server đều bỏ dấu như nhau
+("Sơn Tùng MTP" → `son-tung-mtp`), và trang hiện trước tên sẽ lưu. Hai bản
+chuẩn hoá đó phải khớp nhau: `normalise()` trong `web/app/rvc/page.tsx` và
+`_safe_name()` trong `modal_rvc.py`, có test ở `tests/test_rvc_names.py`.
 
-Kiểm tra: `GET /api/rvc/models`.
+Muốn gọi thẳng API thì vẫn được: `POST /api/rvc/add-model` với
+`{"url": "...", "name": "..."}`, và `GET /api/rvc/models` để xem danh sách.
 
 ## Bước 4 — Nối vào pipeline hiện có
 
@@ -148,6 +148,16 @@ cần `build-essential` — `debian_slim` không có `g++`.
 resolve sạch cả cây (`numpy 1.23.5`, `omegaconf 2.0.6`, `hydra-core 1.0.7`,
 `faiss-cpu 1.7.3`, `fairseq 0.12.2`), và fairseq build ra đủ ba file `.so`.
 
+## Ba endpoint đang mở
+
+`fastapi_endpoint` không tự chặn ai. Route proxy chỉ giấu URL khỏi trình duyệt
+chứ không bảo vệ chúng — ai có URL là POST thẳng vào `convert` được, và mỗi lần
+gọi là A10G quay. Đặt spending limit trong dashboard Modal trước khi đưa link
+app cho người khác.
+
+Tên model thì đã chặn: `_safe_name()` không cho nó chứa dấu phân cách đường dẫn
+nữa. Nhưng đó là vá một lỗ, không phải là xác thực.
+
 ## Chi phí
 
 A10G trên Modal khoảng 1,10 USD/giờ. Một bài 4 phút xử lý mất chừng 40-60
@@ -156,7 +166,8 @@ Modal trước khi mở cho người khác dùng.
 
 ## Còn phải verify thật
 
-- [ ] workflow `Deploy RVC` chạy xanh và in ra 3 URL
+- [x] workflow `Deploy RVC` chạy xanh và in ra 3 URL — run #2, build 194 giây,
+      base models tải đủ
 - [ ] `add-model` nuốt được một link voice-models.com thật (cả trường hợp có
       `.index` lẫn không)
 - [ ] `/convert` chạy hết một bài 4 phút, nghe thử chỗ nối chunk
