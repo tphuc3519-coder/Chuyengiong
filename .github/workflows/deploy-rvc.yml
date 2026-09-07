@@ -1,0 +1,37 @@
+name: Deploy RVC
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "modal_rvc.py"
+      - ".github/workflows/deploy-rvc.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-rvc
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Chỉ cần client Modal — image chứa torch/CUDA do Modal build phía nó,
+      # không phải trên runner này.
+      - name: Install Modal client
+        run: pip install modal
+
+      # Lần đầu mất 10-15 phút vì phải build image có torch + CUDA.
+      # Log cuối in ra 3 URL — chép vào env của Vercel, xem docs/rvc-mode.md §2.
+      - name: Deploy to Modal
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: modal deploy modal_rvc.py
