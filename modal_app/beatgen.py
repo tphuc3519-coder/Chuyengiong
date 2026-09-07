@@ -110,13 +110,48 @@ ACESTEP_COMMIT = "1bee4c9f5b43e30995f8d4d33b3919197ce1bd68"
 #    Left to itself the resolver takes `torchvision` latest, which requires
 #    `torch==2.14.0`, and the pin below would lose. ACE-Step asks for all three
 #    without versions.
-#  * transformers and diffusers are **not** pinned here: ACE-Step pins
-#    transformers itself (4.50.0) and floors diffusers, and the package wins.
+#  * transformers is not pinned here because ACE-Step pins it itself (4.50.0)
+#    and the package wins.
+#  * **diffusers is pinned here, and it did not used to be.** This entry is a
+#    deploy that failed, and the failing line is worth quoting because it names
+#    a function nothing in this repository calls:
+#
+#        ValueError: infer_schema(func): Parameter q has unsupported type
+#        torch.Tensor. ... Got func with signature (q: 'torch.Tensor', ...,
+#        sm_margin: 'int' = 0) -> 'tuple[torch.Tensor, torch.Tensor]')
+#
+#    That is `diffusers/models/attention_dispatch.py::_wrapped_flash_attn_3`,
+#    a flash-attention-3 wrapper registered with `torch.library.custom_op` at
+#    **import time** — so the container died in `@modal.enter()`, before a note
+#    of audio, and Modal showed it as a startup with no startup time.
+#
+#    The mechanism is a two-sided version problem and neither side is wrong on
+#    its own. That module carries `from __future__ import annotations`, so at
+#    run time its annotations are *strings*; torch 2.4's `infer_schema` matches
+#    `param.annotation` against a table of actual types, so even the perfectly
+#    ordinary `torch.Tensor` fails to match a `'torch.Tensor'` that is text.
+#    Later torch resolves the strings first. Reproduced exactly against torch
+#    2.4.0 with diffusers 0.40.0, and bisected:
+#
+#        0.40.0  fails      0.37.1  fails
+#        0.39.0  fails      0.36.0  imports cleanly   <- here
+#        0.38.0  fails      0.35.2  imports cleanly
+#
+#    ACE-Step asks for `diffusers>=0.33.0`, and a floor is an instruction to
+#    take whatever ships next. What shipped next did not work with the torch
+#    this image is built on, so the floor is where the failure came from and an
+#    exact version is the fix. Checked at 0.36.0: every diffusers name ACE-Step
+#    imports resolves, including `retrieve_timesteps` out of the SD3 pipeline,
+#    against transformers 4.50.0.
+#
+#    Moving torch instead would be the other way out and a much larger one —
+#    `conversion.py` and the whole `base_image` are built on 2.4.0 as well.
 BEATGEN_REQUIREMENTS = [
     f"ace-step @ git+{ACESTEP_REPO}@{ACESTEP_COMMIT}",
     "torch==2.4.0",
     "torchaudio==2.4.0",
     "torchvision==0.19.0",
+    "diffusers==0.36.0",
 ]
 
 BEAT_GENERATOR_ENV = "BEAT_GENERATOR"

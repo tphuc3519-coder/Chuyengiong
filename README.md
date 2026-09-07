@@ -2973,3 +2973,126 @@ cân bằng → 5 đỏ; thêm `pan=mono` vào `stretch` → 1 đỏ; bỏ high-
 - [ ] Cắt 30 Hz trên beat upload: có ai thấy mất lực không
 
 **743 passed, 3 skipped.**
+
+
+---
+
+## 16.2 — Container chết trước khi phát ra một nốt nhạc
+
+Ảnh chụp màn hình Modal: **Failed**, `A10G × 1`, **Startup time: —**, và đuôi log
+là chữ ký của một hàm không có gì trong repo này gọi tới:
+
+```
+sm_margin: 'int' = 0) -> 'tuple[torch.Tensor, torch.Tensor]')
+```
+
+Gạch ngang ở "Startup time" là manh mối đầu tiên: container chưa từng khởi động
+xong. Nghĩa là nó chết trong `@modal.enter()`, trước khi có một byte audio nào đi
+qua — nên **không phải lỗi của bất cứ thứ gì ở 16 hay 16.1**, những thứ đó chỉ
+chạy sau đó.
+
+### Truy ra chữ ký
+
+Các tham số trong log — `q_descale`, `k_descale`, `v_descale`, `attention_chunk`,
+`softcap`, `num_splits`, `pack_gqa`, `deterministic`, `sm_margin` — là chữ ký của
+`_wrapped_flash_attn_3` trong `diffusers/models/attention_dispatch.py`: một lớp
+bọc flash-attention-3, đăng ký bằng `torch.library.custom_op` **ngay lúc import**.
+
+`beatgen` là container A10G duy nhất import diffusers, nên đó là nó.
+
+Dựng lại y hệt trong một venv — torch 2.4.0 + diffusers 0.40.0, `import
+diffusers.models.attention_dispatch`:
+
+```
+ValueError: infer_schema(func): Parameter q has unsupported type torch.Tensor.
+The valid types are: dict_keys([<class 'torch.Tensor'>, ...]).
+Got func with signature (q: 'torch.Tensor', k: 'torch.Tensor', ...,
+sm_margin: 'int' = 0) -> 'tuple[torch.Tensor, torch.Tensor]')
+```
+
+Cùng một câu, cùng một chữ ký, đúng tới từng dấu nháy.
+
+### Cơ chế: hai bên đều không sai
+
+Đọc kỹ thì câu lỗi vô lý — `torch.Tensor` **có** trong danh sách kiểu hợp lệ mà
+nó vừa in ra. Chỗ khác nhau nằm ở dấu nháy: `q: 'torch.Tensor'` là một **chuỗi**,
+không phải một lớp.
+
+`attention_dispatch.py` mở đầu bằng `from __future__ import annotations`, nên lúc
+chạy mọi annotation trong file đó là chuỗi. `infer_schema` của torch 2.4 lại đem
+`param.annotation` so thẳng với một bảng các kiểu thật — nên ngay cả
+`'torch.Tensor'` hoàn toàn bình thường cũng không khớp. Torch đời sau resolve
+chuỗi trước rồi mới so.
+
+Không bên nào viết sai. Chỉ là hai bên gặp nhau ở một chỗ mà bên này giả định bên
+kia làm chuyện khác.
+
+### Lỗi thật sự nằm ở một dấu `>=`
+
+`BEATGEN_REQUIREMENTS` ghim torch, torchaudio, torchvision — và **không** ghim
+diffusers. Lý do đã viết trong Phase 15: *"ACE-Step tự ghim transformers (4.50.0)
+và floor diffusers, và package thắng"*. Câu đó gộp hai thứ ngược nhau vào một
+luật.
+
+`requirements.txt` của ACE-Step ghi `diffusers>=0.33.0`. **Ghim** là "đừng đụng
+vào"; **floor** là "lấy bất cứ thứ gì phát hành sau này". Image này được build
+vào ngày ai đó bấm deploy, nên một dấu `>=` là một lời hứa rằng một bản chưa tồn
+tại sẽ chạy được. Bản đó ra đời, và nó không chạy được với torch bên cạnh.
+
+Bisect trên torch 2.4.0:
+
+| diffusers | import |
+|---|---|
+| 0.40.0 | ✗ |
+| 0.39.0 | ✗ |
+| 0.38.0 | ✗ |
+| 0.37.1 | ✗ |
+| **0.36.0** | **✓** |
+| 0.35.2 | ✓ |
+
+Ghim `diffusers==0.36.0`. Không nâng torch — đó là hướng ra kia và nó rộng hơn
+nhiều: `base_image` và `conversion.py` cũng đứng trên 2.4.0.
+
+### Kiểm tới nơi, chứ không dừng ở "pip resolve xong"
+
+Chính chỗ này là bài học lần trước bị bỏ sót: **resolve được không có nghĩa là
+import được.** Bản 0.40.0 resolve sạch sẽ; nó chết lúc import. Nên lần này kiểm
+cả ba tầng:
+
+1. `pip install --dry-run` cả bộ → exit 0, ra `diffusers-0.36.0`, `torch-2.4.0`,
+   `transformers-4.50.0`.
+2. Cài thật cả bộ (6.6 GB) rồi chạy **đúng dòng trong `BeatGenerator.load()`**:
+   `from acestep.pipeline_ace_step import ACEStepPipeline` → **OK**.
+3. Đi thêm một bước: `ACEStepPipeline(checkpoint_dir=..., dtype="float32")` dựng
+   được trên CPU, `loaded = False` — đúng như docstring của `beatgen` mô tả
+   (`__init__` không tải weights, `load_checkpoint` mới tải).
+
+Và trước/sau trong **cùng một môi trường**: nâng lên 0.40.0 thì dòng import đó
+hỏng lại, hạ về 0.36.0 thì chạy. Đây là lần đầu mục *"Image có build thật
+không"* nợ từ Phase 15 được trả lời bằng một phép chạy thay vì một dry-run.
+
+### Luật viết thành test
+
+Test cũ `test_nothing_in_the_requirements_fights_the_package_itself` mang luật
+rút ra từ bài học `einops` ở Phase 15: *"chỉ được ghim mấy cái wheel phải khớp
+nhau, ngoài ra không đụng"*. Luật đó quá rộng, và lần deploy này nói thẳng ra
+điều đó. Giờ nó phân biệt hai chuyện: cái package **ghim** thì không được đụng,
+cái package **floor** thì phải ghim.
+
+Thêm `test_every_requirement_names_one_exact_version`: mọi dòng trong danh sách
+phải là một phiên bản chính xác — `==`, hoặc một commit trong URL git. Không
+`>=`, không range, không `*`. Đó là bài học ở dạng luật thay vì ở dạng câu
+chuyện.
+
+Và `test_diffusers_is_held_below_the_release_that_cannot_import` giữ đúng cái
+biên bisect ra được, kèm ghi chú rằng muốn nâng nó thì phải nâng torch trước.
+
+### Còn phải verify
+
+- [ ] Deploy lại với `BEAT_GENERATOR` bật, và xem container **khởi động xong**
+- [ ] ~7 GB weights tải về Volume lần đầu — container đầu tiên vẫn sẽ lâu
+- [ ] Những dòng floor khác ACE-Step mang theo (`gradio`, `peft`, `numba`,
+      `tensorboard`) chưa hỏng, nhưng chúng là cùng một loại bom hẹn giờ. Chưa
+      ghim vì chưa có bằng chứng — ghim đoán trước là cách khác để hỏng
+
+**745 passed, 3 skipped.**
