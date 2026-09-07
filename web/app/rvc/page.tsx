@@ -16,7 +16,15 @@ import { AUDIO_ACCEPT, MAX_INPUT_BYTES } from "@/lib/params";
  * giọng là việc làm một lần rồi thôi, còn trang chính là việc làm mỗi ngày.
  */
 
-type Model = { name: string; has_index: boolean; size_mb: number };
+type Model = {
+  name: string;
+  has_index: boolean;
+  size_mb: number;
+  /** Đọc từ header checkpoint. Model cũ thêm trước khi có tính năng này thì thiếu. */
+  version?: string;
+  /** 0 nghĩa là model train không kèm pitch — kéo thanh cao độ sẽ không có tác dụng. */
+  f0?: number;
+};
 
 /**
  * Phải khớp từng bước với `_safe_name()` trong modal_rvc.py: trang này hứa
@@ -98,6 +106,7 @@ export default function RvcModelsPage() {
     };
   }, [result]);
 
+  const picked = models?.find((model) => model.name === chosen);
   const slug = normalise(name);
   const ready = url.trim().length > 0 && slug.length > 0 && !busy;
 
@@ -304,10 +313,17 @@ export default function RvcModelsPage() {
                 như chắc chắn phải chỉnh — nên nó nằm ngoài, không nằm trong
                 phần thu gọn.
               */}
-              <p className="field-note">
-                Nam sang nữ thường là +12, nữ sang nam −12, cùng giới để 0. Sai quãng thì giọng ra
-                nghe như robot.
-              </p>
+              {picked?.f0 === 0 ? (
+                <p className="field-error">
+                  Model “{picked.name}” được train không kèm pitch. Thanh này sẽ không có tác dụng
+                  gì, và giọng ra dễ nghe đều đều. Muốn chỉnh cao độ thì phải dùng model khác.
+                </p>
+              ) : (
+                <p className="field-note">
+                  Nam sang nữ thường là +12, nữ sang nam −12, cùng giới để 0. Sai quãng thì giọng ra
+                  nghe như robot.
+                </p>
+              )}
             </div>
 
             <details className="disclosure">
@@ -408,7 +424,9 @@ export default function RvcModelsPage() {
               <li key={model.name}>
                 <span>{model.name}</span>
                 <span className="field-note">
-                  {model.size_mb} MB{model.has_index ? " · có .index" : " · thiếu .index"}
+                  {model.size_mb} MB{model.version ? ` · ${model.version}` : ""}
+                  {model.f0 === 0 ? " · không có pitch" : ""}
+                  {model.has_index ? " · có .index" : " · thiếu .index"}
                 </span>
               </li>
             ))}
