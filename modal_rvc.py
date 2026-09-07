@@ -259,6 +259,65 @@ def list_models():
     return {"models": out}
 
 
+# Bài dài phải cắt nhỏ mới đưa qua GPU được. 90 giây là mức đã chạy ổn.
+CHUNK_LIMIT_MS = 90_000
+
+
+def _chunk_bounds(
+    total_ms: int, quiet: list[tuple[int, int]], limit_ms: int = CHUNK_LIMIT_MS
+) -> list[tuple[int, int]]:
+    """Chia [0, total_ms) thành các đoạn LIỀN NHAU, cắt giữa khoảng lặng.
+
+    Điểm sống còn là *liền nhau*: các đoạn phủ kín từ đầu đến cuối, không chồng
+    nhau và không chừa khoảng nào, nên ghép lại đúng bằng độ dài ban đầu.
+
+    Bản trước dùng `split_on_silence`, mà đó là hàm **vứt bỏ** khoảng lặng —
+    `keep_silence=200` chỉ chừa 200ms mỗi đầu, nên mọi quãng nghỉ dài trong bài
+    bị nuốt. Một bài 1:31 ra 1:09: lời vẫn đủ, nhưng vocal không còn khớp với
+    nhạc nền được nữa — mà ghép lại với nhạc nền chính là mục đích.
+
+    Nên ở đây khoảng lặng chỉ dùng để *chọn chỗ cắt*, không phải để bỏ đi.
+    Không có khoảng lặng nào trong tầm thì cắt cứng đúng giới hạn: thà một vết
+    nối khẽ còn hơn tràn bộ nhớ GPU.
+    """
+    if total_ms <= limit_ms:
+        return [(0, total_ms)]
+
+    mids = sorted((start + end) // 2 for start, end in quiet)
+
+    bounds = [0]
+    while total_ms - bounds[-1] > limit_ms:
+        start = bounds[-1]
+        # Khoảng lặng xa nhất mà vẫn trong giới hạn: cắt ít lần nhất có thể.
+        reachable = [m for m in mids if start < m <= start + limit_ms]
+        bounds.append(reachable[-1] if reachable else start + limit_ms)
+    bounds.append(total_ms)
+
+    return list(zip(bounds[:-1], bounds[1:], strict=True))
+
+
+def _speak(text: str, language: str) -> bytes:
+    """Đọc văn bản bằng đúng engine mà app chính đã deploy sẵn.
+
+    Gọi chéo sang app `voice-convert` chứ không dựng lại engine trong image
+    này. Image TTS bên đó có một loạt thứ phải đúng mới chạy — `unidic` đè
+    `unidic-lite` làm chết container trước khi đọc được chữ nào, `open_jtalk`
+    compile từ sdist, `transformers` phải ghim — và `prosody.py` là cả một kế
+    hoạch đọc (ngắt theo dấu câu, hạ dần cao độ, câu hỏi lên giọng) mà chép
+    lại là chép sai.
+
+    Ghép lỏng, cố ý: chỉ tra tên lúc chạy, không import. `voice-convert` chưa
+    deploy thì hỏng ở đây với một câu đọc được, chứ không làm chết build của
+    app này.
+    """
+    # Quy tắc chọn engine là của modal_app/tts.py (`spec_for`): chỉ tiếng Nhật
+    # đọc qua Kokoro, còn lại qua MMS. Nhân đúng một dòng ở đây thay vì kéo cả
+    # modal_app vào image này — nếu bên đó đổi quy tắc thì đây phải đổi theo.
+    cls_name = "KokoroSynthesizer" if language == "jpn" else "Synthesizer"
+    synthesizer = modal.Cls.from_name("voice-convert", cls_name)
+    return synthesizer(language=language).synthesize.remote(text=text)
+
+
 # ----------------------------------------------------------------------
 # 3. Đổi giọng
 # ----------------------------------------------------------------------
@@ -273,8 +332,10 @@ def list_models():
 )
 @modal.fastapi_endpoint(method="POST")
 def convert(
-    audio: Annotated[UploadFile, File()],
     model: Annotated[str, Form()],
+    audio: Annotated[UploadFile | None, File()] = None,
+    text: Annotated[str, Form()] = "",
+    language: Annotated[str, Form()] = "vie",
     pitch: Annotated[int, Form()] = 0,
     index_rate: Annotated[float, Form()] = 0.6,
     protect: Annotated[float, Form()] = 0.33,
@@ -313,8 +374,21 @@ def convert(
         shutil.rmtree(work)
     work.mkdir(parents=True)
 
+    # Nguồn giọng: một file đã có, hoặc một đoạn văn bản được đọc ra ngay tại
+    # đây. Cùng một endpoint vì phần sau giống hệt nhau — và vì thêm endpoint
+    # thứ tư nghĩa là thêm một URL nữa phải cấu hình trên Vercel.
+    if text.strip():
+        try:
+            source = _speak(text.strip(), language)
+        except Exception as err:
+            return _json_error(f"Không đọc được văn bản: {err}", 502)
+    elif audio is not None:
+        source = audio.file.read()
+    else:
+        return _json_error("Cần một file giọng hoặc một đoạn văn bản", 400)
+
     src = work / "in"
-    src.write_bytes(audio.file.read())
+    src.write_bytes(source)
 
     # Chuẩn hoá về mono 44.1k trước khi đưa vào RVC
     try:
@@ -342,45 +416,30 @@ def convert(
         resample_sr=0,
     )
 
-    # Bài dài -> cắt theo khoảng lặng rồi ghép lại.
-    # Cắt theo độ dài cố định sẽ để lại vết nối nghe rõ.
-    CHUNK_LIMIT_MS = 90_000
-
-    if len(segment) <= CHUNK_LIMIT_MS:
-        segments = [segment]
-    else:
-        pieces = silence.split_on_silence(
-            segment,
-            min_silence_len=400,
-            silence_thresh=segment.dBFS - 16,
-            keep_silence=200,
+    # detect_silence CHỈ để chọn chỗ cắt. Khoảng lặng nằm nguyên trong đoạn nó
+    # thuộc về — xem _chunk_bounds() về chuyện này từng sai thế nào.
+    quiet: list[tuple[int, int]] = []
+    if len(segment) > CHUNK_LIMIT_MS:
+        quiet = silence.detect_silence(
+            segment, min_silence_len=300, silence_thresh=segment.dBFS - 16
         )
-        if not pieces:
-            pieces = [
-                segment[i : i + CHUNK_LIMIT_MS] for i in range(0, len(segment), CHUNK_LIMIT_MS)
-            ]
-        # Gộp các mảnh nhỏ lại cho đến gần giới hạn
-        segments, buf = [], pieces[0]
-        for p in pieces[1:]:
-            if len(buf) + len(p) < CHUNK_LIMIT_MS:
-                buf += p
-            else:
-                segments.append(buf)
-                buf = p
-        segments.append(buf)
+    bounds = _chunk_bounds(len(segment), quiet)
 
     outputs = []
-    for i, seg in enumerate(segments):
+    for i, (start, end) in enumerate(bounds):
         seg_in = work / f"seg_{i}.wav"
         seg_out = work / f"seg_{i}_out.wav"
-        seg.export(seg_in, format="wav")
+        segment[start:end].export(seg_in, format="wav")
         rvc.infer_file(input_path=str(seg_in), output_path=str(seg_out))
         outputs.append(AudioSegment.from_wav(seg_out))
 
-    # Ghép, crossfade 30ms để không nghe thấy chỗ nối
+    # Nối thẳng, KHÔNG crossfade: crossfade ăn mất 30ms ở mỗi mối, tức là lại
+    # rút ngắn bài thêm lần nữa. Chỗ cắt vốn nằm trong khoảng lặng nên không có
+    # gì để hoà vào nhau; 3ms fade hai bên đủ chặn tiếng "tách" ở lần cắt cứng,
+    # và fade thì không đổi độ dài.
     merged = outputs[0]
     for seg in outputs[1:]:
-        merged = merged.append(seg, crossfade=min(30, len(seg) - 1))
+        merged = merged.fade_out(3) + seg.fade_in(3)
 
     final = work / "out.wav"
     merged.export(final, format="wav")
@@ -392,8 +451,14 @@ def convert(
             **_CORS,
             # Trình duyệt chỉ đọc được header nào được liệt kê ở đây; thiếu nó
             # thì fetch() thấy response 200 mà không thấy một header nào.
-            "Access-Control-Expose-Headers": "X-Rvc-Chunks, X-Rvc-Version, X-Rvc-F0",
-            "X-Rvc-Chunks": str(len(segments)),
+            "Access-Control-Expose-Headers": (
+                "X-Rvc-Chunks, X-Rvc-Version, X-Rvc-F0, X-Rvc-In-Ms, X-Rvc-Out-Ms"
+            ),
+            "X-Rvc-Chunks": str(len(bounds)),
+            # Hai số này phải gần bằng nhau. Lệch nhiều nghĩa là khoảng lặng
+            # lại bị nuốt, và vocal sẽ không ghép được với nhạc nền nữa.
+            "X-Rvc-In-Ms": str(len(segment)),
+            "X-Rvc-Out-Ms": str(len(merged)),
             "X-Rvc-Version": info["version"],
             "X-Rvc-F0": str(info["f0"]),
         },

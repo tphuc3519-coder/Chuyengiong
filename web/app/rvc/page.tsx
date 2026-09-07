@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useId, useState } from "react";
 
 import { FileDrop } from "../components/FileDrop";
-import { AUDIO_ACCEPT, MAX_INPUT_BYTES } from "@/lib/params";
+import { AUDIO_ACCEPT, LANGUAGES, MAX_INPUT_BYTES, maxCharsFor } from "@/lib/params";
 
 /**
  * Quản lý giọng RVC: dán link, đặt tên, bấm nút.
@@ -49,6 +49,8 @@ export default function RvcModelsPage() {
   const urlId = useId();
   const nameId = useId();
   const modelId = useId();
+  const textId = useId();
+  const langId = useId();
   const pitchId = useId();
   const indexId = useId();
   const protectId = useId();
@@ -63,6 +65,9 @@ export default function RvcModelsPage() {
   const [models, setModels] = useState<Model[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
 
+  const [fromText, setFromText] = useState(false);
+  const [text, setText] = useState("");
+  const [language, setLanguage] = useState("jpn");
   const [vocal, setVocal] = useState<File | null>(null);
   const [chosen, setChosen] = useState("");
   const [pitch, setPitch] = useState(0);
@@ -107,6 +112,8 @@ export default function RvcModelsPage() {
   }, [result]);
 
   const picked = models?.find((model) => model.name === chosen);
+  const limit = maxCharsFor(language);
+  const canRun = Boolean(chosen) && (fromText ? text.trim().length > 0 : Boolean(vocal));
   const slug = normalise(name);
   const ready = url.trim().length > 0 && slug.length > 0 && !busy;
 
@@ -145,7 +152,7 @@ export default function RvcModelsPage() {
   }
 
   async function run() {
-    if (!vocal || !chosen) return;
+    if (!canRun) return;
     setRunning(true);
     setRunError(null);
     if (result) URL.revokeObjectURL(result);
@@ -163,7 +170,12 @@ export default function RvcModelsPage() {
       }
 
       const form = new FormData();
-      form.append("audio", vocal);
+      if (fromText) {
+        form.append("text", text.trim());
+        form.append("language", language);
+      } else if (vocal) {
+        form.append("audio", vocal);
+      }
       form.append("model", chosen);
       form.append("pitch", String(pitch));
       form.append("index_rate", String(indexRate));
@@ -267,14 +279,79 @@ export default function RvcModelsPage() {
           <p className="field-note">Thêm một giọng ở trên trước đã.</p>
         ) : (
           <>
-            <FileDrop
-              file={vocal}
-              onFile={setVocal}
-              accept={AUDIO_ACCEPT}
-              maxBytes={MAX_INPUT_BYTES}
-              label="Giọng hát đã tách"
-              hint="Chỉ đưa vocal vào, đừng đưa cả bài — RVC không tự tách nhạc nền."
-            />
+            <div className="segmented">
+              <button
+                type="button"
+                className={fromText ? "segment" : "segment is-on"}
+                disabled={running}
+                onClick={() => setFromText(false)}
+              >
+                Từ file giọng
+              </button>
+              <button
+                type="button"
+                className={fromText ? "segment is-on" : "segment"}
+                disabled={running}
+                onClick={() => setFromText(true)}
+              >
+                Từ văn bản
+              </button>
+            </div>
+
+            {fromText ? (
+              <>
+                <div className="step">
+                  <label htmlFor={langId}>Ngôn ngữ</label>
+                  <select
+                    id={langId}
+                    className="rvc-input"
+                    value={language}
+                    disabled={running}
+                    onChange={(event) => setLanguage(event.target.value)}
+                  >
+                    {LANGUAGES.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="step">
+                  <label htmlFor={textId}>Văn bản cần đọc</label>
+                  <textarea
+                    id={textId}
+                    className="composer-text"
+                    value={text}
+                    rows={5}
+                    maxLength={limit}
+                    disabled={running}
+                    placeholder="今日はいい天気ですね。"
+                    onChange={(event) => setText(event.target.value)}
+                  />
+                  {/*
+                    Điểm mấu chốt, và là thứ dễ hiểu nhầm nhất ở đây: đổi giọng
+                    chỉ thay âm sắc, nó giữ nguyên nhịp và ngữ điệu của cái đọc.
+                    Máy đọc đều thì đổi giọng xong vẫn đều — chỉ là đều bằng
+                    giọng khác. Nói trước còn hơn để người dùng tưởng model dở.
+                  */}
+                  <p className="field-note">
+                    Còn {limit - text.length} ký tự. Máy đọc trước, rồi RVC đổi sang giọng bạn chọn
+                    — nên nhịp và ngữ điệu là của máy đọc, không phải của model. Viết số thành chữ,
+                    “25” sẽ bị bỏ qua.
+                  </p>
+                </div>
+              </>
+            ) : (
+              <FileDrop
+                file={vocal}
+                onFile={setVocal}
+                accept={AUDIO_ACCEPT}
+                maxBytes={MAX_INPUT_BYTES}
+                label="Giọng hát đã tách"
+                hint="Chỉ đưa vocal vào, đừng đưa cả bài — RVC không tự tách nhạc nền."
+              />
+            )}
 
             <div className="step">
               <label htmlFor={modelId}>Đổi sang giọng</label>
@@ -383,7 +460,7 @@ export default function RvcModelsPage() {
             <button
               className="button primary"
               type="button"
-              disabled={!vocal || !chosen || running}
+              disabled={!canRun || running}
               onClick={() => void run()}
             >
               {running ? "Đang đổi giọng…" : "Đổi giọng"}
