@@ -161,14 +161,19 @@ export function BeatSource({
                 onChange({ ...params, beatInit: event.target.checked ? "original" : "sketch" })
               }
             />
-            <span>Cho máy nghe thẳng nhạc nền gốc (bám bài sát hơn)</span>
+            <span>Cho máy nghe thẳng nhạc nền gốc (beat ra sẽ rất giống bản gốc)</span>
           </label>
           <p className="field-note">
             Mặc định máy <strong>không</strong> nghe bản ghi của bạn: nó chỉ nhận vòng hợp âm do app
-            tự đánh lại, nên beat ra là bản cover phần sáng tác — thứ xin phép được. Bật ô trên thì
-            máy nghe thẳng nhạc nền gốc: giống bài hơn, nhưng sản phẩm khi đó là tác phẩm{" "}
-            <strong>phái sinh của chính bản ghi</strong>, tức là đúng thứ mà mục này sinh ra để
-            tránh. Bật khi bạn có quyền với bản ghi, hoặc chấp nhận rủi ro đó.
+            tự đánh lại, nên beat ra là <strong>một bản phối mới</strong> của phần sáng tác — khác
+            bản gốc rõ rệt, và là thứ xin phép được.
+          </p>
+          <p className="field-note">
+            Bật ô trên thì máy nghe thẳng nhạc nền gốc và viết đè lên đó. Hai hệ quả, và cả hai đều
+            là lý do để cân nhắc: beat ra <strong>nghe gần giống bản gốc</strong> — nếu bạn muốn một
+            bản phối khác đi thì đây là ô cần tắt chứ không phải ô cần bật — và sản phẩm khi đó là
+            tác phẩm <strong>phái sinh của chính bản ghi</strong>, tức là đúng thứ mà mục này sinh
+            ra để tránh. Bật khi bạn có quyền với bản ghi, hoặc chấp nhận rủi ro đó.
           </p>
         </>
       )}

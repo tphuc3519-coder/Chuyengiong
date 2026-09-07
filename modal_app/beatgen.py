@@ -208,7 +208,24 @@ SCHEDULER = "euler"
 INIT_STRENGTH_MIN = 0.05
 INIT_STRENGTH_MAX = 0.95
 SKETCH_STRENGTH = 0.35
-ORIGINAL_STRENGTH = 0.65
+# **0.65 was too close, and this is the first time anybody could say so.** The
+# comment above says these numbers need a GPU and a pair of ears; the ears
+# arrived, listened to an `original` job at 0.65, and reported that the result
+# "nghe k khác bản gốc mấy" — it barely differs from the source.
+#
+# That is the knob doing exactly what it says, taken too far. At 0.95 the model
+# hands back what it was given, which is why `clamp_init_strength` refuses the
+# top; 0.65 turns out to be near enough to it that the branch stops producing a
+# new arrangement and starts producing the recording again. A feature that
+# returns its own input is not a close match, it is nothing — and on this
+# branch specifically it is nothing *plus* a derivative work of somebody's
+# master, which is the worst of both.
+#
+# 0.45 is a step rather than a leap: still above `SKETCH_STRENGTH`, because
+# following a real recording should stay closer than following four
+# oscillators, and clearly below the range where the output is the input. It is
+# one report from one song, and it may want another pass.
+ORIGINAL_STRENGTH = 0.45
 
 # A prompt is a description of music, not an essay.
 MAX_PROMPT_CHARS = 300
