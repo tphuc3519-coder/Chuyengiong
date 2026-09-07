@@ -668,3 +668,48 @@ def test_the_modes_with_no_beat_in_them_carry_no_style():
     could act on — the same rule that keeps a pitch shift off `rebeat`."""
     for mode in ("song", "vocal", "speech"):
         assert "beat_style" not in pipeline.clean_params(mode, {"beat_style": "trap"})
+
+
+def test_how_closely_a_derived_beat_follows_is_a_setting_not_a_constant():
+    """Two listens on real songs settled nothing: `original` at 0.65 came back
+    barely different from the source, `sketch` at 0.35 came back bad. Those are
+    two different init sources rather than two points on one axis, so no third
+    number could be guessed from them — the dial goes to the person with the
+    ears instead."""
+    params = pipeline.clean_params("beat", {"beat_source": "derive", "beat_follow": 0.6})
+    assert params["beat_follow"] == 0.6
+
+
+def test_not_moving_the_dial_is_not_the_same_as_moving_it_to_zero():
+    """`None` means "use the default for whichever source is in use", which is
+    the behaviour of everybody who never touches it. 0 would be a client asking
+    for the reference to be ignored entirely, which is a real and different
+    request — the same rule `semitone_shift` is under."""
+    assert pipeline.clean_params("beat", {"beat_source": "derive"})["beat_follow"] is None
+    assert pipeline.clean_params("beat", {"beat_follow": 0})["beat_follow"] == (
+        pipeline.BEAT_FOLLOW_MIN
+    )
+
+
+def test_neither_end_of_the_dial_is_reachable():
+    """At the bottom the reference is ignored and the derive path has no point;
+    at the top the model returns what it was given, which on the `original`
+    init means handing back the master recording as the new beat."""
+    assert pipeline.clean_params("beat", {"beat_follow": -5})["beat_follow"] == (
+        pipeline.BEAT_FOLLOW_MIN
+    )
+    assert pipeline.clean_params("beat", {"beat_follow": 99})["beat_follow"] == (
+        pipeline.BEAT_FOLLOW_MAX
+    )
+    assert pipeline.clean_params("beat", {"beat_follow": "loud"})["beat_follow"] == (
+        pipeline.BEAT_FOLLOW_MIN
+    )
+
+
+def test_the_dial_stays_inside_what_the_generator_accepts():
+    """Mirrored bounds, and a mirror is a copy. `beatgen` is the side that has
+    to live with the number."""
+    from modal_app import beatgen
+
+    assert pipeline.BEAT_FOLLOW_MIN == beatgen.INIT_STRENGTH_MIN
+    assert pipeline.BEAT_FOLLOW_MAX == beatgen.INIT_STRENGTH_MAX

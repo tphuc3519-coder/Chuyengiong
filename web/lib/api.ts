@@ -226,7 +226,14 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
       // the field out.
       form.set("beat_prompt", input.params.beatPrompt);
       form.set("beat_seed", String(input.params.beatSeed));
-      if (source === "derive") form.set("beat_init", input.params.beatInit);
+      if (source === "derive") {
+        form.set("beat_init", input.params.beatInit);
+        // Omitted, not sent as a number: an absent field is how the backend is
+        // told to use the default for that init source.
+        if (input.params.beatFollow !== null) {
+          form.set("beat_follow", String(input.params.beatFollow));
+        }
+      }
     }
   }
   if (input.reference) form.set("reference", input.reference, input.referenceName);

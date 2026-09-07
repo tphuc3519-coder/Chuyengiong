@@ -245,6 +245,23 @@ export function styleDescribesSound(styleId: string): boolean {
   return styleId !== DEFAULT_BEAT_STYLE && BEAT_STYLES.some((s) => s.id === styleId);
 }
 
+/**
+ * `derive` only: how closely the new beat follows the song, mirrored from
+ * `BEAT_FOLLOW_*` in `modal_app/pipeline.py`.
+ *
+ * A dial rather than a constant because two listens settled nothing. Started
+ * from the original recording at 0.65 the result "nghe k khác bản gốc mấy";
+ * started from the app's own chord sketch at 0.35 it was "nghe siêu kém".
+ * Those are two different *sources*, not two points on one axis, so they do not
+ * bracket a value — and every guess at a third costs a deploy and a listen.
+ *
+ * `null` is not a number: it means "use the default for whichever source is in
+ * use", which is what somebody who never touches this gets. Exactly the rule
+ * `semitoneShift` is under.
+ */
+export const BEAT_FOLLOW_MIN = 0.05;
+export const BEAT_FOLLOW_MAX = 0.95;
+
 export const BEAT_PROMPT_CHARS = 300;
 export const BEAT_PROMPT_EXAMPLES = [
   "boom bap, 90 BPM, piano buồn, trống mộc",
@@ -388,6 +405,13 @@ export type Params = {
   /** `derive` only: what the generator starts from. */
   beatInit: BeatInit;
   /**
+   * `derive` only: how closely the beat follows the song.
+   *
+   * null = the default for whichever source `beatInit` names, which is not the
+   * same as any value the slider can hold.
+   */
+  beatFollow: number | null;
+  /**
    * Which kind of music, from `BEAT_STYLES`. Sent on every beat job including
    * `upload` — half of a style is the mix profile, and a bed somebody uploaded
    * needs a place under the voice exactly as much as a generated one does.
@@ -424,6 +448,7 @@ export function defaultParams(mode: Mode): Params {
     // The conservative half of the licensing choice, and the page asks before
     // it changes.
     beatInit: "sketch",
+    beatFollow: null,
     beatPrompt: "",
     // The entry that adds nothing: no instruments named, and the mix this app
     // had before styles existed.

@@ -167,6 +167,24 @@ body {
   color: var(--muted);
 }
 
+/* A word inside a hint that acts as a control. Not a `.segment` and not a
+   button that looks like one: it is a way back to a default, and it should read
+   as part of the sentence explaining the default. */
+.linkish {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.linkish:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
 /* --- beat style ---------------------------------------------------------- */
 
 /* Twelve options, and the constraint that shapes this is the phone: a
