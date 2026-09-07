@@ -2601,7 +2601,10 @@ Cả hai đều có test giữ.
 - [ ] `[inst]` có thật sự làm nó câm không, hay vẫn có người hát trong bed
 - [ ] `ref_audio_strength` 0.35: bed có còn bám vòng hợp âm không, hay đi mất
 - [ ] `ref_audio_strength` 0.65 cho `original`: có khác bản gốc đủ nhiều không
-- [ ] Và câu duy nhất đáng hỏi: **nó có đi tới đâu trong ba phút, hay vẫn lặp**
+- [x] Bed dài **bằng đúng bài**, sinh một lần: `230s in 18.0s` trên A10G. Đó là
+      gần bốn phút nhạc trong một lần gọi, nên `lay_under` không còn gì để lặp —
+      chính là thứ mà việc đổi model sinh ra để mua. Còn *nó có đi tới đâu* thì
+      vẫn cần tai
 
 **621 passed, 3 skipped.**
 
@@ -2798,7 +2801,13 @@ vòng lặp → 1 đỏ; bỏ fade mối nối → 1 đỏ.
       groove lệch, bài ballad có thể không có kick ở phách 1
 - [ ] `duck_db` 6.0 của trap/EDM: nghe ra là "nhường chỗ" hay ra là "bơm"
 - [ ] Hốc giọng ở 2.2–2.8 kHz: đúng chỗ cho tiếng Việt chưa, hay còn thấp
-- [ ] 12 prompt có ra đúng 12 thể loại không, hay ACE-Step gộp vài cái làm một
+- [~] 12 prompt có ra đúng 12 thể loại không, hay ACE-Step gộp vài cái làm một.
+      Nửa đầu đã kiểm được: chuỗi style → prompt tới nơi nguyên vẹn và đúng thứ
+      tự ghép. Log của một job chọn "Ballad piano": `'emotional pop ballad, grand
+      piano, warm string pad, brushed drums, soft fretless bass, half-time feel,
+      clean mix, space for a lead vocal, instrumental, no vocals'` — đúng
+      `STYLES` + `ARRANGEMENT_SUFFIX` + `beatgen.PROMPT_SUFFIX`, không thừa
+      không thiếu. Còn *nghe* ra có khác nhau không thì vẫn cần tai
 - [ ] Bed vào từ giây 0 — nghe ra là tự nhiên hay là cụt đầu ô nhịp
 
 **719 passed, 3 skipped.**
@@ -2964,9 +2973,11 @@ cân bằng → 5 đỏ; thêm `pan=mono` vào `stretch` → 1 đỏ; bỏ high-
 
 ### Còn phải verify bằng tai và bằng GPU
 
-- [ ] **ACE-Step có thật sự trả stereo không.** Nếu nó trả mono thì phần này
-      không hỏng gì — `to_pcm_wav` giữ nguyên 1 kênh — nhưng cũng không được gì,
-      và log của `BeatGenerator` giờ in số kênh ra để biết
+- [x] **ACE-Step có thật sự trả stereo không.** Có. Log của job thật:
+      `[BeatGenerator] 230s in 18.0s (60 steps, 2ch, init 0.65)`. Đó chính là
+      con số mà dòng log này được thêm vào để in ra, và nó nói bed đi tới `mix`
+      với hai kênh thật — tức là cái downmix bị gỡ ở 16.1 đang thật sự cứu được
+      một thứ chứ không phải cứu một khả năng
 - [ ] 12 con số `bed_below_voice_db`: chiều thì chắc, **độ lớn thì chưa đo**
 - [ ] Vạch nhịp trên nhạc thật, không phải năm kiểu phối tổng hợp
 - [ ] Bed stereo dưới giọng mono: có ra "giọng đứng trước" không, hay chỉ ra rộng
@@ -3089,8 +3100,12 @@ biên bisect ra được, kèm ghi chú rằng muốn nâng nó thì phải nân
 
 ### Còn phải verify
 
-- [ ] Deploy lại với `BEAT_GENERATOR` bật, và xem container **khởi động xong**
-- [ ] ~7 GB weights tải về Volume lần đầu — container đầu tiên vẫn sẽ lâu
+- [x] **Deploy lại với `BEAT_GENERATOR` bật, và xem container khởi động xong.**
+      Xanh trong 2p58s, rồi một job thật: `Succeeded`, execution 18.16s. Container
+      qua được `@modal.enter()`, tức là dòng `from acestep.pipeline_ace_step
+      import ACEStepPipeline` chạy được trong image thật, không chỉ trong venv
+- [x] ~7 GB weights tải về Volume lần đầu — đã qua, và lần chạy này đã tìm thấy
+      chúng ở đó (18s là sinh nhạc, không phải tải)
 - [ ] Những dòng floor khác ACE-Step mang theo (`gradio`, `peft`, `numba`,
       `tensorboard`) chưa hỏng, nhưng chúng là cùng một loại bom hẹn giờ. Chưa
       ghim vì chưa có bằng chứng — ghim đoán trước là cách khác để hỏng
