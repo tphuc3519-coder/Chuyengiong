@@ -213,6 +213,10 @@ export function submit(input: SubmitInput): Promise<SubmitResult> {
   if (input.mode === "beat" || input.mode === "rebeat") {
     const source = input.params.beatSource;
     form.set("beat_source", source);
+    // Sent on every source, `upload` included: half of a style is the mix
+    // profile, and that applies to a bed however it arrived. The other half —
+    // the description handed to the generator — is simply unused there.
+    form.set("beat_style", input.params.beatStyle);
     if (needsBeatFile(source)) {
       if (input.beat) form.set("beat", input.beat, input.beat.name);
     } else {

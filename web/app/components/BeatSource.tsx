@@ -2,6 +2,7 @@
 
 import { useId } from "react";
 
+import { BeatStyle } from "./BeatStyle";
 import { FileDrop } from "./FileDrop";
 import {
   AUDIO_ACCEPT,
@@ -20,6 +21,13 @@ import {
  * three independent fields — and where the deployment does not ship the
  * generator only `upload` exists, so the group disappears entirely rather than
  * rendering a choice of one.
+ *
+ * The **style** picker sits above the three, because it is the question a
+ * person actually came here with. "Đổi beat sang lo-fi" is one thought; "where
+ * does the audio come from" is a follow-up, and for two of the three sources
+ * the style is most of the answer to it. It is rendered for all three,
+ * including `upload` — see `BeatStyle` for why a style still applies to a beat
+ * somebody brought themselves.
  *
  * **"Phối lại bài này" is first because it is what the mode is called.** The
  * question this control answers, for somebody who came here to change a beat,
@@ -98,6 +106,13 @@ export function BeatSource({
             ở những ô nhịp đổi hợp âm, chỗ mà beat sinh từ mô tả sẽ chỏi.
           </p>
 
+          <BeatStyle
+            params={params}
+            onChange={onChange}
+            disabled={disabled}
+            note="Chọn kiểu là đủ — không cần gõ gì thêm. Hợp âm, tông và tốc độ đã lấy từ bài; chỗ này chỉ quyết định nhạc cụ, và cách beat nhường chỗ cho giọng khi hát."
+          />
+
           <label className="slider" htmlFor={promptId}>
             <span className="slider-label">
               Muốn nghe ra kiểu gì <output>còn {left} ký tự</output>
@@ -113,8 +128,9 @@ export function BeatSource({
               onChange={(event) => onChange({ ...params, beatPrompt: event.target.value })}
             />
             <span className="slider-hint">
-              Chỗ này chỉ quyết định <em>nhạc cụ và chất nhạc</em>; hợp âm và tốc độ đã lấy từ bài
-              rồi. Để trống thì app tự viết mô tả từ tông và BPM đo được.
+              Chỉ dùng khi bạn muốn nói cụ thể hơn kiểu đã chọn ở trên — gõ vào đây là{" "}
+              <strong>thay</strong> mô tả của kiểu đó, không phải cộng thêm. Để trống là dùng đúng
+              kiểu đã chọn.
             </span>
           </label>
 
@@ -159,6 +175,13 @@ export function BeatSource({
 
       {source === "generate" && (
         <>
+          <BeatStyle
+            params={params}
+            onChange={onChange}
+            disabled={disabled}
+            note="Chọn một kiểu là đã đủ để bấm chạy. Ô mô tả bên dưới chỉ cần khi bạn muốn nói cụ thể hơn."
+          />
+
           <label className="slider" htmlFor={promptId}>
             <span className="slider-label">
               Mô tả beat
@@ -175,6 +198,7 @@ export function BeatSource({
               onChange={(event) => onChange({ ...params, beatPrompt: event.target.value })}
             />
             <span className="slider-hint">
+              Gõ vào đây là <strong>thay</strong> mô tả của kiểu đã chọn, không phải cộng thêm.
               Không cần ghi đúng BPM — beat sinh ra sẽ được đo lại rồi kéo về đúng tốc độ và tông
               của bài, nên phần mô tả chỉ cần đúng <em>chất</em> nhạc. Ví dụ:{" "}
               {BEAT_PROMPT_EXAMPLES.slice(1).join(" · ")}
@@ -213,6 +237,13 @@ export function BeatSource({
             Muốn app tự làm ra beat thì chọn “Phối lại bài này” ở trên — nếu không thấy lựa chọn đó
             thì bản triển khai này chưa bật phần sinh beat.
           </p>
+
+          <BeatStyle
+            params={params}
+            onChange={onChange}
+            disabled={disabled}
+            note="Beat là của bạn nên phần mô tả không dùng đến — kiểu chọn ở đây quyết định cách phối: beat nhường chỗ cho giọng nhiều hay ít, khoét ở dải nào, giữ lại bao nhiêu tiếng trầm."
+          />
           <FileDrop
             file={beat}
             onFile={onBeat}

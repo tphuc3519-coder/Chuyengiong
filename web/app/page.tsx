@@ -19,6 +19,7 @@ import {
   convertsVoice,
   defaultParams,
   effectiveBeatSource,
+  styleDescribesSound,
   forMode,
   maxCharsFor,
   type Mode,
@@ -95,7 +96,12 @@ export default function Page() {
     (beatSource === "upload"
       ? beat !== null
       : beatSource === "generate"
-        ? params.beatPrompt.trim().length > 0
+        ? // A style is as complete an answer as a description, and the backend
+          // applies exactly the same rule before it refuses the job. Picking
+          // "Trap" and typing "trap, 140 BPM, 808 nặng" say the same thing;
+          // requiring the second after the first would be the form asking a
+          // question it already has the answer to.
+          params.beatPrompt.trim().length > 0 || styleDescribesSound(params.beatStyle)
         : true);
   const ready =
     hasSource && hasBeat && !tooLong && (!needsVoice || reference !== null) && consent && !busy;
@@ -297,7 +303,7 @@ export default function Page() {
                   : "Chọn file nguồn để tiếp tục."
                 : !hasBeat
                   ? beatSource === "generate"
-                    ? "Mô tả beat muốn sinh để tiếp tục."
+                    ? "Chọn kiểu nhạc hoặc mô tả beat muốn sinh để tiếp tục."
                     : "Chọn file beat mới để tiếp tục."
                   : tooLong
                     ? `Văn bản dài quá giới hạn của ngôn ngữ đang chọn (${maxCharsFor(params.language)} ký tự) — cắt bớt để tiếp tục.`

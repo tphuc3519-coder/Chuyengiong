@@ -90,3 +90,44 @@ def test_config_stays_off_the_probe(config: str) -> None:
 def test_the_browser_does_not_ask_the_api_directly(client: str) -> None:
     assert "/health" not in _code(client), "the health probe belongs to the server now"
     assert 'fetch("/api/capabilities"' in client
+
+
+# --- the beat style catalogue ---------------------------------------------
+
+
+def test_the_browsers_copy_of_the_style_list_matches_the_backends():
+    """`web/lib/params.ts` mirrors `styles.STYLES` so the picker renders on the
+    first paint rather than after a round trip. A mirror is a copy, and a copy
+    of twelve entries with Vietnamese labels is a copy that gets edited on one
+    side only — which shows up as a user picking a style the API has never
+    heard of and silently getting `auto`.
+    """
+    import json
+    import re
+    from pathlib import Path
+
+    from modal_app import styles
+
+    source = Path(__file__).resolve().parents[1] / "web" / "lib" / "params.ts"
+    text = source.read_text(encoding="utf-8")
+    block = re.search(r"export const BEAT_STYLES: [^=]+= \[(.*?)\n\];", text, re.DOTALL)
+    assert block, "BEAT_STYLES is not in params.ts in the shape this test reads"
+
+    mirrored = [
+        {key: value for key, value in re.findall(r'(\w+): "([^"]*)"', row)}
+        for row in block.group(1).strip().splitlines()
+    ]
+    assert mirrored == json.loads(json.dumps(styles.catalogue()))
+
+
+def test_the_browser_and_the_backend_agree_on_the_default_style():
+    import re
+    from pathlib import Path
+
+    from modal_app import styles
+
+    source = Path(__file__).resolve().parents[1] / "web" / "lib" / "params.ts"
+    found = re.search(
+        r'export const DEFAULT_BEAT_STYLE = "([^"]+)"', source.read_text(encoding="utf-8")
+    )
+    assert found and found.group(1) == styles.DEFAULT_STYLE
