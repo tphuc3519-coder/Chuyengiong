@@ -6,13 +6,26 @@ import { BeatStyle } from "./BeatStyle";
 import { FileDrop } from "./FileDrop";
 import {
   AUDIO_ACCEPT,
+  BEAT_FOLLOW_MAX,
+  BEAT_FOLLOW_MIN,
   BEAT_PROMPT_CHARS,
   BEAT_PROMPT_EXAMPLES,
   BEAT_RANDOM_SEED,
   MAX_INPUT_BYTES,
+  formatPercent,
   type BeatSource as Source,
   type Params,
 } from "@/lib/params";
+
+/**
+ * Where the slider sits before anybody has moved it.
+ *
+ * Purely cosmetic: while `beatFollow` is null the backend uses the default for
+ * whichever init source is in use, and this is only the thumb's position. It is
+ * the midpoint of the two backend defaults so the thumb does not jump when the
+ * checkbox below is ticked.
+ */
+const DEFAULT_FOLLOW_POSITION = 0.4;
 
 /**
  * Where the replacement backing track comes from, on the beat branches.
@@ -55,6 +68,7 @@ export function BeatSource({
 }) {
   const groupId = useId();
   const promptId = useId();
+  const followId = useId();
   const source: Source = canGenerate ? params.beatSource : "upload";
   const left = BEAT_PROMPT_CHARS - params.beatPrompt.length;
 
@@ -161,14 +175,62 @@ export function BeatSource({
                 onChange({ ...params, beatInit: event.target.checked ? "original" : "sketch" })
               }
             />
-            <span>Cho máy nghe thẳng nhạc nền gốc (bám bài sát hơn)</span>
+            <span>Cho máy nghe thẳng nhạc nền gốc (beat ra sẽ rất giống bản gốc)</span>
           </label>
           <p className="field-note">
             Mặc định máy <strong>không</strong> nghe bản ghi của bạn: nó chỉ nhận vòng hợp âm do app
-            tự đánh lại, nên beat ra là bản cover phần sáng tác — thứ xin phép được. Bật ô trên thì
-            máy nghe thẳng nhạc nền gốc: giống bài hơn, nhưng sản phẩm khi đó là tác phẩm{" "}
-            <strong>phái sinh của chính bản ghi</strong>, tức là đúng thứ mà mục này sinh ra để
-            tránh. Bật khi bạn có quyền với bản ghi, hoặc chấp nhận rủi ro đó.
+            tự đánh lại, nên beat ra là <strong>một bản phối mới</strong> của phần sáng tác — khác
+            bản gốc rõ rệt, và là thứ xin phép được.
+          </p>
+
+          {/*
+            The dial the two ends of this feature turned out to need. Reported
+            by ear: starting from the recording at 0.65 gave back something
+            barely different from the original, and starting from the chord
+            sketch at 0.35 sounded bad. Those are two different sources rather
+            than two points on one axis, so no third number could be guessed
+            from them — and each guess would have cost a deploy and a listen.
+            "Tự động" is the untouched position and changes nothing.
+          */}
+          <label className="slider" htmlFor={followId}>
+            <span className="slider-label">
+              Bám bài bao nhiêu
+              <output>
+                {params.beatFollow === null ? "Tự động" : formatPercent(params.beatFollow)}
+              </output>
+            </span>
+            <input
+              id={followId}
+              type="range"
+              min={BEAT_FOLLOW_MIN}
+              max={BEAT_FOLLOW_MAX}
+              step={0.05}
+              value={params.beatFollow ?? DEFAULT_FOLLOW_POSITION}
+              disabled={disabled}
+              onChange={(event) => onChange({ ...params, beatFollow: Number(event.target.value) })}
+            />
+            <span className="slider-hint">
+              Kéo thấp: máy tự do hơn, beat hay hơn nhưng dễ đi lạc khỏi bài. Kéo cao: bám bài sát
+              hơn, nhưng lên quá thì beat ra <strong>gần giống thứ máy được nghe</strong> — và với ô
+              bên dưới bật thì thứ đó chính là bản gốc.{" "}
+              {params.beatFollow !== null && (
+                <button
+                  type="button"
+                  className="linkish"
+                  disabled={disabled}
+                  onClick={() => onChange({ ...params, beatFollow: null })}
+                >
+                  Về tự động
+                </button>
+              )}
+            </span>
+          </label>
+          <p className="field-note">
+            Bật ô trên thì máy nghe thẳng nhạc nền gốc và viết đè lên đó. Hai hệ quả, và cả hai đều
+            là lý do để cân nhắc: beat ra <strong>nghe gần giống bản gốc</strong> — nếu bạn muốn một
+            bản phối khác đi thì đây là ô cần tắt chứ không phải ô cần bật — và sản phẩm khi đó là
+            tác phẩm <strong>phái sinh của chính bản ghi</strong>, tức là đúng thứ mà mục này sinh
+            ra để tránh. Bật khi bạn có quyền với bản ghi, hoặc chấp nhận rủi ro đó.
           </p>
         </>
       )}

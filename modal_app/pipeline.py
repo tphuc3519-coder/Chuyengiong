@@ -101,8 +101,25 @@ BEAT_MODES = ("beat", "rebeat")
 
 # Mirrored from `beatgen.MAX_PROMPT_CHARS`, and duplicated rather than imported
 # for the reason every constant in this module is: `pipeline` runs on the API
-# image, and `beatgen` imports `stable_audio_tools`.
+# image, and `beatgen` imports the generator's own stack.
 BEAT_PROMPT_CHARS = 300
+
+# How closely a derived beat follows the song, mirrored from
+# `beatgen.INIT_STRENGTH_*`.
+#
+# **This became a setting because two people listening settled nothing.** The
+# two ends were reported by ear on real songs: the `original` init at 0.65 came
+# back "nghe k khác bản gốc mấy", and the `sketch` init at 0.35 came back "nghe
+# siêu kém". Those are different *sources*, not two points on one axis, so they
+# do not bracket a value — and guessing a third from them would be a third
+# deploy and a third round trip to find out.
+#
+# `beatgen`'s own comment has said from the start that these numbers need a GPU
+# and a pair of ears. The ears exist now; what they lacked was a dial. `None`
+# keeps the per-branch default, so nobody who does not touch it sees a change —
+# the same "null is not zero" rule `semitone_shift` follows.
+BEAT_FOLLOW_MIN = 0.05
+BEAT_FOLLOW_MAX = 0.95
 
 # Where a replacement backing track comes from. Three genuinely different
 # things, which is why this is a choice and not an inference from which field
@@ -222,6 +239,11 @@ def clean_params(mode: str, raw: dict | None = None) -> dict:
         # uploaded needs a place under the voice exactly as much as a generated
         # one does. Only the prompt half is unused there.
         params["beat_style"] = styles.clean_style(raw.get("beat_style"))
+        # None is a value here, not a missing one: it means "use whatever the
+        # init source's default is", which is not the same as any number a
+        # slider can send.
+        follow = raw.get("beat_follow")
+        params["beat_follow"] = None if follow is None else _clamp_follow(follow)
         init = str(raw.get("beat_init") or "").strip().lower()
         # Clamped, not refused — but note which way it clamps. An unrecognised
         # value lands on `sketch`, so the failure mode of a typo or an old
@@ -252,6 +274,21 @@ def clean_params(mode: str, raw: dict | None = None) -> dict:
         params["expressiveness"] = clamp_expressiveness(raw.get("expressiveness"))
         params.pop("source_ext", None)
     return params
+
+
+def _clamp_follow(value) -> float:
+    """A follow amount inside the range the generator will accept.
+
+    Neither end is allowed, and that is `beatgen.clamp_init_strength`'s reason
+    repeated here where the client can reach it: at 0 the reference is ignored
+    and the whole point of the derive path is gone, and at 1 the model returns
+    what it was given — which on the `original` init means handing back the
+    master recording as the new beat.
+    """
+    try:
+        return max(BEAT_FOLLOW_MIN, min(BEAT_FOLLOW_MAX, float(value)))
+    except (TypeError, ValueError):
+        return BEAT_FOLLOW_MIN
 
 
 def _error_text(exc: BaseException) -> str:
@@ -599,6 +636,9 @@ def _init_audio(job_id: str, params: dict, instrumental: bytes) -> tuple[bytes, 
     # thing and leave `beats.lay_under` nothing to repeat.
     seconds = beatgen.clamp_seconds(track.duration_sec)
 
+    # What the user asked for, or the default for whichever source is in use.
+    follow = params.get("beat_follow")
+
     if params["beat_init"] == "original":
         # The whole instrumental, not a window out of the middle of it. The
         # previous model could only write 47 seconds, so the reference was cut
@@ -608,7 +648,7 @@ def _init_audio(job_id: str, params: dict, instrumental: bytes) -> tuple[bytes, 
         audio = decode_audio(instrumental, sketch.SAMPLE_RATE)
         return (
             encode_wav(audio, sketch.SAMPLE_RATE),
-            beatgen.ORIGINAL_STRENGTH,
+            beatgen.ORIGINAL_STRENGTH if follow is None else follow,
             prompt,
             seconds,
         )
@@ -618,7 +658,7 @@ def _init_audio(job_id: str, params: dict, instrumental: bytes) -> tuple[bytes, 
     jobs.record_params(job_id, {"beat_chart": str(chart)})
     return (
         sketch.render_wav(chart, track, seconds, seed=max(0, params["beat_seed"])),
-        beatgen.SKETCH_STRENGTH,
+        beatgen.SKETCH_STRENGTH if follow is None else follow,
         prompt,
         seconds,
     )

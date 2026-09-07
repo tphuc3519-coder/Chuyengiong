@@ -65,14 +65,25 @@ def test_nothing_in_the_requirements_fights_the_package_itself():
         The conflict is caused by:
             stable-audio-tools 0.0.16 depends on einops==0.7.0
 
-    `einops` was pinned there to a version the package forbade. The package
-    pins its own dependencies; this list may pin the wheels that have to agree
-    with each other, and nothing else. The lesson survived the model swap even
-    though the package did not."""
-    allowed = {"ace-step", "torch", "torchaudio", "torchvision"}
+    `einops` was pinned there to a version the package forbade, so this list
+    was cut back to "the wheels that have to agree with each other, and nothing
+    else". That rule was too broad, and a later deploy said so: ACE-Step does
+    not *pin* diffusers, it **floors** it, and the two are opposites here.
+    Something the package pins is not ours to touch; something it floors is an
+    instruction to take whatever ships next, which is how this image ended up
+    with a diffusers that will not import under the torch beside it.
+
+    So the rule is about what the package actually says, and it is checked here
+    against what it says rather than against a list somebody remembered.
+    """
+    floors = {"diffusers"}  # ACE-Step's requirements.txt: `diffusers>=0.33.0`
+    pinned_by_the_package = {"transformers", "spacy", "accelerate", "librosa", "datasets"}
     for requirement in beatgen.BEATGEN_REQUIREMENTS:
         name = requirement.split("@")[0].split("==")[0].split(">")[0].split("<")[0].strip()
-        assert name in allowed, f"{name} is not ours to pin"
+        assert name not in pinned_by_the_package, f"{name} is pinned by ace-step; do not fight it"
+        assert name in {"ace-step", "torch", "torchaudio", "torchvision"} | floors, (
+            f"{name} is not ours to pin"
+        )
 
 
 def test_the_three_torch_wheels_are_pinned_together():
@@ -84,7 +95,47 @@ def test_the_three_torch_wheels_are_pinned_together():
         for r in beatgen.BEATGEN_REQUIREMENTS
         if "==" in r and "@" not in r
     }
-    assert pins == {"torch": "2.4.0", "torchaudio": "2.4.0", "torchvision": "0.19.0"}
+    for wheel, version in (("torch", "2.4.0"), ("torchaudio", "2.4.0"), ("torchvision", "0.19.0")):
+        assert pins[wheel] == version
+
+
+def test_every_requirement_names_one_exact_version():
+    """The lesson of the failed deploy, as a rule rather than as a story.
+
+    An image is resolved on the day it is built, and this one is built on
+    whichever day somebody deploys. Every `>=` in it is therefore a promise
+    that a release which does not exist yet will work — and the release that
+    broke this (diffusers 0.40.0) was not even a dependency anybody here had
+    chosen, it arrived through a floor in ACE-Step's own requirements.
+
+    A git URL counts as pinned when it carries a commit; `==` counts when it
+    names a whole version. Nothing else does.
+    """
+    for requirement in beatgen.BEATGEN_REQUIREMENTS:
+        if requirement.startswith("ace-step"):
+            continue
+        assert "==" in requirement, f"{requirement} is not pinned to a version"
+        assert not any(op in requirement for op in (">", "<", "~", "*")), (
+            f"{requirement} is a range, not a version"
+        )
+
+
+def test_diffusers_is_held_below_the_release_that_cannot_import():
+    """diffusers 0.37 registers a flash-attention-3 wrapper through
+    `torch.library.custom_op` at import time, in a module carrying
+    `from __future__ import annotations` — so its annotations are strings, and
+    torch 2.4's `infer_schema` matches annotations against real types and
+    rejects even a plain `'torch.Tensor'`. The container dies in
+    `@modal.enter()`, before a note of audio.
+
+    Bisected against torch 2.4.0: 0.40.0, 0.39.0, 0.38.0 and 0.37.1 all fail to
+    import; 0.36.0 and 0.35.2 are clean. This is the boundary, and it is an
+    upper bound rather than a preference — moving it up needs the torch pin
+    moved first, and that is `base_image`'s and `conversion.py`'s pin too.
+    """
+    spec = next(r for r in beatgen.BEATGEN_REQUIREMENTS if r.startswith("diffusers"))
+    major, minor, _ = (int(part) for part in spec.split("==")[1].split("."))
+    assert (major, minor) <= (0, 36)
 
 
 def test_the_model_is_pinned_to_a_commit_rather_than_a_branch():

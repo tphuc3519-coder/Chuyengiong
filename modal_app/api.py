@@ -232,6 +232,11 @@ async def submit(
     # instrumental, which is a derivative of the master and is why the default
     # is the other one.
     beat_init: Annotated[str, Form()] = "",
+    # `derive` only: how closely the generator follows whatever it was started
+    # from. Absent means "use the default for that source", which is not the
+    # same as any number the slider can send — the same "null is not zero" rule
+    # `semitone_shift` is under.
+    beat_follow: Annotated[float | None, Form()] = None,
     # -1 is a different beat every time. A fixed value gets the same one back.
     beat_seed: Annotated[int, Form()] = -1,
     text: Annotated[str, Form()] = "",
@@ -313,6 +318,7 @@ async def submit(
                 "beat_prompt": beat_prompt,
                 "beat_style": beat_style,
                 "beat_init": beat_init,
+                "beat_follow": beat_follow,
                 "beat_seed": beat_seed,
                 "voice_profile": voice_profile,
                 "separation_model": separation_model,

@@ -785,3 +785,15 @@ def test_health_reports_the_style_catalogue(client):
 
     body = client.get("/health").json()
     assert body["beat_styles"] == styles.catalogue()
+
+
+def test_how_closely_the_beat_follows_is_passed_through(client, started, generator_on):
+    response = client.post("/submit", **upload(mode="beat", beat_source="derive", beat_follow=0.6))
+    assert response.status_code == 200
+    assert started[0]["params"]["beat_follow"] == 0.6
+
+
+def test_a_client_that_never_learned_about_the_dial_gets_the_default(client, started, generator_on):
+    response = client.post("/submit", **upload(mode="beat", beat_source="derive"))
+    assert response.status_code == 200
+    assert started[0]["params"]["beat_follow"] is None
