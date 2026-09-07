@@ -16,7 +16,9 @@ docs/rvc-mode.md.
 import base64
 import io
 import pathlib
+import re
 import shutil
+import unicodedata
 import zipfile
 
 import modal
@@ -26,6 +28,26 @@ app = modal.App("chuyengiong-rvc")
 # Volume giữ các model .pth/.index — không mất khi container tắt
 models_vol = modal.Volume.from_name("rvc-models", create_if_missing=True)
 MODELS_DIR = "/models"
+
+# Tên model trở thành tên thư mục trên Volume, và ba endpoint đều mở không xác
+# thực — nên tên phải là *không thể* chứa dấu phân cách đường dẫn, không phải
+# *thường là không*. Bắt đầu bằng chữ/số nên ".." cũng không lọt.
+_SAFE_NAME = re.compile(r"[a-z0-9][a-z0-9._-]*")
+
+
+def _safe_name(raw: str) -> str | None:
+    """Chuẩn hoá tên model, trả về None nếu không còn gì dùng được.
+
+    Bỏ dấu thay vì từ chối: người dùng gõ "Sơn Tùng MTP" là chuyện bình thường,
+    và trả về lỗi cho một cái tên hợp lý là cách chắc chắn làm họ bỏ cuộc.
+    Hàm này phải khớp với `normalise()` bên web/app/rvc/page.tsx — trang đó
+    hiện trước tên sẽ lưu, lệch nhau là hứa một đằng làm một nẻo.
+    """
+    lowered = raw.strip().lower().replace("đ", "d")
+    bare = "".join(c for c in unicodedata.normalize("NFD", lowered) if not unicodedata.combining(c))
+    name = re.sub(r"[^a-z0-9._-]+", "-", bare)
+    name = re.sub(r"-{2,}", "-", name).strip("-._")
+    return name if _SAFE_NAME.fullmatch(name) else None
 
 
 def _download_base_models():
@@ -98,7 +120,9 @@ def add_model(payload: dict):
     import requests
 
     url = payload["url"]
-    name = payload["name"].strip().lower().replace(" ", "-")
+    name = _safe_name(payload["name"])
+    if name is None:
+        return {"ok": False, "error": "Tên chỉ được dùng a-z, 0-9, dấu chấm, gạch ngang, gạch dưới"}
 
     dest = pathlib.Path(MODELS_DIR) / name
     if dest.exists():
@@ -196,7 +220,9 @@ def convert(payload: dict):
 
     models_vol.reload()
 
-    name = payload["model"]
+    name = _safe_name(payload["model"])
+    if name is None:
+        return {"ok": False, "error": "Tên model không hợp lệ"}
     model_dir = pathlib.Path(MODELS_DIR) / name
     pth = next(model_dir.glob("*.pth"), None)
     if pth is None:
