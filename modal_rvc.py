@@ -13,17 +13,32 @@ image nào với pipeline Seed-VC, và deploy bằng workflow riêng. Xem
 docs/rvc-mode.md.
 """
 
-import base64
 import io
 import pathlib
 import re
 import shutil
 import unicodedata
 import zipfile
+from typing import Annotated
 
 import modal
+from fastapi import File, Form, UploadFile
+from fastapi.responses import JSONResponse, Response
 
 app = modal.App("chuyengiong-rvc")
+
+# Trình duyệt POST thẳng vào /convert (xem docstring của nó), nên response phải
+# nói rõ là đọc được từ origin khác. Mở cho mọi origin: ba endpoint này vốn
+# không có xác thực, nên siết CORS chẳng bảo vệ được gì mà chỉ làm preview
+# deploy của Vercel hỏng — CORS chặn trình duyệt, không chặn curl.
+_CORS = {"Access-Control-Allow-Origin": "*"}
+
+
+def _json_error(message: str, status: int) -> JSONResponse:
+    """Lỗi cũng phải kèm CORS, không thì trình duyệt chỉ thấy 'failed to fetch'
+    và người dùng mất luôn câu giải thích."""
+    return JSONResponse({"ok": False, "error": message}, status_code=status, headers=_CORS)
+
 
 # Volume giữ các model .pth/.index — không mất khi container tắt
 models_vol = modal.Volume.from_name("rvc-models", create_if_missing=True)
@@ -202,31 +217,40 @@ def list_models():
     scaledown_window=300,  # giữ container ấm 5 phút, đỡ chờ load model
 )
 @modal.fastapi_endpoint(method="POST")
-def convert(payload: dict):
-    """
-    Body:
-      {
-        "audio_b64": "...",       # vocal ĐÃ tách stem, wav hoặc mp3
-        "model": "son-tung",
-        "pitch": 0,               # nửa cung. Nam -> nữ: +12, nữ -> nam: -12
-        "index_rate": 0.6,
-        "protect": 0.33,
-        "f0_method": "rmvpe"
-      }
-    Trả về: {"ok": true, "audio_b64": "..."}
+def convert(
+    audio: Annotated[UploadFile, File()],
+    model: Annotated[str, Form()],
+    pitch: Annotated[int, Form()] = 0,
+    index_rate: Annotated[float, Form()] = 0.6,
+    protect: Annotated[float, Form()] = 0.33,
+    f0_method: Annotated[str, Form()] = "rmvpe",
+):
+    """Đổi giọng cho một file vocal ĐÃ tách stem.
+
+    Nhận multipart và trả thẳng bytes wav, không phải JSON+base64, vì hai lý do
+    ăn nhau:
+
+    1. Trình duyệt gọi thẳng vào đây chứ không qua route của Vercel — body của
+       serverless function bị chặn ở 4.5MB *cả hai chiều*, mà wav trả về của
+       một bài 4 phút đã hơn 40MB. Proxy không tải nổi.
+    2. multipart/form-data là content-type nằm trong danh sách an toàn của CORS,
+       nên POST kiểu này không sinh preflight. Chỉ cần đúng một header
+       Access-Control-Allow-Origin ở response là trình duyệt đọc được.
+
+    base64 cũng biến mất luôn, đỡ 33% dung lượng ở cả hai chiều.
     """
     from pydub import AudioSegment, silence
     from rvc_python.infer import RVCInference
 
     models_vol.reload()
 
-    name = _safe_name(payload["model"])
+    name = _safe_name(model)
     if name is None:
-        return {"ok": False, "error": "Tên model không hợp lệ"}
+        return _json_error("Tên model không hợp lệ", 400)
     model_dir = pathlib.Path(MODELS_DIR) / name
     pth = next(model_dir.glob("*.pth"), None)
     if pth is None:
-        return {"ok": False, "error": f"Không có model '{name}'"}
+        return _json_error(f"Không có model '{name}'", 404)
     index = next(model_dir.glob("*.index"), None)
 
     work = pathlib.Path("/tmp/work")
@@ -234,11 +258,14 @@ def convert(payload: dict):
         shutil.rmtree(work)
     work.mkdir(parents=True)
 
-    src = work / "in.wav"
-    src.write_bytes(base64.b64decode(payload["audio_b64"]))
+    src = work / "in"
+    src.write_bytes(audio.file.read())
 
     # Chuẩn hoá về mono 44.1k trước khi đưa vào RVC
-    audio = AudioSegment.from_file(src).set_channels(1).set_frame_rate(44100)
+    try:
+        segment = AudioSegment.from_file(src).set_channels(1).set_frame_rate(44100)
+    except Exception:
+        return _json_error("Không đọc được file audio này", 400)
 
     rvc = RVCInference(device="cuda:0")
     rvc.load_model(str(pth), index_path=str(index) if index else "")
@@ -247,10 +274,10 @@ def convert(payload: dict):
     # gõ sai là bị bỏ qua im lặng — pitch luôn 0 và f0 method luôn là
     # "harvest" mặc định, đúng cái làm giọng ra nghe như robot.
     rvc.set_params(
-        f0up_key=int(payload.get("pitch", 0)),
-        f0method=payload.get("f0_method", "rmvpe"),
-        index_rate=float(payload.get("index_rate", 0.6)),
-        protect=float(payload.get("protect", 0.33)),
+        f0up_key=int(pitch),
+        f0method=f0_method,
+        index_rate=float(index_rate),
+        protect=float(protect),
         filter_radius=3,
         rms_mix_rate=0.25,
         resample_sr=0,
@@ -260,17 +287,19 @@ def convert(payload: dict):
     # Cắt theo độ dài cố định sẽ để lại vết nối nghe rõ.
     CHUNK_LIMIT_MS = 90_000
 
-    if len(audio) <= CHUNK_LIMIT_MS:
-        segments = [audio]
+    if len(segment) <= CHUNK_LIMIT_MS:
+        segments = [segment]
     else:
         pieces = silence.split_on_silence(
-            audio,
+            segment,
             min_silence_len=400,
-            silence_thresh=audio.dBFS - 16,
+            silence_thresh=segment.dBFS - 16,
             keep_silence=200,
         )
         if not pieces:
-            pieces = [audio[i : i + CHUNK_LIMIT_MS] for i in range(0, len(audio), CHUNK_LIMIT_MS)]
+            pieces = [
+                segment[i : i + CHUNK_LIMIT_MS] for i in range(0, len(segment), CHUNK_LIMIT_MS)
+            ]
         # Gộp các mảnh nhỏ lại cho đến gần giới hạn
         segments, buf = [], pieces[0]
         for p in pieces[1:]:
@@ -297,8 +326,8 @@ def convert(payload: dict):
     final = work / "out.wav"
     merged.export(final, format="wav")
 
-    return {
-        "ok": True,
-        "chunks": len(segments),
-        "audio_b64": base64.b64encode(final.read_bytes()).decode(),
-    }
+    return Response(
+        content=final.read_bytes(),
+        media_type="audio/wav",
+        headers={**_CORS, "X-Rvc-Chunks": str(len(segments))},
+    )

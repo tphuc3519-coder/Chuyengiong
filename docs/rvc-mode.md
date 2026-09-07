@@ -66,6 +66,32 @@ chuẩn hoá đó phải khớp nhau: `normalise()` trong `web/app/rvc/page.tsx`
 Muốn gọi thẳng API thì vẫn được: `POST /api/rvc/add-model` với
 `{"url": "...", "name": "..."}`, và `GET /api/rvc/models` để xem danh sách.
 
+## Đổi giọng thử — cũng ở `/rvc`
+
+Cùng trang, phần dưới: chọn file **giọng đã tách sẵn**, chọn model, kéo pitch,
+bấm **Đổi giọng**. Nghe ngay trên trang, tải về được.
+
+Đây là đường đi tắt để nghe thử, chưa phải bước 4. Nó nhận vocal đã tách và trả
+lại vocal đã đổi giọng — không tự tách nhạc nền, không tự ghép lại.
+
+### Vì sao `/convert` không đi qua route của Vercel
+
+Hai endpoint kia (`models`, `add-model`) đi qua `app/api/rvc/[action]/route.ts`
+vì chúng chỉ trao đổi vài trăm byte JSON. `convert` thì không: body của
+serverless function trên Vercel bị chặn ở **4.5MB cả hai chiều**, mà một vocal
+4 phút đã vượt, còn wav trả về thì hơn 40MB. Proxy không tải nổi audio theo
+chiều nào.
+
+Nên trình duyệt POST thẳng lên Modal, đúng cách `web/lib/api.ts` đã làm với
+pipeline chính (`/api/config` đưa `apiBase` cho trình duyệt, upload đi thẳng).
+Địa chỉ lấy ở `GET /api/rvc/config`, không nhúng vào bundle.
+
+Gửi bằng `multipart/form-data` chứ không phải JSON+base64, có lý do: multipart
+nằm trong danh sách content-type an toàn của CORS nên POST kiểu này **không
+sinh preflight** — chỉ cần đúng một header `Access-Control-Allow-Origin` ở
+response là xong, không phải dựng ASGI app có CORS middleware. base64 cũng biến
+mất, đỡ 33% dung lượng cả hai chiều.
+
 ## Bước 4 — Nối vào pipeline hiện có
 
 Luồng đầy đủ:
@@ -115,10 +141,10 @@ chỉnh đúng thì tự nhiên ngay.
 - **Bài dài** — code đã tự cắt theo khoảng lặng khi vượt 90 giây. Nếu vocal
   gần như không có khoảng lặng, nó rơi về cắt theo độ dài cố định và chỗ nối
   có thể nghe thấy nhẹ.
-- **Nội dung đi qua base64 trong body JSON** — cả chiều lên lẫn chiều về. Bài dài
-  thì body phình to; `maxDuration = 300` của route chỉ lo thời gian, không lo
-  kích thước. Nếu đụng giới hạn body của Vercel thì phải đổi sang upload thẳng
-  lên Modal như `modal_app/storage.py` đang làm.
+- **`add-model` có thể timeout ở route** — gói Hobby của Vercel chặn hàm ở 60
+  giây, mà tải một model 100MB từ Mega cộng cold start có thể lâu hơn. Modal
+  vẫn tải xong và ghi vào Volume; bấm **Đọc lại** sau một phút là thấy. Đừng
+  thêm lại, sẽ báo trùng tên.
 - **Chưa có consent gate và watermark** — hai thứ này nằm ở `modal_app/`
   (Phase 6, Phase 7) và app RVC không đi qua chúng. Trước khi mở cho người khác
   dùng thì phải tính.
@@ -171,4 +197,6 @@ Modal trước khi mở cho người khác dùng.
 - [ ] `add-model` nuốt được một link voice-models.com thật (cả trường hợp có
       `.index` lẫn không)
 - [ ] `/convert` chạy hết một bài 4 phút, nghe thử chỗ nối chunk
+- [ ] nghe thử pitch: cùng file, `0` và `+12` phải ra khác nhau rõ rệt (đây là
+      chỗ lỗi `f0up_key` từng ẩn)
 - [ ] đo lại thời gian và chi phí thực tế so với ước lượng ở trên
