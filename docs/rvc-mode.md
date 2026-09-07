@@ -164,9 +164,15 @@ chỉnh đúng thì tự nhiên ngay.
   gạch dưới ở giữa. Hàm này lọc theo whitelist rồi chỉ `print` cảnh báo cho tên
   lạ, nên gõ thành `f0_up_key`/`f0_method` là bị bỏ qua im lặng: pitch luôn 0,
   f0 method luôn là `harvest`. Giọng ra nghe như robot mà log thì sạch.
-- **Bài dài** — code đã tự cắt theo khoảng lặng khi vượt 90 giây. Nếu vocal
-  gần như không có khoảng lặng, nó rơi về cắt theo độ dài cố định và chỗ nối
-  có thể nghe thấy nhẹ.
+- **Bài dài** — vượt 90 giây thì cắt khúc, nhưng các khúc **liền nhau** và phủ
+  kín cả bài: khoảng lặng chỉ dùng để chọn chỗ cắt, không bị bỏ đi. Độ dài ra
+  bằng độ dài vào, nên vocal vẫn khớp với nhạc nền. `convert` trả về
+  `X-Rvc-In-Ms` và `X-Rvc-Out-Ms` để kiểm bằng mắt; lệch nhiều là hỏng.
+
+  Bản đầu dùng `split_on_silence` — hàm đó **vứt bỏ** khoảng lặng, chỉ chừa
+  200ms mỗi đầu. Bài 1:31 ra 1:09. Lời vẫn đủ nên nghe qua tưởng đúng, nhưng
+  ghép lại với nhạc nền thì lệch hẳn. `tests/test_rvc_chunks.py` giữ đúng tính
+  chất đó: tổng các khúc luôn bằng nguyên bản.
 - **`add-model` có thể timeout ở route** — gói Hobby của Vercel chặn hàm ở 60
   giây, mà tải một model 100MB từ Mega cộng cold start có thể lâu hơn. Modal
   vẫn tải xong và ghi vào Volume; bấm **Đọc lại** sau một phút là thấy. Đừng
