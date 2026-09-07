@@ -20,10 +20,9 @@ import re
 import shutil
 import unicodedata
 import zipfile
-from typing import Annotated
 
 import modal
-from fastapi import File, Form, UploadFile
+from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
 app = modal.App("chuyengiong-rvc")
@@ -331,16 +330,7 @@ def _speak(text: str, language: str) -> bytes:
     scaledown_window=300,  # giữ container ấm 5 phút, đỡ chờ load model
 )
 @modal.fastapi_endpoint(method="POST")
-def convert(
-    model: Annotated[str, Form()],
-    audio: Annotated[UploadFile | None, File()] = None,
-    text: Annotated[str, Form()] = "",
-    language: Annotated[str, Form()] = "vie",
-    pitch: Annotated[int, Form()] = 0,
-    index_rate: Annotated[float, Form()] = 0.6,
-    protect: Annotated[float, Form()] = 0.33,
-    f0_method: Annotated[str, Form()] = "rmvpe",
-):
+async def convert(request: Request):
     """Đổi giọng cho một file vocal ĐÃ tách stem.
 
     Nhận multipart và trả thẳng bytes wav, không phải JSON+base64, vì hai lý do
@@ -357,6 +347,30 @@ def convert(
     """
     from pydub import AudioSegment, silence
     from rvc_python.infer import RVCInference
+
+    # Tự đọc form thay vì khai tham số Form()/File() cho FastAPI tự validate.
+    # Validation của FastAPI hỏng thì nó trả 422 với thân JSON của riêng nó,
+    # trước khi vào được hàm — nghĩa là không log được, không đổi được câu
+    # thông báo, và người dùng chỉ thấy đúng một con số. Một endpoint có đúng
+    # một người gọi thì tự đọc bảy trường rẻ hơn nhiều so với một tầng
+    # validation không nói được nó chê cái gì.
+    form = await request.form()
+
+    def _num(key: str, default: float) -> float:
+        try:
+            return float(str(form.get(key, "")).strip())
+        except (TypeError, ValueError):
+            return default
+
+    model = str(form.get("model") or "")
+    text = str(form.get("text") or "").strip()
+    language = str(form.get("language") or "vie")
+    f0_method = str(form.get("f0_method") or "rmvpe")
+    pitch = int(_num("pitch", 0))
+    index_rate = _num("index_rate", 0.6)
+    protect = _num("protect", 0.33)
+
+    upload = form.get("audio")
 
     models_vol.reload()
 
@@ -382,8 +396,8 @@ def convert(
             source = _speak(text.strip(), language)
         except Exception as err:
             return _json_error(f"Không đọc được văn bản: {err}", 502)
-    elif audio is not None:
-        source = audio.file.read()
+    elif upload is not None and hasattr(upload, "read"):
+        source = await upload.read()
     else:
         return _json_error("Cần một file giọng hoặc một đoạn văn bản", 400)
 

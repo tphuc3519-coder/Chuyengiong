@@ -100,6 +100,21 @@ machine and comes out of it sounding like a machine that has changed its mind
 about who it is."* Muốn hay hơn thì phải thay engine đọc, không phải thay model
 RVC.
 
+### `convert` tự đọc form, không để FastAPI validate
+
+Khai `Form()`/`File()` cho FastAPI tự kiểm thì lúc nó chê, nó trả **422 với
+thân JSON của riêng nó, trước khi vào được hàm** — không log được, không đổi
+được câu thông báo, và người dùng chỉ thấy đúng ba chữ số. Đã mất một vòng vì
+đúng chuyện đó: gửi văn bản không kèm file thì ra 422 câm.
+
+Giờ hàm nhận thẳng `Request` rồi `await request.form()`, tự lấy bảy trường và
+tự trả lỗi bằng tiếng Việt. Một endpoint có đúng một người gọi thì tự đọc rẻ
+hơn nhiều so với một tầng validation không nói được nó chê cái gì.
+
+Phía trang cũng đọc được `detail` của FastAPI phòng khi còn 422 ở đâu khác —
+`Modal từ chối dữ liệu gửi lên (422) — audio: Field required` đọc ra việc phải
+làm, còn `422` thì không.
+
 ### Vì sao `/convert` không đi qua route của Vercel
 
 Hai endpoint kia (`models`, `add-model`) đi qua `app/api/rvc/[action]/route.ts`

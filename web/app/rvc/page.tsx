@@ -16,6 +16,32 @@ import { AUDIO_ACCEPT, LANGUAGES, MAX_INPUT_BYTES, maxCharsFor } from "@/lib/par
  * giọng là việc làm một lần rồi thôi, còn trang chính là việc làm mỗi ngày.
  */
 
+/**
+ * Câu giải thích cho một lỗi từ Modal.
+ *
+ * Có hai dạng thân lỗi hoàn toàn khác nhau: `{ok:false, error}` là của chúng ta
+ * và đã bằng tiếng Việt, còn `{detail:[…]}` là của FastAPI khi nó tự chê dữ
+ * liệu gửi lên. Không đọc `detail` thì một lỗi 422 hiện ra đúng ba chữ số và
+ * không ai biết nó chê trường nào — đã mất một vòng vì chuyện đó.
+ */
+function explain(body: unknown, status: number): string {
+  const b = body as { error?: string; detail?: unknown } | null;
+  if (typeof b?.error === "string") return b.error;
+  if (typeof b?.detail === "string") return b.detail;
+  if (Array.isArray(b?.detail)) {
+    const fields = b.detail
+      .map((item) => {
+        const d = item as { loc?: unknown[]; msg?: string };
+        const field = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : null;
+        return field ? `${String(field)}: ${d.msg ?? ""}` : (d.msg ?? "");
+      })
+      .filter(Boolean)
+      .join(" · ");
+    if (fields) return `Modal từ chối dữ liệu gửi lên (${status}) — ${fields}`;
+  }
+  return `Modal trả lỗi ${status}`;
+}
+
 type Model = {
   name: string;
   has_index: boolean;
@@ -186,7 +212,7 @@ export default function RvcModelsPage() {
       const res = await fetch(cfg.convertUrl, { method: "POST", body: form });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
-        setRunError(body?.error ?? `Modal trả lỗi ${res.status}`);
+        setRunError(explain(body, res.status));
         return;
       }
 
