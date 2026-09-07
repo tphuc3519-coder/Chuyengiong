@@ -27,6 +27,7 @@ Kế hoạch chi tiết theo từng phase: [`docs/implementation-plan.md`](docs/
 | 13.1 | Sửa deploy đỏ: image của beatgen chặn cả ba phase | 🟢 deploy xanh lại, sinh beat tắt sau cờ |
 | 13.2 | Nghe thật lần đầu: gỡ "Phối lại", sửa tempo sai 3:2 | 🟢 đo trên nhạc thật |
 | 13.3 | Sửa đúng dòng làm chết deploy, bật lại "máy làm beat" | 🟡 pip resolve xanh, chờ build thật |
+| 14 | RVC mode — model train sẵn từ voice-models.com, app Modal đứng riêng | 🟡 plan xong, chờ deploy thật — xem [`docs/rvc-mode.md`](docs/rvc-mode.md) |
 
 ## Cấu trúc
 
@@ -55,11 +56,13 @@ modal_app/
 ├── ratelimit.py    # 5 job/giờ mỗi client, khoá là hash của địa chỉ
 ├── deploy.py       # target deploy duy nhất — import mọi module để đăng ký
 └── verify.py       # acceptance Phase 2 chạy trên hạ tầng thật (không cần GPU)
+modal_rvc.py    # app Modal thứ hai, đứng riêng: RVC mode — xem docs/rvc-mode.md
 web/            # Next.js 15 trên Vercel — xem web/README.md
 tests/          # chạy bằng pytest, không cần Modal credentials và không cần GPU
 .github/workflows/
 ├── ci.yml            # python: ruff + pytest · web: eslint + prettier + tsc + build
-└── deploy-modal.yml  # modal deploy khi main đổi
+├── deploy-modal.yml  # modal deploy khi main đổi
+└── deploy-rvc.yml    # deploy riêng cho modal_rvc.py
 ```
 
 Container dependencies khai báo trong `modal_app/app.py` (Modal tự build image).
