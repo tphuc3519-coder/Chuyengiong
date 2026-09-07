@@ -57,6 +57,11 @@ modal_app/
 ├── ratelimit.py    # 5 job/giờ mỗi client, khoá là hash của địa chỉ
 ├── deploy.py       # target deploy duy nhất — import mọi module để đăng ký
 └── verify.py       # acceptance Phase 2 chạy trên hạ tầng thật (không cần GPU)
+CLAUDE.md       # định hướng cho session Claude Code sau: chạy test, quy ước viết
+docs/
+├── beat-tuning.md       # trạng thái sống của việc đang dở: chỉnh beat bằng tai
+├── implementation-plan.md
+└── rvc-mode.md
 modal_rvc.py    # app Modal thứ hai, đứng riêng: RVC mode — xem docs/rvc-mode.md
 web/            # Next.js 15 trên Vercel — xem web/README.md
 tests/          # chạy bằng pytest, không cần Modal credentials và không cần GPU
