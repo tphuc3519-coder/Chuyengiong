@@ -174,6 +174,34 @@ cần `build-essential` — `debian_slim` không có `g++`.
 resolve sạch cả cây (`numpy 1.23.5`, `omegaconf 2.0.6`, `hydra-core 1.0.7`,
 `faiss-cpu 1.7.3`, `fairseq 0.12.2`), và fairseq build ra đủ ba file `.so`.
 
+## Nghe như robot ở mọi pitch — gần như chắc là `version`
+
+Triệu chứng: vocal sạch, kéo pitch từ đầu đến cuối dải, lần nào cũng ra tiếng
+máy móc, và không có một dòng lỗi nào.
+
+Nguyên nhân nằm trong `rvc_python/modules/vc/modules.py`. `get_vc()` lấy
+`version` từ **tham số truyền vào** chứ không đọc từ checkpoint — trong khi
+nhánh dọn dẹp ngay phía trên nó lại đọc từ `cpt.get("version", "v1")`. Hai
+nhánh không khớp nhau. Mặc định của `load_model()` là `"v2"`.
+
+Ngay dưới đó là `load_state_dict(..., strict=False)`.
+
+Nên nạp một model v1 mà không nói rõ v1 thì ba thứ cùng sai một lúc:
+
+| Chỗ | v1 | Bị ép thành v2 |
+|---|---|---|
+| Kiến trúc | `SynthesizerTrnMs256NSFsid` | `...Ms768...` — weight không khớp bị **bỏ qua im lặng** |
+| Layer hubert | 9 | 12 |
+| `final_proj` | có | không |
+
+Không có exception nào được ném ra. Chỉ có âm thanh sai, ở mọi pitch — nên
+chỉnh tham số không bao giờ cứu được, và đó chính là chỗ dễ mất hàng giờ.
+
+`_checkpoint_info()` đọc `version` thẳng từ checkpoint rồi truyền vào
+`load_model()`. Nó cũng đọc `f0`: model có `f0 = 0` là loại train không kèm
+pitch, kéo thanh cao độ sẽ không có tác dụng gì — trang `/rvc` nói thẳng điều
+đó thay vì để người dùng ngồi đoán.
+
 ## Ba endpoint đang mở
 
 `fastapi_endpoint` không tự chặn ai. Route proxy chỉ giấu URL khỏi trình duyệt

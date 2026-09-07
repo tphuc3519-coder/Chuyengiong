@@ -14,6 +14,7 @@ docs/rvc-mode.md.
 """
 
 import io
+import json
 import pathlib
 import re
 import shutil
@@ -114,6 +115,47 @@ image = (
 )
 
 
+def _checkpoint_info(pth: pathlib.Path) -> dict:
+    """Đọc ba thứ trong header checkpoint mà mọi thứ sau đó phụ thuộc vào.
+
+    `version` là quan trọng nhất, và nó là chỗ hỏng im lặng nhất trong cả
+    rvc-python: `get_vc()` lấy version từ *tham số truyền vào* chứ không đọc từ
+    checkpoint (nhánh dọn dẹp ngay phía trên nó thì lại đọc — hai nhánh không
+    khớp nhau), mặc định là "v2". Rồi ngay dưới là
+    `load_state_dict(..., strict=False)`.
+
+    Nên nạp một model v1 mà không nói rõ v1 thì: kiến trúc dựng sai chiều
+    (256 vs 768), weight không khớp bị **bỏ qua không báo gì**, hubert lấy nhầm
+    layer (9 vs 12) và bỏ qua `final_proj`. Không có lỗi nào được ném ra, chỉ
+    có âm thanh ra nghe như robot — ở mọi pitch, nên chỉnh tham số không bao
+    giờ cứu được.
+    """
+    import torch
+
+    # weights_only=False vì checkpoint RVC là dict có metadata, không chỉ tensor
+    # — cũng đúng cách rvc-python tự load nó ngay sau đây.
+    cpt = torch.load(pth, map_location="cpu", weights_only=False)
+    return {
+        "version": cpt.get("version", "v1"),
+        "f0": int(cpt.get("f0", 1)),
+        "sr": int(cpt["config"][-1]),
+    }
+
+
+def _info_for(model_dir: pathlib.Path, pth: pathlib.Path) -> dict:
+    """`_checkpoint_info` có nhớ: đọc một checkpoint 55MB mỗi lần liệt kê là phí."""
+    cache = model_dir / "info.json"
+    if cache.exists():
+        try:
+            return json.loads(cache.read_text())
+        except ValueError:
+            pass
+    info = _checkpoint_info(pth)
+    cache.write_text(json.dumps(info))
+    models_vol.commit()
+    return info
+
+
 # ----------------------------------------------------------------------
 # 1. Thêm model từ URL
 # ----------------------------------------------------------------------
@@ -170,12 +212,20 @@ def add_model(payload: dict):
         return {"ok": False, "error": "Không tìm thấy file .pth trong link này"}
 
     models_vol.commit()
-    return {
+
+    result = {
         "ok": True,
         "name": name,
         "has_index": index is not None,
         "size_mb": round(pth.stat().st_size / 1e6, 1),
     }
+    try:
+        result.update(_info_for(dest, pth))
+    except Exception:
+        # File tải về không phải checkpoint RVC hợp lệ. Vẫn giữ lại — convert sẽ
+        # nói rõ hơn — nhưng đừng để việc thêm giọng chết ở đây.
+        pass
+    return result
 
 
 # ----------------------------------------------------------------------
@@ -194,13 +244,18 @@ def list_models():
             continue
         pth = next(d.glob("*.pth"), None)
         if pth:
-            out.append(
-                {
-                    "name": d.name,
-                    "has_index": next(d.glob("*.index"), None) is not None,
-                    "size_mb": round(pth.stat().st_size / 1e6, 1),
-                }
-            )
+            entry = {
+                "name": d.name,
+                "has_index": next(d.glob("*.index"), None) is not None,
+                "size_mb": round(pth.stat().st_size / 1e6, 1),
+            }
+            # Đọc được thì kèm theo, hỏng thì thôi: liệt kê giọng không được
+            # chết chỉ vì một checkpoint lạ.
+            try:
+                entry.update(_info_for(d, pth))
+            except Exception:
+                pass
+            out.append(entry)
     return {"models": out}
 
 
@@ -267,8 +322,12 @@ def convert(
     except Exception:
         return _json_error("Không đọc được file audio này", 400)
 
+    info = _info_for(model_dir, pth)
+
     rvc = RVCInference(device="cuda:0")
-    rvc.load_model(str(pth), index_path=str(index) if index else "")
+    # version PHẢI lấy từ checkpoint — xem _checkpoint_info(). Bỏ tham số này
+    # là nạp mọi model dưới dạng v2, và model v1 sẽ ra tiếng robot ở mọi pitch.
+    rvc.load_model(str(pth), version=info["version"], index_path=str(index) if index else "")
     # Tên tham số là f0up_key/f0method, KHÔNG phải f0_up_key/f0_method:
     # set_params() lọc theo whitelist rồi chỉ print warning cho tên lạ, nên
     # gõ sai là bị bỏ qua im lặng — pitch luôn 0 và f0 method luôn là
@@ -329,5 +388,13 @@ def convert(
     return Response(
         content=final.read_bytes(),
         media_type="audio/wav",
-        headers={**_CORS, "X-Rvc-Chunks": str(len(segments))},
+        headers={
+            **_CORS,
+            # Trình duyệt chỉ đọc được header nào được liệt kê ở đây; thiếu nó
+            # thì fetch() thấy response 200 mà không thấy một header nào.
+            "Access-Control-Expose-Headers": "X-Rvc-Chunks, X-Rvc-Version, X-Rvc-F0",
+            "X-Rvc-Chunks": str(len(segments)),
+            "X-Rvc-Version": info["version"],
+            "X-Rvc-F0": str(info["f0"]),
+        },
     )
