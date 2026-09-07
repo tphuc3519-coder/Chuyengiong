@@ -74,6 +74,32 @@ bấm **Đổi giọng**. Nghe ngay trên trang, tải về được.
 Đây là đường đi tắt để nghe thử, chưa phải bước 4. Nó nhận vocal đã tách và trả
 lại vocal đã đổi giọng — không tự tách nhạc nền, không tự ghép lại.
 
+### Đọc văn bản bằng giọng RVC
+
+Cùng ô đó có hai chế độ: **Từ file giọng** và **Từ văn bản**. Chế độ văn bản
+gọi chéo sang app `voice-convert` đã deploy — `KokoroSynthesizer` cho tiếng
+Nhật, `Synthesizer` (MMS) cho các thứ tiếng còn lại — rồi đưa kết quả qua RVC.
+
+Không dựng lại engine TTS trong image RVC. Image bên `modal_app` có một loạt
+thứ phải đúng mới chạy (`unidic` đè `unidic-lite` làm chết container trước khi
+đọc được chữ nào, `open_jtalk` compile từ sdist, `transformers` phải ghim), và
+`prosody.py` là cả một kế hoạch đọc mà chép lại là chép sai. Ghép lỏng: chỉ tra
+tên lúc chạy, không import — `voice-convert` chưa deploy thì hỏng lúc gọi với
+một câu đọc được, không làm chết build của app RVC.
+
+Cùng một endpoint `convert` chứ không thêm endpoint thứ tư, vì phần sau giống
+hệt nhau và vì mỗi endpoint mới là một URL nữa phải cấu hình trên Vercel. Đây
+cũng là cách `modal_app/api.py` làm với `/submit`: `text` là một Form field bên
+cạnh các UploadFile.
+
+**Đổi giọng không sửa được cách đọc.** RVC thay âm sắc và giữ nguyên nhịp,
+ngữ điệu, cách nhả chữ của cái đọc — nên máy đọc đều thì ra vẫn đều, chỉ là đều
+bằng giọng khác. `modal_app/tts.py` đã ghi lại đúng bài học này khi họ bỏ
+OpenJTalk: *"an HTS voice arrives at the converter already sounding like a
+machine and comes out of it sounding like a machine that has changed its mind
+about who it is."* Muốn hay hơn thì phải thay engine đọc, không phải thay model
+RVC.
+
 ### Vì sao `/convert` không đi qua route của Vercel
 
 Hai endpoint kia (`models`, `add-model`) đi qua `app/api/rvc/[action]/route.ts`

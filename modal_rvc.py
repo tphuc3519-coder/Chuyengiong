@@ -259,6 +259,28 @@ def list_models():
     return {"models": out}
 
 
+def _speak(text: str, language: str) -> bytes:
+    """Đọc văn bản bằng đúng engine mà app chính đã deploy sẵn.
+
+    Gọi chéo sang app `voice-convert` chứ không dựng lại engine trong image
+    này. Image TTS bên đó có một loạt thứ phải đúng mới chạy — `unidic` đè
+    `unidic-lite` làm chết container trước khi đọc được chữ nào, `open_jtalk`
+    compile từ sdist, `transformers` phải ghim — và `prosody.py` là cả một kế
+    hoạch đọc (ngắt theo dấu câu, hạ dần cao độ, câu hỏi lên giọng) mà chép
+    lại là chép sai.
+
+    Ghép lỏng, cố ý: chỉ tra tên lúc chạy, không import. `voice-convert` chưa
+    deploy thì hỏng ở đây với một câu đọc được, chứ không làm chết build của
+    app này.
+    """
+    # Quy tắc chọn engine là của modal_app/tts.py (`spec_for`): chỉ tiếng Nhật
+    # đọc qua Kokoro, còn lại qua MMS. Nhân đúng một dòng ở đây thay vì kéo cả
+    # modal_app vào image này — nếu bên đó đổi quy tắc thì đây phải đổi theo.
+    cls_name = "KokoroSynthesizer" if language == "jpn" else "Synthesizer"
+    synthesizer = modal.Cls.from_name("voice-convert", cls_name)
+    return synthesizer(language=language).synthesize.remote(text=text)
+
+
 # ----------------------------------------------------------------------
 # 3. Đổi giọng
 # ----------------------------------------------------------------------
@@ -273,8 +295,10 @@ def list_models():
 )
 @modal.fastapi_endpoint(method="POST")
 def convert(
-    audio: Annotated[UploadFile, File()],
     model: Annotated[str, Form()],
+    audio: Annotated[UploadFile | None, File()] = None,
+    text: Annotated[str, Form()] = "",
+    language: Annotated[str, Form()] = "vie",
     pitch: Annotated[int, Form()] = 0,
     index_rate: Annotated[float, Form()] = 0.6,
     protect: Annotated[float, Form()] = 0.33,
@@ -313,8 +337,21 @@ def convert(
         shutil.rmtree(work)
     work.mkdir(parents=True)
 
+    # Nguồn giọng: một file đã có, hoặc một đoạn văn bản được đọc ra ngay tại
+    # đây. Cùng một endpoint vì phần sau giống hệt nhau — và vì thêm endpoint
+    # thứ tư nghĩa là thêm một URL nữa phải cấu hình trên Vercel.
+    if text.strip():
+        try:
+            source = _speak(text.strip(), language)
+        except Exception as err:
+            return _json_error(f"Không đọc được văn bản: {err}", 502)
+    elif audio is not None:
+        source = audio.file.read()
+    else:
+        return _json_error("Cần một file giọng hoặc một đoạn văn bản", 400)
+
     src = work / "in"
-    src.write_bytes(audio.file.read())
+    src.write_bytes(source)
 
     # Chuẩn hoá về mono 44.1k trước khi đưa vào RVC
     try:
