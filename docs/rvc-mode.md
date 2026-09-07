@@ -108,6 +108,10 @@ chỉnh đúng thì tự nhiên ngay.
   rồi lấy link thật.
 - **Lần gọi đầu chậm** — cold start Modal cộng thời gian nạp model. Đã đặt
   `scaledown_window=300` nên trong 5 phút sau đó sẽ nhanh.
+- **Tên tham số của `set_params()`** — là `f0up_key` và `f0method`, không có
+  gạch dưới ở giữa. Hàm này lọc theo whitelist rồi chỉ `print` cảnh báo cho tên
+  lạ, nên gõ thành `f0_up_key`/`f0_method` là bị bỏ qua im lặng: pitch luôn 0,
+  f0 method luôn là `harvest`. Giọng ra nghe như robot mà log thì sạch.
 - **Bài dài** — code đã tự cắt theo khoảng lặng khi vượt 90 giây. Nếu vocal
   gần như không có khoảng lặng, nó rơi về cắt theo độ dài cố định và chỗ nối
   có thể nghe thấy nhẹ.
@@ -118,6 +122,31 @@ chỉnh đúng thì tự nhiên ngay.
 - **Chưa có consent gate và watermark** — hai thứ này nằm ở `modal_app/`
   (Phase 6, Phase 7) và app RVC không đi qua chúng. Trước khi mở cho người khác
   dùng thì phải tính.
+
+## Vì sao image phải hạ pip xuống dưới 24.1
+
+Lần deploy đầu đỏ ở đây, và lỗi trông như link hỏng chứ không phải như thật:
+
+```
+ERROR: No matching distribution found for omegaconf==2.0.6
+```
+
+omegaconf 2.0.6 có trên PyPI. Vấn đề là metadata của nó khai
+`PyYAML (>=5.1.*)` — `>=` đi với `.*` không hợp chuẩn. pip 24.1 bắt đầu **bỏ qua
+hẳn** distribution có metadata như vậy thay vì chỉ cảnh báo, nên với pip của
+image (25.1.1) thì omegaconf 2.0.6 coi như không tồn tại. Đây là pin cứng của
+`rvc-python`, không đổi phiên bản được, nên hạ pip là đường còn lại.
+
+Chỗ này dễ tự lừa mình: chạy thử ở máy có pip 24.0 thì resolve xanh, vì 24.0
+đứng ngay dưới mốc đổi hành vi. Phải đúng pip ≥ 24.1 mới thấy.
+
+Kèm theo đó, `rvc-python` ghim `fairseq==0.12.2`, mà fairseq chỉ có wheel cho
+cp36/37/38. Trên Python 3.10 nó compile ba extension C++ từ source, nên image
+cần `build-essential` — `debian_slim` không có `g++`.
+
+Đã kiểm trên Python 3.10 thật: tái hiện đúng lỗi với pip 25.1.1, pip 24.0 thì
+resolve sạch cả cây (`numpy 1.23.5`, `omegaconf 2.0.6`, `hydra-core 1.0.7`,
+`faiss-cpu 1.7.3`, `fairseq 0.12.2`), và fairseq build ra đủ ba file `.so`.
 
 ## Chi phí
 

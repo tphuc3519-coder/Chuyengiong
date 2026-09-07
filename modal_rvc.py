@@ -31,20 +31,40 @@ MODELS_DIR = "/models"
 def _download_base_models():
     """Kéo hubert_base.pt + rmvpe.pt vào image lúc build.
     Thiếu hai file này RVC không chạy được."""
+    import rvc_python
     from rvc_python.infer import RVCInference
-    from rvc_python.modules.vc.modules import VC  # noqa: F401
 
+    # "cpu" đúng chính tả, không phải "cpu:0": Config bật/tắt fp16 bằng đúng
+    # phép so sánh `device != "cpu"`, nên "cpu:0" sẽ chạy half precision trên CPU.
     RVCInference(device="cpu")  # constructor tự tải base models
+
+    # download_rvc_models() nuốt lỗi HTTP: non-200 thì nó chỉ in một dòng rồi
+    # đi tiếp, nên build vẫn xanh với image thiếu weights và chết ở lần convert
+    # đầu tiên. Kiểm lại ở đây để hỏng thì hỏng ngay lúc build.
+    base = pathlib.Path(rvc_python.__file__).parent / "base_model"
+    for filename in ("hubert_base.pt", "rmvpe.pt"):
+        f = base / filename
+        if not f.exists() or f.stat().st_size < 1_000_000:
+            raise RuntimeError(f"Tải hụt base model {filename} — xem log ở trên")
 
 
 image = (
     modal.Image.debian_slim(python_version="3.10")
-    .apt_install("ffmpeg", "git")
+    # build-essential vì fairseq 0.12.2 (rvc-python ghim cứng) chỉ có wheel
+    # cho cp36/37/38 — trên 3.10 nó phải compile ba extension C++ từ source,
+    # mà debian_slim không có g++.
+    .apt_install("ffmpeg", "git", "build-essential")
     .pip_install(
         "torch==2.1.2",
         "torchaudio==2.1.2",
         index_url="https://download.pytorch.org/whl/cu121",
     )
+    # rvc-python ghim omegaconf==2.0.6, và metadata của bản đó khai
+    # "PyYAML (>=5.1.*)" — specifier không hợp chuẩn. pip >= 24.1 bỏ qua hẳn
+    # mọi distribution như vậy, nên báo "No matching distribution found for
+    # omegaconf==2.0.6" chứ không phải lỗi resolve. Hạ pip là cách duy nhất
+    # còn lại: phiên bản omegaconf là pin cứng của rvc-python, sửa không được.
+    .run_commands("python -m pip install 'pip<24.1'")
     .pip_install(
         "rvc-python==0.1.5",
         "pydub==0.25.1",
@@ -196,9 +216,13 @@ def convert(payload: dict):
 
     rvc = RVCInference(device="cuda:0")
     rvc.load_model(str(pth), index_path=str(index) if index else "")
+    # Tên tham số là f0up_key/f0method, KHÔNG phải f0_up_key/f0_method:
+    # set_params() lọc theo whitelist rồi chỉ print warning cho tên lạ, nên
+    # gõ sai là bị bỏ qua im lặng — pitch luôn 0 và f0 method luôn là
+    # "harvest" mặc định, đúng cái làm giọng ra nghe như robot.
     rvc.set_params(
-        f0_up_key=int(payload.get("pitch", 0)),
-        f0_method=payload.get("f0_method", "rmvpe"),
+        f0up_key=int(payload.get("pitch", 0)),
+        f0method=payload.get("f0_method", "rmvpe"),
         index_rate=float(payload.get("index_rate", 0.6)),
         protect=float(payload.get("protect", 0.33)),
         filter_radius=3,
