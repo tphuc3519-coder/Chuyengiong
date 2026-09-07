@@ -26,7 +26,7 @@ jobs:
       # Chỉ cần client Modal — image chứa torch/CUDA do Modal build phía nó,
       # không phải trên runner này.
       - name: Install Modal client
-        run: pip install modal
+        run: pip install modal fastapi
 
       # Lần đầu mất 10-15 phút vì phải build image có torch + CUDA.
       # Log cuối in ra 3 URL — chép vào env của Vercel, xem docs/rvc-mode.md §2.
