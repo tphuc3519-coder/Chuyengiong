@@ -505,6 +505,37 @@ def split_at_silence(
     return chunks
 
 
+def fit_length(audio: np.ndarray, samples: int) -> np.ndarray:
+    """`audio` made exactly `samples` long, by zero padding or by trimming.
+
+    This is the one thing that stops a converted vocal from creeping away from
+    the beat it has to be mixed under, and the creep is arithmetic rather than
+    bad luck. Seed-VC works in mel frames: `to_mel` runs with `center=False`
+    over audio pre-padded by `(n_fft - hop) / 2` each side, which comes to
+    exactly `floor(len / hop)` frames, and the vocoder gives back `hop` samples
+    per frame. So **every chunk comes back up to one hop short** — 511 samples,
+    11.6 ms at 44.1 kHz — and nothing about that is an error the model made.
+
+    Alone it is inaudible. Accumulated it is not: `crossfade_concat` joins on a
+    fixed overlap, so each short chunk pulls everything after it earlier by its
+    own shortfall, and a song cut into eight chunks ends up to 90 ms ahead of
+    the backing track by the last chorus. Padding each chunk back to the length
+    it was cut at keeps every join where the split put it.
+
+    Zeros rather than a held edge: the pad lands at the very end of a chunk,
+    inside the crossfade window where that side is already faded to nothing, so
+    silence there is what the join was going to sound like anyway.
+    """
+    audio = np.asarray(audio, dtype=np.float32)
+    if samples < 0:
+        raise AudioError(f"cannot fit audio to {samples} samples")
+    if len(audio) == samples:
+        return audio
+    if len(audio) > samples:
+        return audio[:samples]
+    return np.concatenate([audio, np.zeros(samples - len(audio), dtype=np.float32)])
+
+
 def crossfade_concat(
     chunks: list[np.ndarray], sample_rate: int, overlap_sec: float = CHUNK_OVERLAP_SEC
 ) -> np.ndarray:

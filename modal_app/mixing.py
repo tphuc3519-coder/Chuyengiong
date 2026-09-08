@@ -18,6 +18,12 @@ inserted **on the voice and nowhere else** — ahead of `amix` in `mix`, so a
 song's instrumental reaches the mix exactly as the separator produced it. Zero
 emits no filters at all, which is what keeps the old output reachable.
 
+Because that chain is on one side only, its **latency** is on one side only
+too, and a filter delay that lands on the voice alone is the singer arriving
+late. `chain_latency` measures it and `mix` takes it back off — see those two
+and `tests/test_alignment.py`, which holds the 25 ms this cost before anybody
+went looking for it.
+
 `mix` also takes an optional **bed profile** — a `styles.Mixdown` — and that is
 where a beat stops being "a second piece of audio playing at the same time" and
 starts being a backing track. Without one the graph is exactly what it always
@@ -37,6 +43,7 @@ stand-in.
 
 from __future__ import annotations
 
+import array
 import io
 import math
 import subprocess
@@ -158,6 +165,20 @@ def _sample_rate(wav: bytes) -> int:
             return src.getframerate()
     except (wave.Error, EOFError) as exc:  # truncated headers raise EOFError
         raise MixError(f"cannot read the vocal's sample rate: {exc}") from exc
+
+
+def _seconds(wav: bytes) -> float:
+    """How long a wav this app wrote is. 0.0 when it cannot be read.
+
+    For the log line in `mix` and nothing else, which is why it never raises:
+    a mix must not fail over a number that was only going to be printed.
+    """
+    try:
+        with wave.open(io.BytesIO(wav), "rb") as src:
+            rate = src.getframerate()
+            return src.getnframes() / float(rate) if rate else 0.0
+    except (wave.Error, EOFError):
+        return 0.0
 
 
 def _channels(wav: bytes) -> int:
@@ -287,6 +308,110 @@ def _loudness_db(wav: bytes) -> float | None:
                 return value if math.isfinite(value) and value > -70.0 else None
         return None
     return None
+
+
+# --- the vocal chain's own delay ------------------------------------------
+
+# What one measured latency costs to find out, cached for the life of the
+# container. Keyed by (chain, rate) because both change the answer: `afftdn`
+# sizes its window from the sample rate, so the same chain came back 343
+# samples late at 22.05 kHz and 1102 at 44.1 kHz.
+_LATENCY: dict[tuple[str, int], int] = {}
+
+# The probe. A burst of tone after a stretch of digital silence, so the onset
+# in the output is unambiguous: nothing causal can start before it, and the
+# distance between the two onsets is the delay.
+_PROBE_SEC = 0.4
+_PROBE_TONE_HZ = 1000.0
+_PROBE_BURST_SEC = 0.05
+# Where the burst starts inside the probe, and how loud a sample has to be to
+# count as the onset — a fraction of that file's own peak, so a chain with
+# gain in it is measured on its own terms.
+_PROBE_START = 0.5
+_PROBE_ONSET = 0.25
+
+
+def _probe_wav(rate: int) -> tuple[bytes, int]:
+    """`(wav bytes, onset sample)` for the latency probe at `rate`."""
+    total = int(_PROBE_SEC * rate)
+    onset = int(total * _PROBE_START)
+    burst = int(_PROBE_BURST_SEC * rate)
+    samples = array.array("h", bytes(2 * total))
+    for i in range(burst):
+        samples[onset + i] = int(24000 * math.sin(2 * math.pi * _PROBE_TONE_HZ * i / rate))
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(samples.tobytes())
+    return buf.getvalue(), onset
+
+
+def _onset(wav: bytes) -> int:
+    """The first sample in `wav` above `_PROBE_ONSET` of its own peak."""
+    with wave.open(io.BytesIO(wav), "rb") as src:
+        samples = array.array("h")
+        samples.frombytes(src.readframes(src.getnframes()))
+    peak = max((abs(v) for v in samples), default=0)
+    if peak <= 0:
+        return 0
+    floor = peak * _PROBE_ONSET
+    for i, value in enumerate(samples):
+        if abs(value) >= floor:
+            return i
+    return 0
+
+
+def chain_latency(chain: str, rate: int) -> int:
+    """How many samples `chain` delays what goes through it. Measured, not assumed.
+
+    **The vocal is the only side of a song mix that goes through a filter, so
+    every sample of latency in it is the singer landing behind the band.**
+    `afftdn` is where it comes from: an overlap-add FFT denoiser cannot answer
+    for a sample until it has the rest of that sample's window, and ffmpeg does
+    not compensate for it — measured with a click, the Phase 10 clarity chain
+    put the voice **25 ms behind** the untouched instrumental at 44.1 kHz, and
+    15.6 ms behind at 22.05 kHz. Nothing else in the chain contributes more
+    than a millisecond; the biquads are 1.6 ms and the de-esser is none.
+
+    Measured rather than tabulated because the number is not ours: it belongs
+    to whichever ffmpeg the container was built with, and `afftdn` grew a
+    `window_size` option between the build CI has and the next one. A table
+    would be right until the image is rebuilt and then silently wrong, which is
+    the worst of the two failure modes — a wrong compensation moves the voice
+    the other way.
+
+    One ffmpeg pass over 0.4 s of audio, cached per container. That is a few
+    milliseconds of CPU against a job that has already spent minutes of GPU.
+    0 for an empty chain, and 0 for anything this cannot measure: leaving the
+    voice where it was is the behaviour this function replaced.
+    """
+    if not chain:
+        return 0
+    key = (chain, rate)
+    if key in _LATENCY:
+        return _LATENCY[key]
+    probe, onset = _probe_wav(rate)
+    try:
+        filtered = _ffmpeg([probe], f"[0:a]{chain}anull[out]", ["-c:a", "pcm_s16le"], ".wav")
+        latency = max(0, _onset(filtered) - onset)
+    except (MixError, wave.Error, EOFError):
+        latency = 0
+    _LATENCY[key] = latency
+    return latency
+
+
+def advance(samples: int) -> str:
+    """The filter that pulls a stream `samples` earlier, or `""` for none.
+
+    `asetpts` is not optional next to `atrim`: `atrim` drops the samples but
+    keeps the timestamps they had, so without it `amix` puts the voice back
+    exactly where the trim just took it from.
+    """
+    if samples <= 0:
+        return ""
+    return f",atrim=start_sample={samples},asetpts=N/SR/TB"
 
 
 def bed_trim_db(profile: Mixdown, vocal_wav: bytes, bed_wav: bytes, vocal_gain_db: float) -> float:
@@ -540,7 +665,20 @@ def mix(
     # is a couple of seconds of CPU against a job that has already spent
     # minutes of GPU.
     trim = 0.0 if bed is None else bed_trim_db(bed, vocal_wav, instrumental_wav, gain)
-    voice = f"{enhance.chain(clarity, ',')}volume={gain:.2f}dB,{CENTRE}"
+    clarity_chain = enhance.chain(clarity, ",")
+    # …and the same for the delay that chain adds. The instrumental goes into
+    # `amix` unfiltered, so an uncompensated one is the singer arriving late on
+    # every job — see `chain_latency`.
+    late = chain_latency(clarity_chain, rate)
+    voice = f"{clarity_chain}volume={gain:.2f}dB,{CENTRE}{advance(late)}"
+    # The two durations a listener hears as "the voice does not sit on the
+    # beat", printed side by side so a real job answers the question instead of
+    # a pair of ears having to.
+    print(
+        f"[mix] voice {_seconds(vocal_wav):.2f}s over bed {_seconds(instrumental_wav):.2f}s "
+        f"at {rate} Hz, {enhance.describe(clarity)}, voice pulled {late / rate * 1000:.1f} ms "
+        "earlier to undo its own filter delay"
+    )
     if bed is None:
         graph = (
             f"[0:a]{voice}[v];"

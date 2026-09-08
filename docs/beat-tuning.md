@@ -159,6 +159,18 @@ Xếp theo mức đáng nghi:
    - `low_shelf_db` — giữ lại bao nhiêu tiếng trầm
 2. **Vạch nhịp trên nhạc thật.** Mới chỉ gặp năm kiểu phối tổng hợp. Nghe xem
    kick của beat có rơi đúng nhịp bài không.
+
+   Mục này vừa lên hạng. Có một báo cáo *"giọng hát sau beat gốc cỡ 0.5-1s"*,
+   và Phase 17 đã đo hết đường đi của mode `song`: chỗ lệch lớn nhất tìm được
+   ở đó là 25 ms (đã sửa), không phải nửa giây. **Nửa giây tới một giây là một
+   tới hai phách ở 120 BPM** — và chỗ duy nhất trong repo có thể sinh ra đúng
+   cỡ đó là `analysis.downbeat` đoán sai một phách, rồi `plan_fit` /
+   `lay_under` đặt cả nền nhạc lệch đi đúng một phách. Tức là mode
+   `beat`/`rebeat`, không phải `song`.
+
+   Chưa biết báo cáo đó là mode nào. Nếu là `beat`/`rebeat` thì việc phải làm
+   là đo `analysis.downbeat` trên đúng bài đó, chứ không phải chỉnh thêm con số
+   nào trong `mixing`.
 3. **Hốc giọng 2.2–2.8 kHz** — đúng chỗ cho tiếng Việt chưa, hay còn thấp.
 4. **Bed vào từ giây 0** — nghe tự nhiên hay cụt đầu ô nhịp.
 5. **Cắt 30 Hz trên beat upload** — có ai thấy mất lực không.
