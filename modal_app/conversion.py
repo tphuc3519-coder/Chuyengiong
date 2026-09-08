@@ -11,7 +11,11 @@ the plan requires and upstream does not have:
   bug that makes the voice jump between verses;
 * the source is cut at silence into overlapping chunks and rejoined with an
   equal-power crossfade, which is what keeps an 8 minute song from running the
-  A10G out of memory.
+  A10G out of memory. **Each chunk is padded back to the length it was cut
+  at** before the join: the model returns whole mel frames, so it hands back up
+  to one hop less than it was given, and a crossfade on a fixed overlap turns
+  that shortfall into a vocal that creeps ahead of the backing track. See
+  `audio_utils.fit_length`.
 
 Three things were added to it after the fact, all for the same complaint —
 that the output sounded converted rather than sung — and all named here because
@@ -63,6 +67,7 @@ from .audio_utils import (
     crossfade_concat,
     decode_audio,
     encode_wav,
+    fit_length,
     split_at_silence,
 )
 
@@ -447,16 +452,37 @@ class VoiceConverter:
         started = time.time()
         encoded_reference = self._encode_reference(reference, extras)
         converted = []
+        raw_samples = 0
         for i, chunk in enumerate(chunks, start=1):
             mark = time.time()
-            converted.append(self._convert_chunk(chunk, encoded_reference, shift, steps, cfg_rate))
+            piece = self._convert_chunk(chunk, encoded_reference, shift, steps, cfg_rate)
+            raw_samples += len(piece)
+            # Back to the length it was cut at, before it is joined. The model
+            # works in whole mel frames and returns `floor(len / hop) * hop`
+            # samples, so every chunk is up to one hop short — and
+            # `crossfade_concat` joins on a fixed overlap, so an unpadded
+            # shortfall moves everything after this chunk earlier. See
+            # `audio_utils.fit_length`.
+            converted.append(fit_length(piece, len(chunk)))
             print(
                 f"[VoiceConverter] chunk {i}/{len(chunks)} "
                 f"({len(chunk) / self.sr:.1f}s) in {time.time() - mark:.1f}s"
             )
 
         output = crossfade_concat(converted, self.sr, CHUNK_OVERLAP_SEC)
-        print(f"[VoiceConverter] done in {time.time() - started:.1f}s")
+        # The two numbers a misaligned vocal shows up in, printed whether they
+        # agree or not. `drift` is what the model gave back before the padding
+        # above; it should be a few tens of milliseconds of *shortfall* and
+        # nothing else. Anything larger means the timeline moved somewhere this
+        # module cannot see, and the mix will be out by exactly that much.
+        joined = len(output)
+        output = fit_length(output, len(source))
+        drift_ms = (raw_samples - sum(len(c) for c in chunks)) / self.sr * 1000.0
+        print(
+            f"[VoiceConverter] done in {time.time() - started:.1f}s: "
+            f"{len(source) / self.sr:.2f}s in, {joined / self.sr:.2f}s joined, "
+            f"{len(output) / self.sr:.2f}s out (model drift {drift_ms:+.0f} ms)"
+        )
         return encode_wav(output, self.sr)
 
 

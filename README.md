@@ -3116,3 +3116,256 @@ biên bisect ra được, kèm ghi chú rằng muốn nâng nó thì phải nân
       ghim vì chưa có bằng chứng — ghim đoán trước là cách khác để hỏng
 
 **745 passed, 3 skipped.**
+
+## Phase 17 — Giọng có nằm đúng chỗ trên trục thời gian không
+
+Báo cáo bằng tai: *"giọng hát sau beat gốc cỡ 0.5-1s"*. Mục này đọc nó là mode
+`song` — tách nhạc nền, đổi giọng, ghép lại — nên câu hỏi rất hẹp: giữa lúc máy
+tách stem và lúc `amix`, có gì làm **một trong hai nhánh** dịch đi không?
+
+*(Đoán sai mode. Hỏi lại thì là **Đổi beat + giọng**, và 17.1 tìm ra chỗ 0.5-1
+giây thật sự nằm. Mục này giữ nguyên vì hai lỗi nó tìm ra là thật và đã sửa —
+chỉ có kết luận "chưa giải thích được" là do hỏi muộn.)*
+
+Hai nhánh đó không đối xứng, và đó là toàn bộ chỗ để một lỗi lệch nhịp trốn:
+
+```
+nhạc nền  ──────────────────────────────────► amix
+giọng     ──► Seed-VC ──► enhance (clarity) ──► amix
+```
+
+Nhạc nền đi thẳng. Giọng đi qua hai thứ. Nên mọi mili-giây trễ ở nhánh dưới là
+một mili-giây ca sĩ hát sau ban nhạc, và trước Phase này **không có chỗ nào
+trong pipeline nói ra con số đó** — không log, không test, không header.
+
+### Đo được hai chỗ. Cả hai đều thật, và cả hai đều nhỏ hơn báo cáo
+
+**1. `afftdn` trễ 25 ms, và ffmpeg không bù.**
+
+`enhance.chain` mở đầu bằng `afftdn`, một bộ khử ồn FFT chồng-cộng: nó không
+trả lời được cho một mẫu cho tới khi có đủ cả cửa sổ chứa mẫu đó. ffmpeg không
+tự bù độ trễ ấy. Đo bằng một tiếng tách (`ffmpeg` 6.1.1):
+
+| sample rate | trễ |
+|---|---|
+| 44.1 kHz | **1102 mẫu — 25.0 ms** |
+| 22.05 kHz | 343 mẫu — 15.6 ms |
+
+Phần còn lại của dây lọc gần như không góp gì: `highpass` và `equalizer` mỗi
+cái 1.6 ms, `treble` và `deesser` không đo được. Và vì `clarity=0` phát ra
+đúng không filter nào, lỗi này **chỉ xuất hiện khi kéo thanh "giọng trong hơn"
+lên** — kéo lên thì ca sĩ lùi lại, đúng cái hình dạng khó đoán nhất.
+
+Cách sửa: `mixing.chain_latency()` **đo** độ trễ của dây lọc bằng một lượt
+ffmpeg trên 0.4 giây tiếng thử (im lặng rồi một tiếng bíp), lấy hiệu hai chỗ
+bắt đầu, nhớ lại theo `(dây lọc, sample rate)`. Rồi `mix` kéo nhánh giọng lên
+sớm đúng bằng đó (`atrim` + `asetpts`).
+
+**Đo chứ không tra bảng, và lý do đáng ghi**: con số này không phải của chúng
+ta, nó là của cái ffmpeg mà image được build ra. `afftdn` có thêm tuỳ chọn
+`window_size` ở bản mới hơn bản CI đang cài — một cái bảng cứng sẽ đúng cho tới
+lần rebuild image rồi sai im lặng, mà bù sai thì đẩy giọng lệch về phía kia.
+Một lượt ffmpeg trên 0.4 giây là vài mili-giây CPU, cạnh một job đã tiêu hàng
+phút GPU.
+
+**2. Seed-VC trả về mỗi khúc hụt tới một hop, và chỗ hụt đó cộng dồn.**
+
+`to_mel` chạy `center=False` trên audio đã pad `(n_fft - hop) / 2` mỗi đầu, ra
+đúng `floor(len / hop)` khung, và vocoder trả `hop` mẫu mỗi khung. Nghĩa là mỗi
+khúc về **hụt tới 511 mẫu (11.6 ms ở 44.1 kHz)** — không phải lỗi của model,
+là số học.
+
+Một mình thì không nghe thấy. Nhưng `crossfade_concat` nối theo một độ chồng
+**cố định** 0.2 s, nên chỗ hụt của khúc thứ *k* kéo mọi thứ sau nó lên sớm.
+Đo trên tín hiệu giả có đúng quãng nghỉ để `split_at_silence` cắt thật:
+
+| bài | số khúc | ngắn đi |
+|---|---|---|
+| 1.5 phút | 3 | 16 ms |
+| 3 phút | 7 | 50 ms |
+| 5 phút | 11 | 71 ms |
+
+Lệch *sớm* dần, ngược chiều với 25 ms ở trên — hai lỗi trừ nhau một phần, đó là
+lý do không cái nào lộ ra rõ ràng.
+
+Cách sửa: `audio_utils.fit_length()`, và `convert()` pad mỗi khúc trở lại đúng
+độ dài nó bị cắt ra **trước khi** nối, rồi ép cả bài về đúng độ dài nguồn. Pad
+bằng số 0 chứ không giữ mẫu cuối: chỗ pad nằm ở cuối khúc, trong vùng crossfade
+mà phía đó đã fade về gần 0 rồi.
+
+### 0.5-1 giây thì vẫn chưa giải thích được
+
+Đây là chỗ phải nói thẳng thay vì nói cho tròn. 25 ms cộng 50-71 ms trôi dần
+là **khoảng một phần mười** của cái đã báo, và hai cái còn ngược chiều nhau. Đọc hết đường đi của mode `song` thì
+không có chỗ nào khác dịch được nửa giây:
+
+- `_convert_chunk` giữ đúng số khung (đã đối chiếu từng dòng với `inference.py`
+  của seed-vc ở commit đã ghim);
+- mel frame *k* có tâm ở mẫu `k*hop + hop/2` của nguồn, đúng bằng tâm khối mẫu
+  mà vocoder sinh ra cho nó — không có dịch pha nào ở đây;
+- `amix` nhận hai file cùng bắt đầu từ 0; `loudnorm` và bộ mã hoá mp3 nằm **sau**
+  `amix` nên dịch cả hai như nhau.
+
+Nửa giây tới một giây là **một tới hai phách ở 120 BPM**, và trong repo này chỗ
+duy nhất một khoảng đúng cỡ đó có thể sinh ra là chỗ đặt vạch nhịp của
+`beats.plan_fit` / `lay_under` — tức là mode `beat` / `rebeat`, nơi
+`analysis.downbeat` đoán sai một phách thì cả nền nhạc dịch đi một phách. Mode
+`song` không đi qua đường đó.
+
+Nên phần này để mở, có chủ ý, và bước tiếp theo là một phép đo chứ không phải
+một lần đoán nữa.
+
+### Giờ pipeline tự nói ra con số
+
+Không phải để đẹp log — để lần báo cáo sau có số thay vì có tai:
+
+```
+[VoiceConverter] done in 143.2s: 214.51s in, 214.42s joined, 214.51s out (model drift -93 ms)
+[mix] voice 214.51s over bed 214.50s at 44100 Hz, clarity 0.50: …, voice pulled 25.0 ms earlier …
+```
+
+- `model drift` là chỗ hụt **thô** mà model trả về, trước khi pad. Vài chục
+  mili-giây hụt là đúng như mô tả ở trên; lớn hơn thế nghĩa là trục thời gian
+  bị dịch ở chỗ module này không nhìn thấy, và bản mix sẽ lệch đúng bằng đó.
+- `voice … over bed …` là hai độ dài mà một người nghe sẽ mô tả thành "giọng
+  không khớp beat". Chênh nhau nhiều là hỏng, và giờ nó nằm trong log Modal.
+
+Đây đúng là thứ `X-Rvc-In-Ms` / `X-Rvc-Out-Ms` đã làm cho nhánh RVC ở lần
+trước, vì cùng một lý do: *kiểm được bằng mắt thay vì phải nghe ra*.
+
+### Bài học thành test
+
+`tests/test_alignment.py`, và nó giữ đúng hai thứ đã đo:
+
+- một tiếng bíp trong giọng ở 1.0 s và một tiếng bíp trong nhạc nền ở 2.5 s,
+  chạy qua `mixing.mix` thật, ra mp3 thật, rồi đo lại khoảng cách giữa chúng.
+  Sai số cho phép 10 ms, tức là chặt hơn cái lỗi 25 ms mà nó tồn tại vì nó. Bỏ
+  phần bù ra thì test đỏ ở `clarity` 0.5 và 1.0 và **xanh ở 0.0** — đúng hình
+  dạng của lỗi;
+- và phần số học không cần GPU: cắt một bài ba phút bằng `split_at_silence`,
+  cắt cụt mỗi khúc về bội số của hop đúng như model làm, rồi nối. Không pad thì
+  mất từng ấy mẫu (bài ba phút: 50 ms); pad rồi thì độ dài ra **bằng đúng** độ
+  dài vào, không hụt một mẫu.
+
+**761 passed, 3 skipped.**
+
+### Còn phải verify
+
+- [ ] **Chạy một job `song` thật và đọc hai dòng log mới.** Nếu `model drift`
+      chỉ vài chục ms và hai độ dài ở `[mix]` khớp nhau, thì 0.5-1 giây không
+      nằm trong pipeline và câu hỏi tiếp theo là mode nào thật sự đang được dùng
+- [ ] Nghe lại cùng một bài trước/sau: 25 ms là ở ngưỡng "giọng hơi lùi" chứ
+      không phải ở ngưỡng nghe ra ngay, nên đừng kỳ vọng nó giải quyết báo cáo
+- [ ] Nếu báo cáo thật ra là mode `beat`/`rebeat`: chỗ phải đo là
+      `analysis.downbeat` trên bài đó, không phải mấy con số trong `mixing`
+
+
+## 17.1 — Vạch nhịp đấu với phách: chỗ nửa giây thật sự nằm
+
+Phase 17 đo hết mode `song` và tìm được 25 ms. Rồi hỏi một câu lẽ ra phải hỏi
+trước: **mode nào?** Trả lời: **Đổi beat + giọng** (`beat`), tức là nền nhạc bị
+thay hẳn và đặt lại theo vạch nhịp app đo được. Đó là một đường đi khác hẳn, và
+0.5-1 giây nằm ở đó.
+
+### Một dòng đọc hai nghĩa
+
+`analysis.Track.bar_start_sec` trả lời: *"vạch nhịp, hoặc phách đầu nếu chỉ
+biết đến thế"*. Với **một** bản nhạc đứng một mình thì đó là câu trả lời đúng,
+và docstring của nó đã lập luận đúng như vậy.
+
+`beats.plan_fit` đọc nó ở **cả hai bên**:
+
+```python
+loop_start = source.bar_start_sec   # cắt loop của beat từ đây
+align      = target.bar_start_sec   # đặt loop vào bài ở đây
+```
+
+Khi chỉ một bên dò ra vạch nhịp, hai dòng này **so một vạch nhịp với một
+phách** — hai thứ khác nhau. Khoảng cách giữa chúng là từ 0 tới ba phách, và nó
+đứng yên ở đó suốt cả bài.
+
+### Đo, không đoán
+
+Dựng hai bản trống tổng hợp **dùng chung một trục thời gian chính xác** (cùng
+BPM, cùng offset), khác nhau ở âm sắc và ở kiểu gõ — đúng quan hệ giữa bài gốc
+và bed mà máy sinh ra từ nó. Rồi chạy `analyse` trên cả hai và hỏi `plan_fit`
+nó định dịch bed đi bao nhiêu. Câu trả lời đúng luôn là **0**.
+
+| BPM | phách | lệch, luật cũ | lệch, luật mới |
+|---|---|---|---|
+| 72 | 833 ms | **−1663 ms** (2 phách) | ≈ 0 |
+| 84 | 714 ms | −1372 ms | ≤ 1 phách |
+| 96 | 625 ms | −1253 ms (2 phách) | ≈ 0 |
+| 108 | 556 ms | **−1667 ms** (3 phách) | ≈ 0 |
+| 120 | 500 ms | −1513 ms (3 phách) | ≈ 0 |
+
+Xấu nhất trong cả sweep: **1667 ms** với luật cũ, **656 ms** với luật mới. Và
+nhìn cột "phách" thì thấy ngay chuyện gì đang xảy ra: gần như mọi lần lệch đều
+là **một số nguyên phách**. Nhịp đập của bed vẫn nằm trên lưới, nhưng tiếng
+kick rơi vào phách 3 thay vì phách 1 — nghe ra thì đúng là "giọng đi sau beat
+nửa giây tới một giây", vì cái người nghe so là câu hát với vạch nhịp.
+
+Mọi ca trong bảng đều là ca **một bên có vạch nhịp, một bên không**. Khi cả hai
+cùng có hoặc cùng không, lệch còn vài chục mili-giây.
+
+### Luật mới: vạch nhịp đấu vạch nhịp, hoặc phách đấu phách
+
+```python
+aligned_to_bars = source.has_downbeat and target.has_downbeat
+loop_start = source.bar_start_sec if aligned_to_bars else source.beat_offset_sec
+align      = target.bar_start_sec if aligned_to_bars else target.beat_offset_sec
+```
+
+Một vạch nhịp chỉ được dùng khi **cả hai** bên có. Không thì cả hai cùng lùi về
+phách đầu, hai lưới khớp nhau phách-đối-phách, và cái còn lại chỉ là loop bắt
+đầu ở phách thứ mấy trong ô nhịp — sai về mặt âm nhạc, chứ không phải một giây
+trễ. Đó đúng là cái đánh đổi mà docstring của `bar_start_sec` đã lập luận cho,
+chỉ là trước giờ nó chưa được áp dụng cho **một cặp**.
+
+Đây không phải chỉnh một hằng số cho hợp tai. Luật cũ so hai đại lượng khác
+đơn vị nhau; luật mới thì không.
+
+### Còn lại một phách, và biết vì sao
+
+Sau khi sửa, sai số xấu nhất còn ~1 phách (656 ms ở 84 BPM), và đó là lúc một
+trong hai bên khoá lưới phách vào nhịp lệch. Nhịp đập vẫn đúng chỗ — cái xoay
+là *pha của ô nhịp*.
+
+Đường ra cho chuyện đó **không phải** đo kỹ hơn, mà là thôi đo: với
+`beat_source="derive"`, bed không phải nhạc của người lạ, nó do ACE-Step viết
+đè lên chính bài này (`audio2audio_enable=True`), nên trục thời gian của nó đã
+là trục của bài. Pha ô nhịp của nó cũng đã biết trước — nhánh `original` dùng
+thẳng nhạc nền của bài, nhánh `sketch` thì `sketch.render` **cố ý** đặt ô nhịp
+một ở giây 0 (docstring của nó nói thẳng điều đó). Biết trước bao giờ cũng hơn
+đo lại.
+
+Chưa làm, có chủ ý: nó chỉ đúng nếu ACE-Step giữ nguyên trục thời gian của init
+ở `init_strength` 0.35, và đó là câu hỏi phải nghe mới trả lời được. Một lượt
+deploy hiện tại đã đưa 1.67 s xuống ≤ 1 phách; câu hỏi tiếp theo nên hỏi sau
+khi nghe cái đó.
+
+### Bài học thành test
+
+`tests/test_beats.py`:
+
+- `test_one_side_with_a_bar_line_is_not_half_an_alignment` — beat có vạch nhịp
+  ở 0.6 s, bài không có. Không được phép đem 0.6 đặt lên *phách* 0.4 của bài;
+- `test_the_song_alone_having_a_bar_line_is_the_same_trade` — chiều ngược lại;
+- `test_two_bar_lines_still_beat_two_beats` — và fallback vẫn chỉ là fallback:
+  hai bên cùng có vạch nhịp thì dùng vạch nhịp, đúng cái mà bộ dò downbeat được
+  viết ra để làm.
+
+**764 passed, 3 skipped.**
+
+### Còn phải verify
+
+- [ ] **Chạy lại đúng bài đã báo lỗi, mode Đổi beat + giọng.** Dòng `[beat]`
+      trong log Modal in cả kế hoạch: `+N semitone(s), tempo xR, loop a-b s
+      onto c s (lý do…)`. Nếu lý do có câu *"both lined up on the beat
+      instead"* thì job này vừa đi qua đúng nhánh mà 17.1 sửa
+- [ ] Nếu vẫn lệch: so `c` (align) với chỗ vạch nhịp thật của bài. Lệch đúng
+      một phách nghĩa là phần "còn lại một phách" ở trên, và đường ra là
+      `derive` thì đừng đo lại bed nữa
+- [ ] Nếu lệch **tăng dần** trong bài thì không phải chuyện vạch nhịp mà là
+      `tempo x` khác 1.000 — sweep đo được tới +328 ms trên 3 phút, và
+      `analysis._fit_grid` đã viết sẵn rằng 0.3% là nửa giây

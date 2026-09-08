@@ -159,6 +159,27 @@ Xếp theo mức đáng nghi:
    - `low_shelf_db` — giữ lại bao nhiêu tiếng trầm
 2. **Vạch nhịp trên nhạc thật.** Mới chỉ gặp năm kiểu phối tổng hợp. Nghe xem
    kick của beat có rơi đúng nhịp bài không.
+
+   Mục này vừa lên hạng, và đã tìm ra một nửa câu trả lời. Báo cáo *"giọng hát
+   sau beat gốc cỡ 0.5-1s"* là ở mode **Đổi beat + giọng**, và 17.1 đo được
+   nguyên nhân: `plan_fit` đọc `bar_start_sec` ở cả hai bên, mà dòng đó trả về
+   *vạch nhịp hoặc phách* tuỳ bên nào dò được — nên khi chỉ một bên có vạch
+   nhịp, nó so vạch nhịp với phách. Đo trên trống tổng hợp dùng chung một trục
+   thời gian: lệch tới **1667 ms**, gần như luôn là một số nguyên phách.
+
+   Đã sửa: vạch nhịp chỉ dùng khi **cả hai** bên có, không thì cả hai lùi về
+   phách đầu. Sweep còn xấu nhất 656 ms (~1 phách).
+
+   **Việc còn lại là nghe.** Chạy lại đúng bài đó và đọc dòng `[beat]` trong
+   log — nó in cả kế hoạch (`tempo x…`, `loop … onto …s`, kèm lý do). Ba khả
+   năng, ba hướng khác nhau:
+
+   - lý do có *"both lined up on the beat instead"* và giờ nghe đúng → xong;
+   - còn lệch đúng một phách → thôi đo lại bed: với `beat_source="derive"` bed
+     do ACE-Step viết đè lên chính bài này nên trục thời gian đã biết trước
+     (xem 17.1, mục "Còn lại một phách");
+   - lệch **tăng dần** trong bài → không phải vạch nhịp mà là `tempo x` khác
+     1.000.
 3. **Hốc giọng 2.2–2.8 kHz** — đúng chỗ cho tiếng Việt chưa, hay còn thấp.
 4. **Bed vào từ giây 0** — nghe tự nhiên hay cụt đầu ô nhịp.
 5. **Cắt 30 Hz trên beat upload** — có ai thấy mất lực không.

@@ -381,20 +381,25 @@ def bars(bpm: float, seconds: float, offset: float = 0.0, tone: float = 55.0) ->
     return audio
 
 
+def with_bar(base, at: float):
+    """`base` with a bar line found at `at`, well enough to be acted on."""
+    return an.Track(**{**base.__dict__, "downbeat_sec": at, "downbeat_margin": 0.4})
+
+
 def test_the_loop_is_cut_from_the_bar_line_not_from_the_first_beat():
     """The whole point of measuring a downbeat. Cutting from beat three of a
     bar and then looping puts the beat's bar one on the song's beat three, and
     it stays there for the length of the song."""
-    source = track(bpm=120, offset=0.1, duration=20.0)
-    source = an.Track(**{**source.__dict__, "downbeat_sec": 0.6, "downbeat_margin": 0.4})
-    plan = beats.plan_fit(source, track(bpm=120))
+    source = with_bar(track(bpm=120, offset=0.1, duration=20.0), 0.6)
+    plan = beats.plan_fit(source, with_bar(track(bpm=120), 0.35))
     assert plan.loop_start_sec == pytest.approx(0.6)
 
 
 def test_the_beat_is_placed_on_the_songs_bar_line():
-    target = track(bpm=120, offset=0.2)
-    target = an.Track(**{**target.__dict__, "downbeat_sec": 1.2, "downbeat_margin": 0.4})
-    plan = beats.plan_fit(track(bpm=120), target)
+    plan = beats.plan_fit(
+        with_bar(track(bpm=120, offset=0.1), 0.35),
+        with_bar(track(bpm=120, offset=0.2), 1.2),
+    )
     assert plan.align_sec == pytest.approx(1.2)
 
 
@@ -405,6 +410,46 @@ def test_without_a_bar_line_it_falls_back_to_the_beat_and_says_so():
     assert plan.loop_start_sec == pytest.approx(0.1)
     assert plan.align_sec == pytest.approx(0.4)
     assert any("bar line" in reason for reason in plan.reasons)
+
+
+def test_one_side_with_a_bar_line_is_not_half_an_alignment():
+    """The 0.5-1 giây bug, as arithmetic.
+
+    `Track.bar_start_sec` answers "a bar line, or a beat if that is all I
+    know", which is right for one track alone and wrong for a pair: reading it
+    on both sides can line **a bar line up against a beat**, and the distance
+    between those two is anything up to three beats — 1.5 s at 120 BPM, sitting
+    there for the whole song. Measured on synthetic drum tracks that share a
+    timeline exactly, the mismatch moved the bed by up to 1.67 s.
+
+    So a bar line is only used when both sides have one. Here the beat has one
+    at 0.6 s and the song has none, and what must not happen is 0.6 being
+    aligned onto the song's *beat* at 0.4.
+    """
+    source = with_bar(track(bpm=120, offset=0.1, duration=20.0), 0.6)
+    plan = beats.plan_fit(source, track(bpm=120, offset=0.4))
+    assert plan.loop_start_sec == pytest.approx(0.1)
+    assert plan.align_sec == pytest.approx(0.4)
+    assert any("bar line" in reason for reason in plan.reasons)
+
+
+def test_the_song_alone_having_a_bar_line_is_the_same_trade():
+    source = track(bpm=120, offset=0.1, duration=20.0)
+    plan = beats.plan_fit(source, with_bar(track(bpm=120, offset=0.4), 1.4))
+    assert plan.loop_start_sec == pytest.approx(0.1)
+    assert plan.align_sec == pytest.approx(0.4)
+
+
+def test_two_bar_lines_still_beat_two_beats():
+    """The fallback is a fallback. When both sides found a bar line, use them —
+    that is the case the downbeat detector was written for."""
+    plan = beats.plan_fit(
+        with_bar(track(bpm=120, offset=0.1, duration=20.0), 0.6),
+        with_bar(track(bpm=120, offset=0.4), 1.4),
+    )
+    assert plan.loop_start_sec == pytest.approx(0.6)
+    assert plan.align_sec == pytest.approx(1.4)
+    assert not any("bar line" in reason for reason in plan.reasons)
 
 
 def test_the_plan_prints_where_the_beat_is_going():
