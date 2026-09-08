@@ -209,17 +209,32 @@ def plan_fit(source: Track, target: Track) -> Fit:
     if note:
         reasons.append(note)
 
-    # Where each side's bar begins. `Track.bar_start_sec` is the single place
-    # that decides whether the downbeat estimate was good enough to use, so
-    # both of these are either a bar line or an honest fallback to a beat — and
-    # the reasons below say which, because "the beat is in time but sits a beat
-    # into the bar" is exactly the complaint this answers.
-    loop_start = source.bar_start_sec
-    align = target.bar_start_sec
-    if not source.has_downbeat:
-        reasons.append("no clear bar line in the beat, cut from its first beat")
-    if not target.has_downbeat:
-        reasons.append("no clear bar line in the song, beat placed on its first beat")
+    # Where each side's bar begins — **and the two sides have to be answering
+    # the same question.**
+    #
+    # `Track.bar_start_sec` gives a bar line when the downbeat estimate was
+    # good enough and the first beat when it was not, which is the right answer
+    # for one track on its own. Read independently on both sides it is not:
+    # when only one of them found a bar line, this aligns *a bar line against a
+    # beat*, and the distance between those is anything from nothing to three
+    # beats — 1.7 s at 108 BPM. Measured on synthetic drum tracks that share a
+    # timeline exactly, that mismatch moved the bed by up to **1.67 s**, which
+    # is the whole of "the vocal is half a second behind the beat" and none of
+    # it is the model's doing.
+    #
+    # So a bar line is only used when **both** sides have one. Otherwise both
+    # fall back to the first beat, which lines the two grids up beat for beat
+    # and leaves only the question of which beat of the bar the loop starts on
+    # — a musical wrongness rather than a second of lag, and the trade
+    # `Track.bar_start_sec`'s own docstring already argues for.
+    aligned_to_bars = source.has_downbeat and target.has_downbeat
+    loop_start = source.bar_start_sec if aligned_to_bars else source.beat_offset_sec
+    align = target.bar_start_sec if aligned_to_bars else target.beat_offset_sec
+    if not aligned_to_bars:
+        missing = "the beat" if not source.has_downbeat else "the song"
+        if not source.has_downbeat and not target.has_downbeat:
+            missing = "either side"
+        reasons.append(f"no clear bar line in {missing}, both lined up on the beat instead")
 
     # The loop: from that bar line to the last complete bar before the end.
     period = 60.0 / source.bpm

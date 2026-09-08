@@ -3119,9 +3119,13 @@ biên bisect ra được, kèm ghi chú rằng muốn nâng nó thì phải nân
 
 ## Phase 17 — Giọng có nằm đúng chỗ trên trục thời gian không
 
-Báo cáo bằng tai: *"giọng hát sau beat gốc cỡ 0.5-1s"*. Đây là mode `song` —
-tách nhạc nền, đổi giọng, ghép lại — nên câu hỏi rất hẹp: giữa lúc máy tách
-stem và lúc `amix`, có gì làm **một trong hai nhánh** dịch đi không?
+Báo cáo bằng tai: *"giọng hát sau beat gốc cỡ 0.5-1s"*. Mục này đọc nó là mode
+`song` — tách nhạc nền, đổi giọng, ghép lại — nên câu hỏi rất hẹp: giữa lúc máy
+tách stem và lúc `amix`, có gì làm **một trong hai nhánh** dịch đi không?
+
+*(Đoán sai mode. Hỏi lại thì là **Đổi beat + giọng**, và 17.1 tìm ra chỗ 0.5-1
+giây thật sự nằm. Mục này giữ nguyên vì hai lỗi nó tìm ra là thật và đã sửa —
+chỉ có kết luận "chưa giải thích được" là do hỏi muộn.)*
 
 Hai nhánh đó không đối xứng, và đó là toàn bộ chỗ để một lỗi lệch nhịp trốn:
 
@@ -3254,3 +3258,114 @@ trước, vì cùng một lý do: *kiểm được bằng mắt thay vì phải 
       không phải ở ngưỡng nghe ra ngay, nên đừng kỳ vọng nó giải quyết báo cáo
 - [ ] Nếu báo cáo thật ra là mode `beat`/`rebeat`: chỗ phải đo là
       `analysis.downbeat` trên bài đó, không phải mấy con số trong `mixing`
+
+
+## 17.1 — Vạch nhịp đấu với phách: chỗ nửa giây thật sự nằm
+
+Phase 17 đo hết mode `song` và tìm được 25 ms. Rồi hỏi một câu lẽ ra phải hỏi
+trước: **mode nào?** Trả lời: **Đổi beat + giọng** (`beat`), tức là nền nhạc bị
+thay hẳn và đặt lại theo vạch nhịp app đo được. Đó là một đường đi khác hẳn, và
+0.5-1 giây nằm ở đó.
+
+### Một dòng đọc hai nghĩa
+
+`analysis.Track.bar_start_sec` trả lời: *"vạch nhịp, hoặc phách đầu nếu chỉ
+biết đến thế"*. Với **một** bản nhạc đứng một mình thì đó là câu trả lời đúng,
+và docstring của nó đã lập luận đúng như vậy.
+
+`beats.plan_fit` đọc nó ở **cả hai bên**:
+
+```python
+loop_start = source.bar_start_sec   # cắt loop của beat từ đây
+align      = target.bar_start_sec   # đặt loop vào bài ở đây
+```
+
+Khi chỉ một bên dò ra vạch nhịp, hai dòng này **so một vạch nhịp với một
+phách** — hai thứ khác nhau. Khoảng cách giữa chúng là từ 0 tới ba phách, và nó
+đứng yên ở đó suốt cả bài.
+
+### Đo, không đoán
+
+Dựng hai bản trống tổng hợp **dùng chung một trục thời gian chính xác** (cùng
+BPM, cùng offset), khác nhau ở âm sắc và ở kiểu gõ — đúng quan hệ giữa bài gốc
+và bed mà máy sinh ra từ nó. Rồi chạy `analyse` trên cả hai và hỏi `plan_fit`
+nó định dịch bed đi bao nhiêu. Câu trả lời đúng luôn là **0**.
+
+| BPM | phách | lệch, luật cũ | lệch, luật mới |
+|---|---|---|---|
+| 72 | 833 ms | **−1663 ms** (2 phách) | ≈ 0 |
+| 84 | 714 ms | −1372 ms | ≤ 1 phách |
+| 96 | 625 ms | −1253 ms (2 phách) | ≈ 0 |
+| 108 | 556 ms | **−1667 ms** (3 phách) | ≈ 0 |
+| 120 | 500 ms | −1513 ms (3 phách) | ≈ 0 |
+
+Xấu nhất trong cả sweep: **1667 ms** với luật cũ, **656 ms** với luật mới. Và
+nhìn cột "phách" thì thấy ngay chuyện gì đang xảy ra: gần như mọi lần lệch đều
+là **một số nguyên phách**. Nhịp đập của bed vẫn nằm trên lưới, nhưng tiếng
+kick rơi vào phách 3 thay vì phách 1 — nghe ra thì đúng là "giọng đi sau beat
+nửa giây tới một giây", vì cái người nghe so là câu hát với vạch nhịp.
+
+Mọi ca trong bảng đều là ca **một bên có vạch nhịp, một bên không**. Khi cả hai
+cùng có hoặc cùng không, lệch còn vài chục mili-giây.
+
+### Luật mới: vạch nhịp đấu vạch nhịp, hoặc phách đấu phách
+
+```python
+aligned_to_bars = source.has_downbeat and target.has_downbeat
+loop_start = source.bar_start_sec if aligned_to_bars else source.beat_offset_sec
+align      = target.bar_start_sec if aligned_to_bars else target.beat_offset_sec
+```
+
+Một vạch nhịp chỉ được dùng khi **cả hai** bên có. Không thì cả hai cùng lùi về
+phách đầu, hai lưới khớp nhau phách-đối-phách, và cái còn lại chỉ là loop bắt
+đầu ở phách thứ mấy trong ô nhịp — sai về mặt âm nhạc, chứ không phải một giây
+trễ. Đó đúng là cái đánh đổi mà docstring của `bar_start_sec` đã lập luận cho,
+chỉ là trước giờ nó chưa được áp dụng cho **một cặp**.
+
+Đây không phải chỉnh một hằng số cho hợp tai. Luật cũ so hai đại lượng khác
+đơn vị nhau; luật mới thì không.
+
+### Còn lại một phách, và biết vì sao
+
+Sau khi sửa, sai số xấu nhất còn ~1 phách (656 ms ở 84 BPM), và đó là lúc một
+trong hai bên khoá lưới phách vào nhịp lệch. Nhịp đập vẫn đúng chỗ — cái xoay
+là *pha của ô nhịp*.
+
+Đường ra cho chuyện đó **không phải** đo kỹ hơn, mà là thôi đo: với
+`beat_source="derive"`, bed không phải nhạc của người lạ, nó do ACE-Step viết
+đè lên chính bài này (`audio2audio_enable=True`), nên trục thời gian của nó đã
+là trục của bài. Pha ô nhịp của nó cũng đã biết trước — nhánh `original` dùng
+thẳng nhạc nền của bài, nhánh `sketch` thì `sketch.render` **cố ý** đặt ô nhịp
+một ở giây 0 (docstring của nó nói thẳng điều đó). Biết trước bao giờ cũng hơn
+đo lại.
+
+Chưa làm, có chủ ý: nó chỉ đúng nếu ACE-Step giữ nguyên trục thời gian của init
+ở `init_strength` 0.35, và đó là câu hỏi phải nghe mới trả lời được. Một lượt
+deploy hiện tại đã đưa 1.67 s xuống ≤ 1 phách; câu hỏi tiếp theo nên hỏi sau
+khi nghe cái đó.
+
+### Bài học thành test
+
+`tests/test_beats.py`:
+
+- `test_one_side_with_a_bar_line_is_not_half_an_alignment` — beat có vạch nhịp
+  ở 0.6 s, bài không có. Không được phép đem 0.6 đặt lên *phách* 0.4 của bài;
+- `test_the_song_alone_having_a_bar_line_is_the_same_trade` — chiều ngược lại;
+- `test_two_bar_lines_still_beat_two_beats` — và fallback vẫn chỉ là fallback:
+  hai bên cùng có vạch nhịp thì dùng vạch nhịp, đúng cái mà bộ dò downbeat được
+  viết ra để làm.
+
+**764 passed, 3 skipped.**
+
+### Còn phải verify
+
+- [ ] **Chạy lại đúng bài đã báo lỗi, mode Đổi beat + giọng.** Dòng `[beat]`
+      trong log Modal in cả kế hoạch: `+N semitone(s), tempo xR, loop a-b s
+      onto c s (lý do…)`. Nếu lý do có câu *"both lined up on the beat
+      instead"* thì job này vừa đi qua đúng nhánh mà 17.1 sửa
+- [ ] Nếu vẫn lệch: so `c` (align) với chỗ vạch nhịp thật của bài. Lệch đúng
+      một phách nghĩa là phần "còn lại một phách" ở trên, và đường ra là
+      `derive` thì đừng đo lại bed nữa
+- [ ] Nếu lệch **tăng dần** trong bài thì không phải chuyện vạch nhịp mà là
+      `tempo x` khác 1.000 — sweep đo được tới +328 ms trên 3 phút, và
+      `analysis._fit_grid` đã viết sẵn rằng 0.3% là nửa giây

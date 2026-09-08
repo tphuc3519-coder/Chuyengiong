@@ -160,17 +160,26 @@ Xếp theo mức đáng nghi:
 2. **Vạch nhịp trên nhạc thật.** Mới chỉ gặp năm kiểu phối tổng hợp. Nghe xem
    kick của beat có rơi đúng nhịp bài không.
 
-   Mục này vừa lên hạng. Có một báo cáo *"giọng hát sau beat gốc cỡ 0.5-1s"*,
-   và Phase 17 đã đo hết đường đi của mode `song`: chỗ lệch lớn nhất tìm được
-   ở đó là 25 ms (đã sửa), không phải nửa giây. **Nửa giây tới một giây là một
-   tới hai phách ở 120 BPM** — và chỗ duy nhất trong repo có thể sinh ra đúng
-   cỡ đó là `analysis.downbeat` đoán sai một phách, rồi `plan_fit` /
-   `lay_under` đặt cả nền nhạc lệch đi đúng một phách. Tức là mode
-   `beat`/`rebeat`, không phải `song`.
+   Mục này vừa lên hạng, và đã tìm ra một nửa câu trả lời. Báo cáo *"giọng hát
+   sau beat gốc cỡ 0.5-1s"* là ở mode **Đổi beat + giọng**, và 17.1 đo được
+   nguyên nhân: `plan_fit` đọc `bar_start_sec` ở cả hai bên, mà dòng đó trả về
+   *vạch nhịp hoặc phách* tuỳ bên nào dò được — nên khi chỉ một bên có vạch
+   nhịp, nó so vạch nhịp với phách. Đo trên trống tổng hợp dùng chung một trục
+   thời gian: lệch tới **1667 ms**, gần như luôn là một số nguyên phách.
 
-   Chưa biết báo cáo đó là mode nào. Nếu là `beat`/`rebeat` thì việc phải làm
-   là đo `analysis.downbeat` trên đúng bài đó, chứ không phải chỉnh thêm con số
-   nào trong `mixing`.
+   Đã sửa: vạch nhịp chỉ dùng khi **cả hai** bên có, không thì cả hai lùi về
+   phách đầu. Sweep còn xấu nhất 656 ms (~1 phách).
+
+   **Việc còn lại là nghe.** Chạy lại đúng bài đó và đọc dòng `[beat]` trong
+   log — nó in cả kế hoạch (`tempo x…`, `loop … onto …s`, kèm lý do). Ba khả
+   năng, ba hướng khác nhau:
+
+   - lý do có *"both lined up on the beat instead"* và giờ nghe đúng → xong;
+   - còn lệch đúng một phách → thôi đo lại bed: với `beat_source="derive"` bed
+     do ACE-Step viết đè lên chính bài này nên trục thời gian đã biết trước
+     (xem 17.1, mục "Còn lại một phách");
+   - lệch **tăng dần** trong bài → không phải vạch nhịp mà là `tempo x` khác
+     1.000.
 3. **Hốc giọng 2.2–2.8 kHz** — đúng chỗ cho tiếng Việt chưa, hay còn thấp.
 4. **Bed vào từ giây 0** — nghe tự nhiên hay cụt đầu ô nhịp.
 5. **Cắt 30 Hz trên beat upload** — có ai thấy mất lực không.
